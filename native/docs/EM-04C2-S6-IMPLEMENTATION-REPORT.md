@@ -1,5 +1,8 @@
 # EM-04C2 S6 — Active Muse v1 integration: implementation report
 
+> **Superseded identity (S9.5, commit `b3244c0`):** the adaptive engine described here as `muse-v1` is now **`nexus-adaptive-v1`** (mode `engineering-v2-adaptive` is unchanged). The old id is not an alias anywhere. This document is kept as written; see `EM-04C2-S95-IDENTITY-MIGRATION.md`.
+
+
 Baseline `34d84756c5390ac147180a45896e2d6bf8c8f1c6` (S5, committed). Worktree
 `~/Projects/Nexus-muse-v1-integration`, branch `feature/native-muse-v1-integration`. **Uncommitted.**
 Companions: `EM-04C2-S6-AUTHORIZATION-AND-RECOVERY.md`, `EM-04C2-S6-POLICY-V2-VALIDATION.md`,

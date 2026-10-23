@@ -1,5 +1,8 @@
 # EM-04C2 S9 — Automated production gates: design and results
 
+> **Superseded identity (S9.5, commit `b3244c0`):** the adaptive engine described here as `muse-v1` is now **`nexus-adaptive-v1`** (mode `engineering-v2-adaptive` is unchanged). The old id is not an alias anywhere. This document is kept as written; see `EM-04C2-S95-IDENTITY-MIGRATION.md`.
+
+
 Baseline `0eabd202aec8239133675e8997bd85dd73eef807`. Uncommitted. No live provider, no credentials, no
 network, no downloads. The accepted worker threat model is **a single-user trusted Governor worker confined
 by Node's permission mode — defence in depth, not an OS sandbox**. Nothing below claims OS confinement.

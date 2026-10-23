@@ -596,4 +596,133 @@ check('snapshot completeness is judged by REQUIRED legacy modes, not by a count 
   })
 }
 
+// ---- EM-04C2 S9.5: the FORMER adaptive engine identity (muse-v1) never re-enters the Registry ----
+{
+  const resolver95 = require('../config/registry/resolver.cjs')
+  const FORMER = 'muse-v1'
+  const CURRENT = 'nexus-adaptive-v1'
+  const NEAR = [FORMER, FORMER + ' ', ' ' + FORMER, FORMER.toUpperCase(), 'Muse-V1', 'muse-v1-shadow', 'muse-v1-signals', 'muse-v11', 'muse_v1', 'nexus-adaptive-v2', 'nexus-adaptive-v1 ', ' nexus-adaptive-v1', 'NEXUS-ADAPTIVE-V1', 'nexus_adaptive_v1', 'nexus-adaptive-v1\n', 'nexus-adaptive', 'nexus-adaptive-v1/../muse-v0', '', '__proto__', 'constructor', 'effort-test-v0']
+  const model95 = { id: 'm', dataUseTier: 'standard', capabilities: { toolCalling: true, reasoning: true } }
+  const route95 = { id: 'r', executionKind: 'raw-model', compatibility: { transport: 'openai-responses' } }
+
+  check('S9.5: the current identity is the adaptive scope\'s only engine; the former id and every near miss resolve nowhere', () => {
+    const adaptive = issuer.scopeOf('engineering-v2-adaptive')
+    const dflt = issuer.scopeOf('engineering-v2')
+    assert.equal(adaptive.engineId, CURRENT)
+    assert.deepEqual([...adaptive.experimentalEngineIds], [])
+    assert.equal(issuer.engineAllowed(adaptive, CURRENT), true)
+    assert.equal(issuer.engineAllowed(dflt, CURRENT), false, 'the adaptive engine is never issuable under the default mode')
+    for (const id of NEAR.concat([null, undefined, 7, {}, []])) {
+      if (id === CURRENT) continue
+      assert.equal(issuer.engineAllowed(adaptive, id), false, 'adaptive scope: ' + JSON.stringify(id))
+      if (!['effort-test-v0', 'muse-v1-shadow', 'muse-v1-signals'].includes(id)) assert.equal(issuer.engineAllowed(dflt, id), false, 'default scope: ' + JSON.stringify(id))
+    }
+    // no scope, in any mode, names the former id
+    for (const mode of ['engineering-v2', 'engineering-v2-adaptive']) {
+      const sc = issuer.scopeOf(mode)
+      assert.notEqual(sc.engineId, FORMER)
+      assert.ok(!sc.experimentalEngineIds.includes(FORMER))
+    }
+    assert.equal(issuer.scopeOf(FORMER), null)
+  })
+
+  check('S9.5: only the current adaptive contract exists; the former contract id and near misses are unknown contracts and are refused', () => {
+    assert.deepEqual(Object.keys(resolver95.ADAPTIVE_CONTRACTS).sort(), ['muse-v0', CURRENT])
+    for (const bad of NEAR.filter((x) => x !== CURRENT && x !== '')) {
+      const e = resolver95.checkAdaptiveContract(bad, {}, 'muse_main', model95, route95, {})
+      assert.deepEqual(e.map((x) => x.code), ['slot-capability-not-satisfied'], JSON.stringify(bad))
+      assert.match(e[0].message, /unknown adaptiveReasoningContract/)
+    }
+  })
+
+  check('S9.5: no shipped Registry definition or code names the former identity', () => {
+    const rx = /(?<![\w-])muse-v1(?![-\w])/
+    for (const f of ['modes/engineering-v1.json', 'modes/engineering-v2.json', 'modes/engineering-v2-adaptive.json', 'modes/engineering-v3.json', 'native-issuer.cjs', 'resolver.cjs', 'legacy-import.cjs', 'service.cjs', 'schemas.cjs']) {
+      const text = fs.readFileSync(path.join(repoRoot, 'config', 'registry', f), 'utf8')
+      const hits = text.split('\n').filter((l) => rx.test(l) && !/(former|previous|old)/i.test(l) && !/^\s*(\/\/|\*|\/\*)/.test(l))
+      assert.deepEqual(hits, [], f)
+    }
+    const adaptive = readMode('engineering-v2-adaptive.json')
+    assert.equal(adaptive.orchestrationEngineId, CURRENT)
+    assert.equal(adaptive.slots[0].requirements.adaptiveReasoningContract, CURRENT)
+    assert.equal(readMode('engineering-v2.json').orchestrationEngineId, 'muse-v0')
+  })
+
+  check('S9.5: legacy import cannot resurrect the former identity; a stale definition is ignored, never listed or imported', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'registry-former-id-'))
+    try {
+      const build = (mutate) => {
+        const root = path.join(tmp, 'inst' + Math.random().toString(16).slice(2))
+        const cfg = path.join(root, 'config')
+        fs.mkdirSync(cfg, { recursive: true })
+        fs.cpSync(path.join(repoRoot, 'config', 'registry'), path.join(cfg, 'registry'), { recursive: true })
+        for (const f of ['model-registry.json', 'engineering-profiles.json', 'muse-profiles.json']) fs.copyFileSync(path.join(repoRoot, 'config', f), path.join(cfg, f))
+        const file = path.join(cfg, 'registry', 'modes', 'engineering-v2-adaptive.json')
+        if (mutate) {
+          const doc = JSON.parse(fs.readFileSync(file, 'utf8'))
+          mutate(doc)
+          fs.writeFileSync(file, JSON.stringify(doc, null, 2))
+        }
+        const li = require(path.join(cfg, 'registry', 'legacy-import.cjs'))
+        const { snapshot, errors } = li.buildRegistrySnapshot(root)
+        return { ids: snapshot.modes.map((m) => m.id).sort(), errors, li, doc: JSON.parse(fs.readFileSync(file, 'utf8')) }
+      }
+      const withIds = ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v3']
+      const current = build(null)
+      assert.deepEqual(current.ids, withIds)
+      assert.deepEqual(current.errors, [])
+      // the stale definition of the previous release (former engine and contract): absent, legacy modes intact
+      const stale = build((d) => { d.orchestrationEngineId = FORMER; d.slots[0].requirements.adaptiveReasoningContract = FORMER })
+      assert.deepEqual(stale.ids, ['engineering-v1', 'engineering-v2', 'engineering-v3'])
+      assert.deepEqual(stale.errors, [], 'the optional definition being absent is not an error')
+      assert.equal(stale.li.isOptionalModeDefinition(stale.doc), false)
+      // each near-miss engine id on that file is equally absent
+      for (const id of NEAR.filter((x) => x !== CURRENT)) {
+        const r = build((d) => { d.orchestrationEngineId = id })
+        assert.deepEqual(r.ids, ['engineering-v1', 'engineering-v2', 'engineering-v3'], JSON.stringify(id))
+      }
+      // the former id cannot be smuggled in through the other (required) definitions either
+      const dflt = build(null)
+      assert.equal(dflt.li.isOptionalModeDefinition(readMode('engineering-v2.json')), false)
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  check('S9.5: a model scoped only to the former engine id does not qualify for the adaptive mode (explicit operator update required)', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'registry-former-scope-'))
+    try {
+      const root = path.join(tmp, 'inst')
+      const cfg = path.join(root, 'config')
+      fs.mkdirSync(cfg, { recursive: true })
+      fs.cpSync(path.join(repoRoot, 'config', 'registry'), path.join(cfg, 'registry'), { recursive: true })
+      for (const f of ['model-registry.json', 'engineering-profiles.json', 'muse-profiles.json']) fs.copyFileSync(path.join(repoRoot, 'config', f), path.join(cfg, f))
+      const svc = require(path.join(cfg, 'registry', 'service.cjs')).createService({ installRoot: root, dataRoot: path.join(tmp, 'data') })
+      const snap = JSON.parse(JSON.stringify(svc.effectiveSnapshot().snapshot))
+      Object.assign(snap.modes.find((x) => x.id === 'engineering-v2-adaptive'), { status: 'active', selectable: true, runnable: true })
+      const compile = (engines) => {
+        for (const m of snap.models) m.engines = engines
+        const config = { schemaVersion: 1, modeId: 'engineering-v2-adaptive', revision: 0, slots: { main: { logicalModelId: 'meta/muse-spark-1.3-contributor', routeId: 'opencode-go/meta/muse-spark-1.3-contributor', reasoning: 'low', allowedReasoning: ['low', 'medium', 'high', 'xhigh'] } }, roleOverrides: {} }
+        return resolver95.compileModeConfig(config, snap, null)
+      }
+      const former = compile([FORMER])
+      assert.equal(former.ok, false)
+      assert.ok((former.errors || []).some((e) => e.code === 'engine-scope-mismatch'), JSON.stringify(former.errors))
+      assert.equal(compile([FORMER, 'muse-v0']).ok, false)
+      assert.equal(compile([CURRENT]).ok, true, 'scoping to the current identity (the operator update) qualifies')
+      // a mode slot that REQUIRES the former contract id is refused by the real compile, even for a fully scoped model
+      const mode = snap.modes.find((x) => x.id === 'engineering-v2-adaptive')
+      const saved = mode.slots[0].requirements.adaptiveReasoningContract
+      mode.slots[0].requirements.adaptiveReasoningContract = FORMER
+      const oldContract = compile([CURRENT])
+      assert.equal(oldContract.ok, false)
+      assert.ok(/unknown adaptiveReasoningContract/.test(JSON.stringify(oldContract.errors)), JSON.stringify(oldContract.errors))
+      mode.slots[0].requirements.adaptiveReasoningContract = saved
+      assert.equal(compile([CURRENT]).ok, true)
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+}
+
 console.log('SUITE RESULT: PASS ' + passed + ' | FAIL 0 | total ' + passed)

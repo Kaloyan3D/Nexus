@@ -120,6 +120,8 @@ section('registry-js', () => {
 const ENGINE_FILTERS = {
   'engine::catalog_tests': 5,
   'engine::tests::the_registry_selected_mode': 1,
+  'engine::tests::the_adaptive_identity_resolves': 1, // S9.5: former id and near misses resolve nowhere
+  'attempt_target::identity_tests': 5, // S9.5: sealed digest pins before/after the rename
   'engine::muse_v1_active_tests': 24,
   'engine::effort_limiter': 39,
   'engine::muse_v1_tests': 11,
@@ -151,6 +153,7 @@ const E2E_FILTERS = {
   s6_: 7, // active engine, durable selections, crash recovery
   s7_: 6, // sealed adaptive budget: A614 with the real engine, tighten-only, compaction, forged budgets
   s8_: 4, // recovery/stress matrix
+  s95_: 3, // former-identity predecessor refusals (S9.5)
   s10_: 5, // SEC-1 continuation integrity, SEC-3 budget bound
   a56_crash_after_: 2, // crash injection: needs the feature-unified workspace build
   em04c1_muse_v0_requests_are_byte_identical: 1,

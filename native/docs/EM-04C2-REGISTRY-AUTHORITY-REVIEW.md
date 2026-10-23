@@ -1,5 +1,8 @@
 # EM-04C2 Checkpoint 1 — Registry authority review (S3, S4)
 
+> **Superseded identity (S9.5, commit `b3244c0`):** the adaptive engine described here as `muse-v1` is now **`nexus-adaptive-v1`** (mode `engineering-v2-adaptive` is unchanged). The old id is not an alias anywhere. This document is kept as written; see `EM-04C2-S95-IDENTITY-MIGRATION.md`.
+
+
 Branch `feature/native-muse-adaptive-foundations`, baseline `50a24d791cdb3c1a4b00eb15b24843c4b45d9798`.
 Uncommitted. Companion documents: `EM-04C2-CHECKPOINT-1-REPORT.md`,
 `EM-04C2-WORKER-SECURITY-RESULTS.md`; governing plan `EM-04C2-ACTIVATION-PLAN.md`.

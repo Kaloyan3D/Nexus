@@ -1273,3 +1273,64 @@ mod v2 {
         assert!(!pv.contains("edit src/lib.rs") && pv.contains("narrationDigests"));
     }
 }
+
+/// S9.5: exactly one (mode, engine) pair resolves the current adaptive identity (in this test build,
+/// where the compile-time production gate is bypassed by `test-engines`); the former id and near
+/// misses resolve under no mode at all.
+#[test]
+fn the_adaptive_identity_resolves_in_one_pair_and_nothing_resembling_it_resolves_anywhere() {
+    let modes = [
+        "engineering-v1",
+        "engineering-v2",
+        "engineering-v2-adaptive",
+        "engineering-v3",
+        "engineering-v2-adaptive ",
+        "ENGINEERING-V2-ADAPTIVE",
+        "",
+    ];
+    let current = "nexus-adaptive-v1";
+    let near = [
+        "muse-v1",
+        "MUSE-V1",
+        "muse-v1 ",
+        " muse-v1",
+        "muse_v1",
+        "muse-v11",
+        "nexus-adaptive-v1 ",
+        " nexus-adaptive-v1",
+        "NEXUS-ADAPTIVE-V1",
+        "nexus_adaptive_v1",
+        "nexus-adaptive-v2",
+        "nexus-adaptive",
+        "nexus-adaptive-v1\n",
+        "nexus-adaptive-v1\0",
+        "nexus-adaptive-v1/../muse-v0",
+        "../nexus-adaptive-v1",
+        "",
+    ];
+    let mut ok = Vec::new();
+    for m in modes {
+        for e in near.iter().copied().chain([current]) {
+            if resolve(m, e).is_ok() {
+                ok.push((m, e));
+            }
+        }
+    }
+    assert_eq!(ok, [("engineering-v2-adaptive", current)], "{ok:?}");
+    for m in modes {
+        for e in &near {
+            let err = resolve(m, e).err().unwrap();
+            assert_eq!(err.code, "engine-unavailable", "{m:?} {e:?}");
+            assert!(err.message.contains("nothing was sent"));
+        }
+    }
+    // a production-shaped registry (no test engines, gate closed) has neither identity
+    for id in ["muse-v1", current] {
+        assert!(
+            !engines(false)
+                .iter()
+                .any(|x| x.descriptor().engine_id == id),
+            "{id}"
+        );
+    }
+}

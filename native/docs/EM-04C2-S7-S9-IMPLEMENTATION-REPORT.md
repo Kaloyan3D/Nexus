@@ -1,5 +1,8 @@
 # EM-04C2 S7–S9 — Release readiness: implementation report
 
+> **Superseded identity (S9.5, commit `b3244c0`):** the adaptive engine described here as `muse-v1` is now **`nexus-adaptive-v1`** (mode `engineering-v2-adaptive` is unchanged). The old id is not an alias anywhere. This document is kept as written; see `EM-04C2-S95-IDENTITY-MIGRATION.md`.
+
+
 Baseline `0eabd202aec8239133675e8997bd85dd73eef807` (S6, committed). Worktree
 `~/Projects/Nexus-muse-release-readiness`, branch `feature/native-muse-release-readiness`. **Uncommitted.**
 Companions: `EM-04C2-RECOVERY-AND-STRESS-MATRIX.md`, `EM-04C2-PRODUCTION-GATE-RESULTS.md`,

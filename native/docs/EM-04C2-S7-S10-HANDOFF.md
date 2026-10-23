@@ -1,5 +1,8 @@
 # EM-04C2 S7–S10 handoff
 
+> **Superseded identity (S9.5, commit `b3244c0`):** the adaptive engine described here as `muse-v1` is now **`nexus-adaptive-v1`** (mode `engineering-v2-adaptive` is unchanged). The old id is not an alias anywhere. This document is kept as written; see `EM-04C2-S95-IDENTITY-MIGRATION.md`.
+
+
 Baseline for this handoff: S6 (uncommitted at the time of writing; commit it first). Read with
 `EM-04C2-ACTIVATION-PLAN.md` (original S7–S10), `EM-04C2-S6-IMPLEMENTATION-REPORT.md` and
 `EM-04C2-S6-AUTHORIZATION-AND-RECOVERY.md`. Where this file and the plan disagree, this file reflects what

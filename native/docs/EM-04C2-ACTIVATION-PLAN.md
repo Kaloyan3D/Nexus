@@ -1,5 +1,8 @@
 # EM-04C2 — Activation plan (verified path, gaps, sequencing, validation)
 
+> **Superseded identity (S9.5, commit `b3244c0`):** the adaptive engine described here as `muse-v1` is now **`nexus-adaptive-v1`** (mode `engineering-v2-adaptive` is unchanged). The old id is not an alias anywhere. This document is kept as written; see `EM-04C2-S95-IDENTITY-MIGRATION.md`.
+
+
 Baseline `50a24d791cdb3c1a4b00eb15b24843c4b45d9798`. Read-only review; no implementation file was
 changed. Companions: `EM-04C2-SECURITY-REVIEW.md`, `EM-04C2-ANTI-THRASH-POLICY.md`.
 `file:line` references are to the baseline tree.

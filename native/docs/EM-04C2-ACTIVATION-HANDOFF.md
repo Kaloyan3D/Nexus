@@ -1,5 +1,8 @@
 # EM-04C2 — Activation handoff (from EM-04C1)
 
+> **Superseded identity (S9.5, commit `b3244c0`):** the adaptive engine described here as `muse-v1` is now **`nexus-adaptive-v1`** (mode `engineering-v2-adaptive` is unchanged). The old id is not an alias anywhere. This document is kept as written; see `EM-04C2-S95-IDENTITY-MIGRATION.md`.
+
+
 Starting point: EM-04C1 (uncommitted at `49026e8` + the C1 diff). Nothing here is implemented.
 EM-04C2 must not start automatically; it needs the C1 review first. This document replaces
 `EM-04C-ACTIVATION-HANDOFF.md` §3 items 1–2 (done) and keeps the rest.

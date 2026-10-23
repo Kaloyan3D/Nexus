@@ -572,4 +572,87 @@ mod identity_tests {
         assert!(!identity_matches(&id0, Some(1), &binding(None, None)));
         assert!(!identity_matches(&id0, Some(3), &binding(None, None)));
     }
+
+    /// S9.5: representative sealed digests, computed by the SAME code before (`cb2edbc`, with the
+    /// engine id `muse-v1`) and after (`nexus-adaptive-v1`) the identity rename. The digest code is
+    /// engine-id-agnostic, so the rename changes exactly the digests whose input names the adaptive
+    /// engine, and none of the `muse-v0` ones.
+    fn adaptive_binding(engine: &str) -> TaskBindingV1 {
+        let mut b = binding(Some(&["low", "medium", "high", "xhigh"]), Some(440_000));
+        b.target["modeId"] = "engineering-v2-adaptive".into();
+        b.target["orchestrationEngineId"] = engine.into();
+        b
+    }
+
+    fn digests(b: &TaskBindingV1) -> [String; 3] {
+        [
+            identity_digest(b),
+            identity_digest_v1(b),
+            b.binding_digest(),
+        ]
+    }
+
+    #[test]
+    fn the_rename_changes_exactly_the_digests_that_name_the_adaptive_engine() {
+        let strs = |a: [&str; 3]| a.map(str::to_owned);
+        // muse-v0: identical before and after (default mode, and with a policy + budget)
+        assert_eq!(
+            digests(&binding(None, None)),
+            strs([
+                "b367efc6807d64e4f2aa532ac1423e3704a573d9c9d8bc48314f765643b7a07d",
+                "b367efc6807d64e4f2aa532ac1423e3704a573d9c9d8bc48314f765643b7a07d",
+                "5c273dd36d55cacedeaf0c3d42c889b57b497ea4d5b821c8feffaa3551d0b6c7",
+            ])
+        );
+        let mut v0 = binding(Some(&["low", "medium", "high", "xhigh"]), Some(440_000));
+        v0.target["modeId"] = "engineering-v2".into();
+        assert_eq!(
+            digests(&v0),
+            strs([
+                "90aeabe84f167eb03160d283ab0bbcbd2812b7e0909309f2856b410c7d355dd6",
+                "4f7d6e8250706cefd481d7561fe0cb6c44a68bbd46ed5e6d27055dfaf3133537",
+                "a562a159f669e29e58505c46728808e062ef483435ec3fd05d4d089cac0404f6",
+            ])
+        );
+        // the adaptive engine: pinned before (old id) and after (new id)
+        let old = adaptive_binding("muse-v1");
+        let new = adaptive_binding("nexus-adaptive-v1");
+        assert_eq!(
+            digests(&old),
+            strs([
+                "09c9dfd1b9b1f1731b66c01e48832188b022a6a228c9a15c0721cedbadb62216",
+                "483cf1c714086ce46125c7941aaaceadd9629f812dc64351910de6af95bcd70d",
+                "ad8e8d9524ca65ef229f01a44fbde5e34e1896626a441fde04e5af77779b370a",
+            ])
+        );
+        assert_eq!(
+            digests(&new),
+            strs([
+                "426db16e3285bd424d2b7ce3431c55345feb7c0f30df8e541433d16b8c01c430",
+                "424d2b5364d84e6eed294c11a729965955d1a0dd16c42c60c5eb05b38af0c0e5",
+                "61b45a036d7ef6969109068127daf2c51be2603b19427a6038efe9d5bcfc3451",
+            ])
+        );
+        // every identity-dependent digest changes
+        for (o, n) in digests(&old).iter().zip(digests(&new).iter()) {
+            assert_ne!(o, n);
+        }
+        // a run recorded under the old identity can never be continued under the new binding
+        assert!(!identity_matches(
+            &identity_digest(&old),
+            Some(IDENTITY_VERSION),
+            &new
+        ));
+        assert!(identity_matches(
+            &identity_digest(&new),
+            Some(IDENTITY_VERSION),
+            &new
+        ));
+        // ... and not through the legacy (no-version) path either
+        assert!(!identity_matches(&identity_digest_v1(&old), None, &new));
+        // the engine id is the ONLY difference between the two bindings
+        let mut renamed = old.clone();
+        renamed.target["orchestrationEngineId"] = "nexus-adaptive-v1".into();
+        assert_eq!(digests(&renamed), digests(&new));
+    }
 }

@@ -1,5 +1,8 @@
 # EM-04C — Activation handoff: from shadow signals to Governor-controlled reasoning
 
+> **Superseded identity (S9.5, commit `b3244c0`):** the adaptive engine described here as `muse-v1` is now **`nexus-adaptive-v1`** (mode `engineering-v2-adaptive` is unchanged). The old id is not an alias anywhere. This document is kept as written; see `EM-04C2-S95-IDENTITY-MIGRATION.md`.
+
+
 Starting point: EM-04B. Under the test-only engine `muse-v1-signals`:
 - the model reports validated reasoning signals;
 - they are durable and replay-safe;

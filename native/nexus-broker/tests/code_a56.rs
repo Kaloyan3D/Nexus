@@ -14972,3 +14972,138 @@ fn s10_a_run_record_that_cannot_prove_it_dispatched_nothing_is_refused() {
     }
     b.shutdown();
 }
+
+// ===================================================================================================
+// EM-04C2 S9.5 hardening: the FORMER adaptive engine identity (`muse-v1`) never re-enters.
+// The "key" used to re-sign records is the throwaway key the test broker generated in its own
+// temporary state directory; no production secret is involved.
+// ===================================================================================================
+
+fn s95_engine_files(fx: &Fx, name: &str) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(fx.config(name).state_dir.join("engine"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn s95_an_authenticated_state_record_with_the_former_identity_is_refused_with_no_side_effects() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s6_fixture(s6_claims(), Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "s95-state", None, None);
+    let sock = b.socket_path().to_owned();
+    let store =
+        nexus_broker::engine_state::EngineStateStore::open(&fx.config("s95-state").state_dir)
+            .unwrap();
+    let run = s10_crashed(&sock, "s95-state-000000001", "after-bind");
+    let task = run.task_instance_id.clone().unwrap();
+    let mut rec = store.load(&task).unwrap().expect("authentic state");
+    assert_eq!(rec.engine_id, "nexus-adaptive-v1");
+    rec.engine_id = "muse-v1".into();
+    store.commit(&mut rec).unwrap();
+    let forged = store
+        .load(&task)
+        .unwrap()
+        .expect("authentic under the harness key");
+    assert_eq!(forged.engine_id, "muse-v1");
+    let files_before = s95_engine_files(&fx, "s95-state");
+    let at = fx.provider.bodies.lock().unwrap().len();
+    let r = s10_resume(&sock, &run.run_id);
+    s10_refused(&r, at, &fx, "engine-state-identity");
+    let refused = r.expect("a terminal answer");
+    assert_eq!(refused.state, "rejected");
+    // nothing was created and nothing of the old record changed: no new state, no new budget
+    assert_eq!(
+        s95_engine_files(&fx, "s95-state"),
+        files_before,
+        "no engine state was created"
+    );
+    let after = store.load(&task).unwrap().unwrap();
+    assert_eq!(
+        after.revision, forged.revision,
+        "the old record was not advanced"
+    );
+    assert_eq!(after.engine_id, "muse-v1");
+    b.shutdown();
+}
+
+#[test]
+fn s95_a_run_record_with_the_former_identity_is_refused_even_when_its_state_is_authentic() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s6_fixture(s6_claims(), Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "s95-run", None, None);
+    let sock = b.socket_path().to_owned();
+    let store = nexus_broker::engine_state::EngineStateStore::open(&fx.config("s95-run").state_dir)
+        .unwrap();
+    let run = s10_crashed(&sock, "s95-run-0000000001", "after-bind");
+    let task = run.task_instance_id.clone().unwrap();
+    let mut rec = store.load(&task).unwrap().unwrap();
+    rec.engine_id = "muse-v1".into();
+    store.commit(&mut rec).unwrap();
+    let path = fx
+        .config("s95-run")
+        .state_dir
+        .join("runs")
+        .join(format!("{}.json", run.run_id));
+    let mut r: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(r["engineId"], json!("nexus-adaptive-v1"));
+    r["engineId"] = json!("muse-v1");
+    std::fs::write(&path, serde_json::to_vec(&r).unwrap()).unwrap();
+    let files_before = s95_engine_files(&fx, "s95-run");
+    let at = fx.provider.bodies.lock().unwrap().len();
+    s10_refused(
+        &s10_resume(&sock, &run.run_id),
+        at,
+        &fx,
+        "engine-continuity-mismatch",
+    );
+    assert_eq!(
+        s95_engine_files(&fx, "s95-run"),
+        files_before,
+        "no engine state was created"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn s95_repeated_continuation_cannot_launder_the_former_identity() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s6_fixture(s6_claims(), Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "s95-chain", None, None);
+    let sock = b.socket_path().to_owned();
+    let store =
+        nexus_broker::engine_state::EngineStateStore::open(&fx.config("s95-chain").state_dir)
+            .unwrap();
+    let run = s10_crashed(&sock, "s95-chain-000000001", "after-bind");
+    let task = run.task_instance_id.clone().unwrap();
+    let mut rec = store.load(&task).unwrap().unwrap();
+    rec.engine_id = "muse-v1".into();
+    store.commit(&mut rec).unwrap();
+    let files_before = s95_engine_files(&fx, "s95-chain");
+    let at = fx.provider.bodies.lock().unwrap().len();
+    // every generation of the chain (original -> refused -> refused -> refused) stays refused
+    let mut current = run.run_id.clone();
+    for generation in 1..=3 {
+        let r = s10_resume(&sock, &current);
+        s10_refused(&r, at, &fx, "engine-state-identity");
+        let refused = r.expect("a terminal answer");
+        assert_eq!(refused.state, "rejected", "generation {generation}");
+        assert_eq!(refused.turn, 0, "generation {generation}");
+        current = refused.run_id.clone();
+    }
+    assert_eq!(
+        s95_engine_files(&fx, "s95-chain"),
+        files_before,
+        "no state, no budget, anywhere"
+    );
+    b.shutdown();
+}
