@@ -12,8 +12,9 @@
 //!   `may_propose_effort: false` (the host would refuse a change anyway), and the provider request
 //!   carries the pinned effort.
 //!
-//! It is not selectable in production (`MUSE_V1_PRODUCTION_ENABLED = false`): only `test-engines`
-//! builds register it, and only a fixture Registry mode can issue it.
+//! (This paragraph describes the EXPERIMENTAL shadow/signals engines, which stay test-only: only
+//! `test-engines` builds register them, and only a fixture Registry mode can issue them. The active
+//! `nexus-adaptive-v1` engine is registered in production since S10-A.)
 //!
 //! State ownership: the historical `museReasoning` / `museActivity` blocks live in this engine's
 //! payload (`<state>/engine/<task>.json`, HMAC-authenticated, revisioned), never in a DSH
@@ -108,8 +109,8 @@ pub static MUSE_V1_SIGNALS: MuseV1 = MuseV1 {
 /// EM-04C2 S6: the ACTIVE adaptive engine. Same strategy, Governor and signals tool as the
 /// experimental engines, but its limiter-approved effort proposals ARE applied (through the host's
 /// admission, the Registry's attempt issuance and the Kernel's seal). Runs only in mode
-/// `engineering-v2-adaptive`; registered in production builds only when
-/// `MUSE_V1_PRODUCTION_ENABLED` is opened (S10); refuses to dispatch without a Registry-sealed
+/// `engineering-v2-adaptive`; registered in production builds because `MUSE_V1_PRODUCTION_ENABLED`
+/// was opened in S10-A (opt-in beta); refuses to dispatch without a Registry-sealed
 /// request-size budget.
 pub static MUSE_V1_ACTIVE: MuseV1 = MuseV1 {
     descriptor: EngineDescriptor {

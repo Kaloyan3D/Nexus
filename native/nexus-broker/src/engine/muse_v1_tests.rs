@@ -88,12 +88,16 @@ fn last(h: &EngineHost) -> ShadowDecision {
 
 #[test]
 fn the_shadow_engine_is_not_selectable_in_a_production_build() {
-    const { assert!(!MUSE_V1_PRODUCTION_ENABLED) };
+    const { assert!(MUSE_V1_PRODUCTION_ENABLED) };
     let prod: Vec<&str> = engines(false)
         .iter()
         .map(|e| e.descriptor().engine_id)
         .collect();
-    assert_eq!(prod, ["muse-v0"], "production builds have muse-v0 only");
+    assert_eq!(
+        prod,
+        ["muse-v0", "nexus-adaptive-v1"],
+        "production builds register the default engine and the opt-in adaptive engine, never an experimental one"
+    );
     assert!(engines(true)
         .iter()
         .any(|e| e.descriptor().engine_id == ENGINE_ID));

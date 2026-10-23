@@ -498,6 +498,8 @@ fn cmd_model(args: &[String], cfg: &ClientConfig) -> ExitCode {
 const INTENT_HELP: &str = "nexus intent <submit|status|result|follow|cancel|list|models|workspaces|code-sources|diff> [--json]\n\
   submit  (--input FILE|- | --intent FILE|-) [--model provider/model] [--idempotency-key K]\n\
           [--request-id R] [--max-output-tokens N] [--follow | --wait]\n\
+          [--engineering-mode ID]   repo-code only, with --model: e.g. engineering-v2-adaptive (opt-in beta; needs an\n\
+                                    operator-saved ModeConfiguration; absent = the default engineering-v2)\n\
           [--type model-only|repo-inspect|repo-code]   repo-inspect = read-only agentic inspection (A5.5);\n\
           repo-code = controlled coding in an ISOLATED COPY (A5.6): every edit and command needs an\n\
           independent approval (nexus-approver); nothing is committed, pushed or merged.\n\
@@ -809,10 +811,17 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
                             remote_model_id: r.to_owned(),
                             logical_model_id: l,
                             route_id: route,
-                            mode_id: None,
+                            // S10-A: an Engineering Mode is chosen only by this explicit flag; absent,
+                            // the broker applies the default (`engineering-v2` -> muse-v0)
+                            mode_id: flag_value(args, "--engineering-mode"),
                         })
                     })
                     .transpose()?;
+                if flag_value(args, "--engineering-mode").is_some() && model.is_none() {
+                    return Err(nexus_client::ClientError::usage(
+                        "--engineering-mode needs --model provider/model (and --type repo-code): the mode is part of the explicit selection",
+                    ));
+                }
                 let max_out = flag_value(args, "--max-output-tokens")
                     .map(|v| v.parse::<u64>().map_err(|_| nexus_client::ClientError::usage("--max-output-tokens must be an integer")))
                     .transpose()?;

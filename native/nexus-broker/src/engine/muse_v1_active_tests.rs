@@ -298,10 +298,13 @@ fn the_production_gate_registers_only_muse_v1_and_only_when_opened() {
             .map(|e| e.descriptor().engine_id)
             .collect()
     };
-    // today's production build
-    assert_eq!(ids(false, MUSE_V1_PRODUCTION_ENABLED), ["muse-v0"]);
+    // the production build since S10-A: exactly these two, never an experimental engine
+    assert_eq!(
+        ids(false, MUSE_V1_PRODUCTION_ENABLED),
+        ["muse-v0", "nexus-adaptive-v1"]
+    );
+    // with the gate closed (the rollback state) only the default engine remains
     assert_eq!(ids(false, false), ["muse-v0"]);
-    // the day the gate is opened (S10): the ACTIVE engine only, never an experimental one
     assert_eq!(ids(false, true), ["muse-v0", "nexus-adaptive-v1"]);
     // test builds also carry the experimental engines
     let t = ids(true, false);

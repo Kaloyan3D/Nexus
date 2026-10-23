@@ -45,15 +45,16 @@ function closure(root) {
   for (const f of files(source)) assert.deepEqual(fs.readFileSync(path.join(dest, f)), fs.readFileSync(path.join(source, f)))
   const svc = require(path.join(dest, 'service.cjs')).createService({ installRoot: root, dataRoot: path.join(root, 'data') })
   assert.deepEqual(svc.listModes().errors, [])
-  // the three legacy modes, plus the DORMANT adaptive definition the installer publishes with the
-  // rest of the Registry directory (EM-04C2): planned, neither selectable nor runnable nor executable
+  // the three legacy modes, plus the opt-in adaptive definition the installer publishes with the
+  // rest of the Registry directory (EM-04C2; active/selectable/runnable since S10-A, never persisted
+  // until an operator saves a configuration)
   const listed = svc.listModes().modes
   assert.deepEqual(listed.map(m => m.id), ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v3'])
   const adaptive = listed.find(m => m.id === 'engineering-v2-adaptive')
-  assert.equal(adaptive.status, 'planned')
-  assert.equal(adaptive.selectable, false)
-  assert.equal(adaptive.runnable, false)
-  assert.equal(adaptive.executable, false)
+  assert.equal(adaptive.status, 'active')
+  assert.equal(adaptive.selectable, true)
+  assert.equal(adaptive.runnable, true)
+  assert.equal(adaptive.persisted, false, 'no configuration is ever created implicitly')
   preserved(root)
 }
 async function main() {
@@ -99,11 +100,11 @@ async function main() {
       })
       assert.equal(status, 200)
       assert.deepEqual(body.modes.map(m => m.id).sort(), ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v3'])
-      // the dormant adaptive mode is listed honestly and can be neither selected nor run
-      const dormant = body.modes.find(m => m.id === 'engineering-v2-adaptive')
-      assert.equal(dormant.selectable, false)
-      assert.equal(dormant.runnable, false)
-      assert.equal(dormant.executable, false)
+      // the opt-in adaptive mode is listed honestly: selectable and runnable, but with no saved configuration
+      const optIn = body.modes.find(m => m.id === 'engineering-v2-adaptive')
+      assert.equal(optIn.selectable, true)
+      assert.equal(optIn.runnable, true)
+      assert.equal(optIn.persisted, false)
       assert.ok(body.modes.find(m => m.id === 'engineering-v2').executable)
     }
     process.env.AIH_INSTALL_ROOT = root

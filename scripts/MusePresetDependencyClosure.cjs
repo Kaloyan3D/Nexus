@@ -19,10 +19,11 @@ const ASSETS = Object.freeze([
 // R7.1.1: Registry mode definitions are managed runtime assets loaded by
 // registry/legacy-import.cjs relative to its own __dirname (fs read, not
 // require), so the require-graph walk cannot discover them. Every profile
-// whose entry graph reaches the Registry service must pin all three.
+// whose entry graph reaches the Registry service must pin all four (S10-A: the opt-in adaptive mode definition is part of the supported closure).
 const REGISTRY_MODE_ASSETS = Object.freeze([
   'registry/modes/engineering-v1.json',
   'registry/modes/engineering-v2.json',
+  'registry/modes/engineering-v2-adaptive.json',
   'registry/modes/engineering-v3.json',
 ])
 const REGISTRY_RUNTIME_ASSETS = Object.freeze([...ASSETS, ...REGISTRY_MODE_ASSETS])

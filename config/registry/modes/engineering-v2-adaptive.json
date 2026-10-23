@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "engineering-v2-adaptive",
   "displayName": "Engineering Mode v2 (Adaptive reasoning)",
-  "status": "planned",
+  "status": "active",
   "orchestrationEngineId": "nexus-adaptive-v1",
-  "selectable": false,
-  "runnable": false,
+  "selectable": true,
+  "runnable": true,
   "slots": [
     {
       "id": "main",

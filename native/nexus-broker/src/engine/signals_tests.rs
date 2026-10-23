@@ -73,14 +73,14 @@ fn only_the_experimental_engine_takes_signals() {
     }
     assert!(!MUSE_V1_SIGNALS.descriptor().may_propose_effort);
     assert_eq!(MUSE_V1_SIGNALS.descriptor().request_reserve_bytes, 0);
-    const { assert!(!MUSE_V1_PRODUCTION_ENABLED) };
-    assert_eq!(
-        engines(false)
-            .iter()
-            .map(|e| e.descriptor().engine_id)
-            .collect::<Vec<_>>(),
-        ["muse-v0"]
-    );
+    const { assert!(MUSE_V1_PRODUCTION_ENABLED) };
+    // the signals-capable ACTIVE engine is registered since S10-A; the EXPERIMENTAL signals engine never is
+    let prod: Vec<&str> = engines(false)
+        .iter()
+        .map(|e| e.descriptor().engine_id)
+        .collect();
+    assert_eq!(prod, ["muse-v0", "nexus-adaptive-v1"]);
+    assert!(!prod.contains(&"muse-v1-signals"));
 }
 
 #[test]

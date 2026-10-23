@@ -1324,13 +1324,12 @@ fn the_adaptive_identity_resolves_in_one_pair_and_nothing_resembling_it_resolves
             assert!(err.message.contains("nothing was sent"));
         }
     }
-    // a production-shaped registry (no test engines, gate closed) has neither identity
-    for id in ["muse-v1", current] {
-        assert!(
-            !engines(false)
-                .iter()
-                .any(|x| x.descriptor().engine_id == id),
-            "{id}"
-        );
-    }
+    // a production-shaped registry (no test engines) has the current identity (S10-A opened the gate)
+    // and never the former one
+    let prod: Vec<&str> = engines(false)
+        .iter()
+        .map(|x| x.descriptor().engine_id)
+        .collect();
+    assert_eq!(prod, ["muse-v0", current]);
+    assert!(!prod.contains(&"muse-v1"));
 }

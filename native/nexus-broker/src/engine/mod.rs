@@ -57,13 +57,17 @@ pub const MAX_STATE_BYTES: usize = 16 * 1024;
 /// EM-04B: largest acknowledgement an engine may return for a reasoning signal (it becomes the
 /// tool result the model reads).
 pub const MAX_SIGNAL_ACK_BYTES: usize = 1024;
-/// EM-04C2 production gate for the ACTIVE adaptive engine `nexus-adaptive-v1`: DISABLED until the final
-/// activation step (S10). With `false` the engine is compiled (and fully tested) but not built in,
-/// so the Registry cannot select it (`engine-unavailable`) in any production build; `test-engines`
-/// builds (this crate's tests) register it. This is a compile-time constant, deliberately NOT a
-/// runtime switch. The experimental `muse-v1-shadow` and `muse-v1-signals` engines are test-only
-/// whatever this constant says: they are never registered in a production build.
-pub const MUSE_V1_PRODUCTION_ENABLED: bool = false;
+/// EM-04C2 production gate for the ACTIVE adaptive engine `nexus-adaptive-v1`: OPENED in S10-A, as an
+/// explicitly selected beta (the default engine stays `muse-v0`). With `true` production builds
+/// register exactly `muse-v0` and `nexus-adaptive-v1`; the latter still runs only in the mode
+/// `engineering-v2-adaptive`, only from an operator-SAVED ModeConfiguration, only with a
+/// Registry-sealed request budget (see `engine_for_run`). Rollback = set this to `false` (and the
+/// mode definition back to planned): continuations of adaptive tasks then fail closed with
+/// `engine-unavailable`. This is a compile-time constant, deliberately NOT a runtime switch. The
+/// historical name is kept to avoid churn; the runtime identity is `nexus-adaptive-v1`. The
+/// experimental `muse-v1-shadow` and `muse-v1-signals` engines are test-only whatever this
+/// constant says: they are never registered in a production build.
+pub const MUSE_V1_PRODUCTION_ENABLED: bool = true;
 
 /// EM-04C1: the ONE authority for the tool catalog a run is offered. It is a pure function of the
 /// run's kind and the engine id of its SEALED Registry resolution (the engine was already selected

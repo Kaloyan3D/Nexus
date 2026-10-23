@@ -454,3 +454,27 @@ fn process_tools_inspect_and_offline_sandbox_gates() {
     let (c, _, _) = run(&["exec", "id"]);
     assert_eq!(c, 2);
 }
+
+/// S10-A: an Engineering Mode is chosen only by the explicit `--engineering-mode` flag and only together
+/// with an explicit model selection; without one the CLI refuses before contacting anything.
+#[test]
+fn engineering_mode_needs_an_explicit_model_selection() {
+    let dir = std::env::temp_dir().join(format!("nexus-cli-mode-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("in.txt");
+    std::fs::write(&input, "hello").unwrap();
+    let (_c, so, se) = run(&[
+        "intent",
+        "submit",
+        "--input",
+        input.to_str().unwrap(),
+        "--type",
+        "repo-code",
+        "--engineering-mode",
+        "engineering-v2-adaptive",
+    ]);
+    let all = format!("{so}{se}");
+    assert!(all.contains("bad-usage"), "{all}");
+    assert!(all.contains("--engineering-mode needs --model"), "{all}");
+    std::fs::remove_dir_all(&dir).ok();
+}

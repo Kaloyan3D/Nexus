@@ -85,23 +85,23 @@ fn every_profile_a_run_can_get_matches_its_frozen_identity() {
 }
 
 #[test]
-fn the_signals_catalog_cannot_be_reached_from_a_production_engine_list() {
-    // a production build has only muse-v0: the engine that selects the signals catalog is absent,
-    // so a Registry resolution naming it fails closed before any catalog is chosen
+fn the_signals_catalog_is_reached_in_production_only_through_the_sealed_adaptive_identity() {
+    // S10-A: a production build registers muse-v0 and nexus-adaptive-v1. The default engine never
+    // gets the signals catalog; the adaptive engine gets exactly the frozen signals/adaptive
+    // catalog; the EXPERIMENTAL signals engine is absent, so a resolution naming it fails closed.
+    const { assert!(MUSE_V1_PRODUCTION_ENABLED) };
     let prod: Vec<&str> = engines(false)
         .iter()
         .map(|e| e.descriptor().engine_id)
         .collect();
-    assert_eq!(prod, ["muse-v0"]);
-    for id in prod {
-        assert_ne!(
-            tool_catalog_profile(id, true),
-            P::RepoCodeMuseSignalsV1,
-            "{id}"
-        );
-    }
-    // and the production gate stays closed
-    const { assert!(!MUSE_V1_PRODUCTION_ENABLED) };
+    assert_eq!(prod, ["muse-v0", "nexus-adaptive-v1"]);
+    assert_eq!(tool_catalog_profile("muse-v0", true), P::RepoCodeV1);
+    assert_eq!(
+        tool_catalog_profile(muse_v1::ACTIVE_ENGINE_ID, true),
+        P::RepoCodeMuseSignalsV1
+    );
+    assert!(!prod.contains(&muse_v1::SIGNALS_ENGINE_ID));
+    assert!(!prod.contains(&"muse-v1-shadow"));
 }
 
 #[test]

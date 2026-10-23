@@ -1,0 +1,44 @@
+# EM-04C2 / S10-A — Controlled production activation of Nexus Adaptive Engine v1 (opt-in beta)
+
+Branch `feature/rust-native-core`, started at `f0cc92a748119a5eff9c5c16ec7df095159481f2`. Local only: nothing pushed, merged into `main` or deployed; no live or paid inference.
+Default engine unchanged: `engineering-v2` → `muse-v0`. Adaptive is used only when explicitly selected AND the operator has saved a compatible configuration. **S10-B (making it default) is out of scope.**
+
+## 1. Implementation changes (exact)
+| Area | Change |
+|---|---|
+| Compile-time gate | `native/nexus-broker/src/engine/mod.rs`: `MUSE_V1_PRODUCTION_ENABLED = true` (historical name kept; runtime identity `nexus-adaptive-v1`). Still a constant, no runtime/env switch. Production now registers exactly `muse-v0` and `nexus-adaptive-v1`; `muse-v1-shadow`, `muse-v1-signals`, `effort-test-v0` stay `test-engines`-only. |
+| Registry definition | `config/registry/modes/engineering-v2-adaptive.json`: `status` `planned`→`active` (an existing schema value), `selectable` and `runnable` `true`. Engine `nexus-adaptive-v1`, contract `nexus-adaptive-v1`, `requestBudgetBytes` 440000 unchanged. |
+| Installers / presets | `scripts/MusePresetDependencyClosure.cjs`: the adaptive definition is now pinned in `REGISTRY_MODE_ASSETS` (all four preset closures). Fresh installs carry it; installs that lack it stay valid (the definition is optional in `legacy-import.cjs`, unchanged). No ModeConfiguration is created by any installer. |
+| CLI | `native/nexus-cli/src/main.rs`: `nexus intent submit … --type repo-code --model p/m[/l] --engineering-mode engineering-v2-adaptive` (new flag; requires `--model`; absent = default mode). Test `engineering_mode_needs_an_explicit_model_selection`. |
+| Release gate | `scripts/EM04C2-ReleaseGate.cjs`: expected registered set `["muse-v0","nexus-adaptive-v1"]`, resolvable pairs `[(engineering-v2, muse-v0), (engineering-v2-adaptive, nexus-adaptive-v1)]`, gate open, definitions `active/selectable/runnable` (default mode `active-legacy`). Everything else (leak negative control, fail-closed semantics, mandatory `--bodies`, real binaries, hashes) unchanged. |
+| Tests updated deliberately | Rust: `catalog_tests`, `muse_v1_tests`, `signals_tests`, `muse_v1_active_tests`, `engine/tests.rs`, prodgate `production_gate.rs` (the pairs, the open-gate constant, the active definition, closure pin, the engine only in its own mode). JS: `RegistryAdaptiveMode`, `RegistryR3UI`, `RegistryInstalledRuntime`, `MusePresetRegistryModes`, `ControllerPresetCleanInstall`. |
+**Not changed:** the Muse Governor, Effort Limiter Policy V2, claim-only re-arm accounting, `dropped_before`, authenticated predecessor recovery (SEC-1), Kernel sealing/write-ahead binding, Registry authorization order, reasoning ladders, compaction, the 440,000 B sealed budget and 450,000 B ceiling, the closed contract (OpenAI Responses only), model/route scoping, the model catalog, transports, data-use handling. `git diff` outside tests is: the constant, the mode JSON, the closure pin, the CLI flag, the gate script.
+
+## 2. Compatibility contract and data-use tiers (unchanged, restated)
+Adaptive accepts a model/route only if the Registry contract `nexus-adaptive-v1` is satisfied: tool calling and reasoning declared; execution kind `raw-model`; route transport `openai-responses` (optional wire profile `opencode-go-responses`); default and authorized reasoning within `low/medium/high/xhigh`; declared data-use tier `standard` **or** `contributor`; model scoped to the engine id `nexus-adaptive-v1`. A declared tier is a **description of the model's policy, not a permission** the model or provider grants; it widens nothing. Missing or contradictory capability data fails closed. No Gemini, Anthropic, Chat-Completions or local transport exists; unsupported models fail with `slot-capability-not-satisfied` / `engine-scope-mismatch` and never fall back to another engine.
+
+## 3. Operator instructions
+* **Which models qualify.** No built-in catalog model is scoped to `nexus-adaptive-v1` (scoping the catalog changes the pinned Muse canonical parity — attempted and rejected, see §6). An operator therefore adds an explicit model + route in the Registry operator catalog (`saveModel` with `engines:['nexus-adaptive-v1']`, `saveRoute` on the OpenCode Go provider with transport `openai-responses`); routes become *verified* only through a capability probe (`verifyProviderRoute`, a live provider call — part of the R3 plan, not done here). Models previously scoped to `muse-v1` need this explicit update; there is no alias.
+* **Save a configuration.** In the Registry UI (R3 mode selector) pick mode `engineering-v2-adaptive`, a compatible model/route, a default effort and the authorized levels (`allowedReasoning`), then save. Incomplete or incompatible configurations are refused by the Registry with a specific code (`mode-config-invalid`, `slot-capability-not-satisfied`, `engine-scope-mismatch`, `route-not-verified`). The mode is selectable but has **no** configuration until the operator saves one (`mode-configuration-required`; verified: no file is created by listing/reading).
+* **Start an adaptive task (CLI):** `nexus intent submit --type repo-code --workspace W --model provider/model --route ROUTE --engineering-mode engineering-v2-adaptive --input TASK.txt --follow`. The broker fails with `registry-mode-configuration-required`, `engine-budget-required`, `engine-unavailable` etc. before any request when something is missing.
+* **Desktop.** The Desktop never chooses an Engineering Mode (a deliberate S4 decision, unchanged); it keeps the default `muse-v0` path. **Starting adaptive tasks from the Desktop is not implemented in this milestone** (no frontend was added); the R3 validation uses the CLI. Existing `muse-v0` tasks and the Desktop are untouched.
+
+## 4. Security invariants (enforced and tested)
+Engines `muse-v0` + `nexus-adaptive-v1` only (+ test engines in test builds); adaptive runs only in its own mode (`engine-mode-mismatch` elsewhere, prodgate); the former id `muse-v1`, near misses and every experimental engine are `engine-unavailable`; no ModeConfiguration is auto-created or adopted; sealed budget required and ≤ 450,000 B; authenticated predecessor required (SEC-1), a predecessor with another engine identity is refused before dispatch (S9.5 tests); the engine cannot raise its own authorized levels (host admission, unchanged); `MUSE_V1_PRODUCTION_ENABLED` is not env-switchable; release binaries are scanned for test-only symbols.
+
+## 5. R74 / known risks
+R74 (`RegistryR74RollbackRecovery`, GitHub issue #35) remains a separately tracked environmental risk (a crashing bundled PowerShell host in some full runs); its root cause is **not** solved here, and an unexplained authorization failure would not be classified under it.
+
+## 6. Decisions made during the work
+* Scoping the built-in OpenCode Go Muse Spark model to the adaptive engine via `agentEngines` was implemented and **reverted**: it breaks `RegistryR2Compatibility` (Muse canonical parity `engines` must equal `["muse-v0"]`) and legacy catalog consumers' pins. Historical compatibility wins; scoping stays an explicit operator action.
+* The Desktop mode selector was not built (see §3).
+* `muse-v1` remains rejected everywhere; no alias was added.
+
+## 7. Rollback
+Set `MUSE_V1_PRODUCTION_ENABLED = false` and the definition back to `planned`/`selectable:false`/`runnable:false` (and unpin from the closure). In-flight adaptive tasks then fail closed (`engine-unavailable`) before any request; `muse-v0` data is unaffected; saved adaptive configurations remain on disk but cannot run.
+
+## 8. Conditions for S10-B (default decision) — not met by this milestone
+Live R3 validation passed; real-model comparison Adaptive vs `muse-v0` (quality, cost, latency, failures) on the owner's tasks; token/cost accounting verified; no unexplained authorization failure; owner decision; separate commit.
+
+## 9. Validation results
+See `EM-04C2-S10A-ACCEPTANCE-RESULTS.md` (recorded after the commit, against the exact committed SHA).

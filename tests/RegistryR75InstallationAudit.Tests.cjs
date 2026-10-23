@@ -28,7 +28,7 @@ for (const profile of ['muse', 'engineering', 'deepseek', 'controller']) {
   const preset = path.join(install, 'audit-presets', profile)
   closure.copy(install, preset, { profile })
   const rows = closure.validate(install, preset, { profile })
-  for (const mode of ['engineering-v1', 'engineering-v2', 'engineering-v3']) {
+  for (const mode of ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v3']) {
     const name = 'registry/modes/' + mode + '.json'
     const file = path.join(preset, name)
     const bytes = fs.readFileSync(file)
@@ -43,9 +43,9 @@ for (const profile of ['muse', 'engineering', 'deepseek', 'controller']) {
   }
   const local = require(path.join(preset, 'registry/service.cjs')).createService({ installRoot: install, dataRoot: data })
   assert.deepEqual(local.listModes().errors, [])
-  assert.equal(local.listModes().modes.length, 3)
+  assert.equal(local.listModes().modes.length, 4)
   closure.validate(install, preset, { profile })
-  pass(profile + ': all three mode assets hash-verified; missing and corrupt assets rejected')
+  pass(profile + ': all four mode assets hash-verified; missing and corrupt assets rejected')
 }
 compose()
 pass('shared clean-install composition with actual pinned npm dependencies')

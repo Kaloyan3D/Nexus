@@ -38,9 +38,10 @@ const ENGINES: [&str; 13] = [
     "../nexus-adaptive-v1",
 ];
 
-/// Exactly one (mode, engine) pair resolves in a production build: the default mode with muse-v0.
+/// Exactly two (mode, engine) pairs resolve in a production build (S10-A): the default mode with
+/// muse-v0 and the opt-in adaptive mode with nexus-adaptive-v1. Nothing resembling either does.
 #[test]
-fn only_the_default_mode_with_muse_v0_resolves() {
+fn only_the_default_pair_and_the_opt_in_adaptive_pair_resolve() {
     let mut ok = Vec::new();
     for mode in MODES {
         for engine in ENGINES {
@@ -49,14 +50,20 @@ fn only_the_default_mode_with_muse_v0_resolves() {
             }
         }
     }
-    assert_eq!(ok, [("engineering-v2", "muse-v0")], "{ok:?}");
+    assert_eq!(
+        ok,
+        [
+            ("engineering-v2", "muse-v0"),
+            ("engineering-v2-adaptive", "nexus-adaptive-v1")
+        ],
+        "{ok:?}"
+    );
 }
 
 #[test]
-fn every_experimental_and_adaptive_engine_is_unavailable_under_every_mode() {
+fn every_experimental_engine_and_the_former_adaptive_id_are_unavailable_under_every_mode() {
     for engine in [
         "muse-v1",
-        "nexus-adaptive-v1",
         "muse-v1-shadow",
         "muse-v1-signals",
         "effort-test-v0",
@@ -69,7 +76,14 @@ fn every_experimental_and_adaptive_engine_is_unavailable_under_every_mode() {
             assert!(e.message.contains("nothing was sent"));
         }
     }
-    // the adaptive mode cannot run the default engine either
+    // the adaptive engine runs ONLY in the adaptive mode, and the adaptive mode cannot run the default engine
+    for mode in ["engineering-v1", "engineering-v2", "engineering-v3"] {
+        assert_eq!(
+            resolve(mode, "nexus-adaptive-v1").err().unwrap().code,
+            "engine-mode-mismatch",
+            "{mode}"
+        );
+    }
     assert_eq!(
         resolve("engineering-v2-adaptive", "muse-v0")
             .err()
@@ -80,9 +94,9 @@ fn every_experimental_and_adaptive_engine_is_unavailable_under_every_mode() {
 }
 
 #[test]
-fn the_activation_gate_is_a_closed_compile_time_constant() {
-    const { assert!(!engine::MUSE_V1_PRODUCTION_ENABLED) };
-    // there is no runtime switch to open it: the environment cannot register an engine
+fn the_activation_gate_is_an_open_compile_time_constant_that_no_environment_can_change() {
+    const { assert!(engine::MUSE_V1_PRODUCTION_ENABLED) };
+    // there is no runtime switch: the environment can neither close the gate nor register a test engine
     for var in [
         "NEXUS_MUSE_V1",
         "NEXUS_MUSE_V1_ENABLED",
@@ -93,14 +107,17 @@ fn the_activation_gate_is_a_closed_compile_time_constant() {
         // SAFETY: single test in this process touching these names
         unsafe { std::env::set_var(var, "1") };
     }
-    assert_eq!(
-        resolve("engineering-v2-adaptive", "nexus-adaptive-v1")
-            .err()
-            .unwrap()
-            .code,
-        "engine-unavailable",
-        "an environment variable must not open the gate"
-    );
+    assert!(resolve("engineering-v2-adaptive", "nexus-adaptive-v1").is_ok());
+    for engine in ["muse-v1-shadow", "muse-v1-signals", "effort-test-v0"] {
+        assert_eq!(
+            resolve("engineering-v2-adaptive", engine)
+                .err()
+                .unwrap()
+                .code,
+            "engine-unavailable",
+            "an environment variable must not register {engine}"
+        );
+    }
 }
 
 /// The published HMAC key of the EM-03 fixtures is refused by `EngineStateStore::open` itself.
@@ -147,10 +164,11 @@ fn the_published_test_hmac_key_is_refused_by_the_real_store() {
     EngineStateStore::open(fresh.path()).expect("a fresh key is fine");
 }
 
-/// The shipped adaptive definition is dormant and carries the sealed budget; no install closure
-/// pins it. (File-level: the Registry itself is JavaScript and covered by its own suites.)
+/// The shipped adaptive definition is the ACTIVE opt-in beta (S10-A), carries the sealed budget and is
+/// pinned by the install closure; the default mode is untouched. (File-level: the Registry itself is
+/// JavaScript and covered by its own suites.)
 #[test]
-fn the_shipped_adaptive_definition_is_dormant_and_budgeted() {
+fn the_shipped_adaptive_definition_is_the_budgeted_opt_in_beta() {
     let def: serde_json::Value = serde_json::from_slice(
         &std::fs::read(repo_root().join("config/registry/modes/engineering-v2-adaptive.json"))
             .unwrap(),
@@ -158,16 +176,16 @@ fn the_shipped_adaptive_definition_is_dormant_and_budgeted() {
     .unwrap();
     assert_eq!(def["id"], "engineering-v2-adaptive");
     assert_eq!(def["orchestrationEngineId"], "nexus-adaptive-v1");
-    assert_eq!(def["status"], "planned");
-    assert_eq!(def["selectable"], false);
-    assert_eq!(def["runnable"], false);
+    assert_eq!(def["status"], "active");
+    assert_eq!(def["selectable"], true);
+    assert_eq!(def["runnable"], true);
     assert_eq!(def["requestBudgetBytes"], 440_000);
     let closure =
         std::fs::read_to_string(repo_root().join("scripts/MusePresetDependencyClosure.cjs"))
             .unwrap();
     assert!(
-        !closure.contains("engineering-v2-adaptive"),
-        "not in the install closure"
+        closure.contains("registry/modes/engineering-v2-adaptive.json"),
+        "pinned by the install closure"
     );
     let v2: serde_json::Value = serde_json::from_slice(
         &std::fs::read(repo_root().join("config/registry/modes/engineering-v2.json")).unwrap(),
@@ -177,6 +195,7 @@ fn the_shipped_adaptive_definition_is_dormant_and_budgeted() {
         v2["orchestrationEngineId"], "muse-v0",
         "the default mode still runs muse-v0"
     );
+    assert_eq!(v2["status"], "active-legacy");
 }
 
 /// Catalog identity: the three frozen tool catalogs of the production build.

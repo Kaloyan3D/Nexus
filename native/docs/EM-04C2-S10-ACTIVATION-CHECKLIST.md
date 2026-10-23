@@ -1,4 +1,4 @@
-# EM-04C2 S10 — Activation checklist (not started)
+# EM-04C2 S10 — Activation checklist (SUPERSEDED for steps 2–4 by S10-A: see EM-04C2-S10A-ACTIVATION-REPORT.md)
 
 Baseline `0eabd202aec8239133675e8997bd85dd73eef807` + the uncommitted S7–S9 work. **S10 is not started and
 must not start until the owner has answered section 1.** Until then: `MUSE_V1_PRODUCTION_ENABLED = false`; the

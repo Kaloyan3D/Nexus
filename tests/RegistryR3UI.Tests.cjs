@@ -139,16 +139,16 @@ async function main() {
   await check('R3 modes: v1/v2/v3 listed with honest statuses, v3 non-executable', () => {
     const { modes, errors } = svc.listModes()
     assert.deepEqual(errors, [])
-    // the three legacy modes, plus (in a source tree that carries it) the DORMANT adaptive mode
-    // (EM-04C2): planned, neither selectable nor runnable, never executable
+    // the three legacy modes, plus (in a source tree that carries it) the opt-in adaptive mode
+    // (EM-04C2; S10-A: active, selectable, runnable, needs an operator-saved configuration)
     assert.deepEqual(modes.map((m) => m.id).filter((id) => id !== 'engineering-v2-adaptive'), ['engineering-v1', 'engineering-v2', 'engineering-v3'])
     const adaptive = modes.find((m) => m.id === 'engineering-v2-adaptive')
     if (adaptive) {
-      assert.equal(adaptive.status, 'planned')
-      assert.equal(adaptive.selectable, false)
-      assert.equal(adaptive.runnable, false)
-      assert.equal(adaptive.executable, false)
-      // EM-04C2 S10 SEC-5: even if it were opened, it runs only from an operator-saved configuration
+      assert.equal(adaptive.status, 'active')
+      assert.equal(adaptive.selectable, true)
+      assert.equal(adaptive.runnable, true)
+      assert.equal(adaptive.persisted, false)
+      // EM-04C2 S10 SEC-5: it runs only from an operator-saved configuration
       assert.equal(require('../config/registry/native-issuer.cjs').scopeOf('engineering-v2-adaptive').requiresSavedConfiguration, true)
     }
     assert.equal(modes.length, adaptive ? 4 : 3)
@@ -434,9 +434,9 @@ async function main() {
     const legacy = body.modes.filter((m) => m.id !== 'engineering-v2-adaptive')
     assert.equal(legacy.length, 3)
     for (const m of body.modes.filter((x) => x.id === 'engineering-v2-adaptive')) {
-      assert.equal(m.selectable, false)
-      assert.equal(m.runnable, false)
-      assert.equal(m.executable, false)
+      assert.equal(m.selectable, true)
+      assert.equal(m.runnable, true)
+      assert.equal(m.persisted, false)
     }
     assert.ok(body.modes.length <= 4)
     capture(res)

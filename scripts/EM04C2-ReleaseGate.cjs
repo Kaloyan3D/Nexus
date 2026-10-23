@@ -15,7 +15,7 @@
 //                                acceptance run. The S10 acceptance run uses no --allow-skip.
 //
 // Sections (each prints counts, never request bodies or secrets):
-//   registry-js       Registry mode/engine constraints, sealed budget, dormant definition, closure,
+//   registry-js       Registry mode/engine constraints, sealed budget, opt-in (active) adaptive definition, closure,
 //                     controller preset installation
 //   engines           production/test engine separation, catalog identity, EM-03 compatibility,
 //                     Policy V1/V2, engine state (cargo, `nexus-broker` lib); per-filter minimum counts
@@ -258,10 +258,11 @@ section('release-binaries', () => {
     try { engines = JSON.parse(r.stdout) } catch { failures.push('nexus-broker engines: no JSON answer') }
     if (engines) {
       const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
-      if (!same(engines.registered, ['muse-v0'])) failures.push(`registered engines: ${JSON.stringify(engines.registered)}`)
-      if (!same(engines.resolvable, [['engineering-v2', 'muse-v0']])) failures.push(`resolvable (mode, engine) pairs: ${JSON.stringify(engines.resolvable)}`)
+      // S10-A: exactly the default engine and the opt-in adaptive engine, each in its own mode
+      if (!same(engines.registered, ['muse-v0', 'nexus-adaptive-v1'])) failures.push(`registered engines: ${JSON.stringify(engines.registered)}`)
+      if (!same(engines.resolvable, [['engineering-v2', 'muse-v0'], ['engineering-v2-adaptive', 'nexus-adaptive-v1']])) failures.push(`resolvable (mode, engine) pairs: ${JSON.stringify(engines.resolvable)}`)
       if (engines.testEnginesFeature !== false || engines.testFixturesFeature !== false) failures.push('the executable reports a test feature')
-      if (engines.adaptiveProductionEnabled !== false) failures.push('the adaptive activation gate is open')
+      if (engines.adaptiveProductionEnabled !== true) failures.push('the adaptive activation gate is not open (S10-A expects the opt-in beta registered)')
     }
   }
   // 4. the bundled Registry definitions
@@ -271,8 +272,8 @@ section('release-binaries', () => {
     for (const f of ['engineering-v2.json', 'engineering-v2-adaptive.json']) defs[f] = JSON.parse(fs.readFileSync(path.join(modes, f), 'utf8'))
     const d2 = defs['engineering-v2.json']
     const ad = defs['engineering-v2-adaptive.json']
-    if (!(d2.orchestrationEngineId === 'muse-v0' && d2.selectable === true && d2.runnable === true)) failures.push('engineering-v2 is not the selectable muse-v0 default')
-    if (!(ad.status === 'planned' && ad.selectable === false && ad.runnable === false && ad.orchestrationEngineId === 'nexus-adaptive-v1')) failures.push('the adaptive definition is not dormant (planned, not selectable, not runnable)')
+    if (!(d2.orchestrationEngineId === 'muse-v0' && d2.selectable === true && d2.runnable === true && d2.status === 'active-legacy')) failures.push('engineering-v2 is not the selectable muse-v0 default')
+    if (!(ad.status === 'active' && ad.selectable === true && ad.runnable === true && ad.orchestrationEngineId === 'nexus-adaptive-v1')) failures.push('the adaptive definition is not the active opt-in beta')
     if (ad.requestBudgetBytes !== 440000) failures.push('the adaptive definition does not seal 440000 bytes')
   } catch (e) {
     failures.push('bundled definitions unreadable: ' + String(e.message).slice(0, 80))

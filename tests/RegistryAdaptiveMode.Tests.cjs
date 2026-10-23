@@ -40,14 +40,14 @@ check('the Native scope table is closed, frozen and exactly the two reviewed mod
   assert.equal(issuer.SUPPORTED_MODE_ID, 'engineering-v2', 'the default mode is unchanged')
 })
 
-check('the shipped adaptive definition is valid, names nexus-adaptive-v1 and is DORMANT; engineering-v2 is untouched', () => {
+check('the shipped adaptive definition is valid, names nexus-adaptive-v1 and is the ACTIVE opt-in beta (S10-A); engineering-v2 is untouched', () => {
   const adaptive = readMode('engineering-v2-adaptive.json')
   assert.deepEqual(schemas.validateModeDefinition(adaptive, 'mode'), [])
   assert.equal(adaptive.id, 'engineering-v2-adaptive')
   assert.equal(adaptive.orchestrationEngineId, 'nexus-adaptive-v1')
-  assert.equal(adaptive.runnable, false)
-  assert.equal(adaptive.selectable, false)
-  assert.equal(adaptive.status, 'planned')
+  assert.equal(adaptive.runnable, true)
+  assert.equal(adaptive.selectable, true)
+  assert.equal(adaptive.status, 'active')
   assert.equal(adaptive.requestBudgetBytes, 440000, 'EM-04C2 S7: the intended sealed request budget (measured A614 maximum with the real catalog stays below it)')
   assert.ok(adaptive.requestBudgetBytes < 450000, 'strictly below the unchanged A614 guard')
   const v2 = readMode('engineering-v2.json')
@@ -192,19 +192,19 @@ check('the real Registry has no default for the adaptive mode, cannot adopt a le
       assert.ok(a.errors.length > 0, adopt)
     }
     assert.deepEqual(listing(dataRoot), before, 'reading a mode never creates a configuration')
-    // while dormant the Registry will not even save one
+    // a configuration that names no real model/route is refused and writes nothing
     const cfg = { schemaVersion: 1, modeId: 'engineering-v2-adaptive', revision: null, slots: { main: { logicalModelId: 'x', routeId: 'y', reasoning: 'low' } }, roleOverrides: {} }
     const saved = svc.save('engineering-v2-adaptive', cfg, null, {})
     assert.equal(saved.ok, false)
     assert.deepEqual(listing(dataRoot), before, 'a refused save writes nothing')
-    // the mode is listed honestly: present, engine nexus-adaptive-v1, not executable, not persisted
+    // the mode is listed honestly: present, engine nexus-adaptive-v1, selectable but NOT persisted (no implicit configuration)
     const modes = svc.listModes().modes
     const m = modes.find((x) => x.id === 'engineering-v2-adaptive')
     assert.ok(m && m.present)
     assert.equal(m.orchestrationEngineId, 'nexus-adaptive-v1')
-    assert.equal(m.executable, false)
     assert.equal(m.persisted, false)
-    assert.equal(m.selectable, false)
+    assert.equal(m.selectable, true)
+    assert.equal(m.runnable, true)
     // engineering-v2 is as before: a preview exists without any saved configuration
     const v2 = svc.getModeConfiguration('engineering-v2', {})
     assert.ok(v2.result && v2.result.persisted === false && v2.result.config)
@@ -275,17 +275,16 @@ check('the budget survives resolution into the sealed target and a forged bindin
   }
 })
 
-check('the adaptive mode stays dormant: planned, not selectable/runnable, absent from every install closure', () => {
+check('the adaptive mode is the supported opt-in beta (S10-A): active, selectable, runnable and pinned in every install closure', () => {
   const adaptive = readMode('engineering-v2-adaptive.json')
-  assert.equal(adaptive.status, 'planned')
-  assert.equal(adaptive.selectable, false)
-  assert.equal(adaptive.runnable, false)
-  const closureSrc = fs.readFileSync(path.join(repoRoot, 'scripts', 'MusePresetDependencyClosure.cjs'), 'utf8')
-  assert.equal(closureSrc.includes('engineering-v2-adaptive'), false, 'not pinned by the installer closure')
+  assert.equal(adaptive.status, 'active')
+  assert.equal(adaptive.selectable, true)
+  assert.equal(adaptive.runnable, true)
+  assert.equal(adaptive.requestBudgetBytes, 440000)
   const closure = require('../scripts/MusePresetDependencyClosure.cjs')
   for (const profile of ['muse', 'controller', 'engineering', 'deepseek']) {
     const c = closure.closure(repoRoot, { profile })
-    assert.equal(JSON.stringify(c).includes('engineering-v2-adaptive'), false, profile)
+    assert.equal(JSON.stringify(c).includes('engineering-v2-adaptive'), true, profile)
   }
 })
 
@@ -321,9 +320,8 @@ check('snapshot completeness is judged by REQUIRED legacy modes, not by a count 
     const withIt = list(full).modes.map((m) => m.id)
     assert.deepEqual(withIt, ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v3'])
     const adaptive = list(full).modes.find((m) => m.id === 'engineering-v2-adaptive')
-    assert.equal(adaptive.selectable, false)
-    assert.equal(adaptive.runnable, false)
-    assert.equal(adaptive.executable, false)
+    assert.equal(adaptive.selectable, true)
+    assert.equal(adaptive.runnable, true)
     // a missing REQUIRED definition is still reported, as before
     const gone = list(broken).modes.find((m) => m.id === 'engineering-v2')
     assert.equal(gone.present, false)
@@ -415,15 +413,14 @@ check('snapshot completeness is judged by REQUIRED legacy modes, not by a count 
     }
     // the adaptive row is honest, and nothing about it is adoptable or preset
     const row = outputs[0].modes.find((m) => m.id === 'engineering-v2-adaptive')
-    assert.equal(row.status, 'planned')
-    assert.equal(row.selectable, false)
-    assert.equal(row.runnable, false)
-    assert.equal(row.executable, false)
-    assert.equal(row.savedRevision, null)
+    assert.equal(row.status, 'active')
+    assert.equal(row.selectable, true)
+    assert.equal(row.runnable, true)
+    assert.equal(row.savedRevision, null, 'no configuration exists until an operator saves one')
     assert.equal(outputs[1].result, null)
     assert.deepEqual(outputs[1].errors.map((e) => e.code), ['mode-configuration-required'])
     assert.equal(outputs[2].result, null)
-    // an operator configuration exists only after an explicit save, and a save of the dormant mode is refused
+    // an operator configuration exists only after an explicit save; a save naming no real model/route is refused
     assert.equal(svc.save('engineering-v2-adaptive', { schemaVersion: 1, modeId: 'engineering-v2-adaptive', revision: 0, slots: { main: { logicalModelId: 'x', routeId: 'y', reasoning: 'low' } }, roleOverrides: {} }, undefined, {}).ok, false)
     assert.deepEqual(tree(data), before, 'a refused save created nothing')
   })
