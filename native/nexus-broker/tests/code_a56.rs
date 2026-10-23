@@ -14652,3 +14652,322 @@ fn s8_worker_timeouts_and_cancellation_leave_consistent_durable_state() {
     s8_invariants_from(&fx, "s8-cancel", &next, already);
     b.shutdown();
 }
+
+// ===================================================================================================
+// EM-04C2 S10 preflight, SEC-1: an adaptive continuation never silently starts a fresh history.
+// ===================================================================================================
+
+/// Resume `run`, wait for the continuation to end; returns it (a refusal is a terminal run, or an
+/// error from `resume` itself, reported as `Err(code-ish text)`).
+fn s10_resume(sock: &std::path::Path, run: &str) -> Result<ic::IntentRun, String> {
+    match ic::resume(sock, run) {
+        Err(e) => Err(format!("{e}")),
+        Ok(v) => Ok(wait_terminal(
+            sock,
+            v["run"]["runId"].as_str().unwrap(),
+            180,
+        )),
+    }
+}
+
+fn s10_state_file(fx: &Fx, name: &str, task: &str) -> std::path::PathBuf {
+    fx.config(name)
+        .state_dir
+        .join("engine")
+        .join(format!("{task}.json"))
+}
+
+/// The run ends without having asked the provider anything new.
+fn s10_refused(r: &Result<ic::IntentRun, String>, at: usize, fx: &Fx, code: &str) {
+    let text = match r {
+        Ok(run) => {
+            assert!(run.terminal && run.state != "completed", "{run:?}");
+            assert_eq!(run.turn, 0, "{run:?}");
+            format!("{:?}", run.error_code)
+        }
+        Err(e) => e.clone(),
+    };
+    assert!(text.contains(code), "expected {code}: {text}");
+    assert_eq!(
+        fx.provider.bodies.lock().unwrap().len(),
+        at,
+        "no provider request"
+    );
+}
+
+#[test]
+fn s10_a_crash_before_the_first_engine_state_is_continued_from_proven_nothing_spent() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s6_fixture(s6_claims(), Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "s10-pre", None, None);
+    let key = "s10-pre-0000000001";
+    nexus_broker::engine::test_faults::arm(key, "before-engine-state");
+    let first = ic::submit(b.socket_path(), &s4_intent(key, Some(ADAPTIVE_MODE)))
+        .expect("submit")
+        .run;
+    let first = wait_terminal(b.socket_path(), &first.run_id, 60);
+    assert!(first.terminal && first.state != "completed", "{first:?}");
+    assert_eq!(
+        fx.provider.bodies.lock().unwrap().len(),
+        0,
+        "nothing was asked before the crash"
+    );
+    let t1 = first.task_instance_id.clone().unwrap();
+    assert!(
+        !s10_state_file(&fx, "s10-pre", &t1).exists(),
+        "no engine state was ever written"
+    );
+    let second = s10_resume(b.socket_path(), &first.run_id).expect("resume");
+    assert_eq!(second.state, "completed", "{second:?}");
+    let store = nexus_broker::engine_state::EngineStateStore::open(&fx.config("s10-pre").state_dir)
+        .unwrap();
+    let rec = store
+        .load(second.task_instance_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    let l = rec.lineage.as_ref().unwrap();
+    assert_eq!(
+        (l.rule.as_str(), l.inherited),
+        ("no-state-proven-undispatched", false)
+    );
+    assert_eq!(rec.default_effort, "low");
+    b.shutdown();
+}
+
+/// A run of the adaptive mode that crashed at `point`, in `sock`'s broker.
+fn s10_crashed(sock: &std::path::Path, key: &str, point: &str) -> ic::IntentRun {
+    nexus_broker::engine::test_faults::arm(key, point);
+    let r = ic::submit(sock, &s4_intent(key, Some(ADAPTIVE_MODE)))
+        .expect("submit")
+        .run;
+    let r = wait_terminal(sock, &r.run_id, 120);
+    assert!(r.terminal && r.state != "completed", "{r:?}");
+    r
+}
+
+#[test]
+fn s10_a_lost_or_damaged_predecessor_state_refuses_before_any_request() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s6_fixture(s6_claims(), Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "s10-lost", None, None);
+    let sock = b.socket_path().to_owned();
+    let store =
+        nexus_broker::engine_state::EngineStateStore::open(&fx.config("s10-lost").state_dir)
+            .unwrap();
+    // every variant: a fresh crashed run whose authentic engine state is then damaged
+    type Damage = fn(&[u8]) -> Option<Vec<u8>>;
+    let variants: [(&str, Damage, &str); 5] = [
+        ("deleted", |_| None, "engine-state-missing"),
+        (
+            "truncated",
+            |g| Some(g[..g.len() / 2].to_vec()),
+            "engine-state",
+        ),
+        ("garbage", |_| Some(b"{not json".to_vec()), "engine-state"),
+        ("empty", |_| Some(Vec::new()), "engine-state"),
+        (
+            "flipped byte",
+            |g| {
+                let mut t = g.to_vec();
+                let m = t.len() / 2;
+                t[m] ^= 1;
+                Some(t)
+            },
+            "engine-state",
+        ),
+    ];
+    for (n, (_what, damage, code)) in variants.iter().enumerate() {
+        let run = s10_crashed(&sock, &format!("s10-lost-{n:0>12}"), "after-bind");
+        let file = s10_state_file(&fx, "s10-lost", run.task_instance_id.as_deref().unwrap());
+        let good = std::fs::read(&file).expect("the crashed run left authentic state");
+        let at = fx.provider.bodies.lock().unwrap().len();
+        match damage(&good) {
+            None => std::fs::remove_file(&file).unwrap(),
+            Some(bytes) => std::fs::write(&file, bytes).unwrap(),
+        }
+        let r = s10_resume(&sock, &run.run_id);
+        s10_refused(&r, at, &fx, code);
+        if let Ok(refused) = &r {
+            assert!(
+                store
+                    .load(refused.task_instance_id.as_deref().unwrap_or("none"))
+                    .ok()
+                    .flatten()
+                    .is_none(),
+                "a refused continuation creates no engine state"
+            );
+        }
+    }
+    // an undamaged crashed run still continues, inheriting
+    let run = s10_crashed(&sock, "s10-lost-ok0000000000", "after-bind");
+    let ok = s10_resume(&sock, &run.run_id).expect("resume");
+    assert_eq!(ok.state, "completed", "{ok:?}");
+    let rec = store
+        .load(ok.task_instance_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec.lineage.as_ref().unwrap().rule, "inherited");
+    // replay: the run that was already continued cannot be continued again, and nothing is sent
+    let at = fx.provider.bodies.lock().unwrap().len();
+    let again = s10_resume(&sock, &run.run_id);
+    assert!(
+        matches!(&again, Err(e) if e.contains("already continued")),
+        "{again:?}"
+    );
+    assert_eq!(
+        fx.provider.bodies.lock().unwrap().len(),
+        at,
+        "no provider request"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn s10_a_chain_of_state_less_continuations_inherits_from_the_ancestor_or_refuses() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s6_fixture(s6_claims(), Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "s10-chain", None, None);
+    let sock = b.socket_path().to_owned();
+    let store =
+        nexus_broker::engine_state::EngineStateStore::open(&fx.config("s10-chain").state_dir)
+            .unwrap();
+    for (n, destroy_ancestor) in [true, false].into_iter().enumerate() {
+        // generation 1 leaves authentic state; generation 2 crashes before creating any
+        let g1 = s10_crashed(&sock, &format!("s10-chain-{n:0>10}"), "after-bind");
+        let t1 = g1.task_instance_id.clone().unwrap();
+        nexus_broker::engine::test_faults::arm(
+            &format!("resume-{}", g1.run_id),
+            "before-engine-state",
+        );
+        let g2 = s10_resume(&sock, &g1.run_id).expect("resume");
+        assert!(g2.terminal && g2.state != "completed", "{g2:?}");
+        assert!(
+            !s10_state_file(&fx, "s10-chain", g2.task_instance_id.as_deref().unwrap()).exists()
+        );
+        let at = fx.provider.bodies.lock().unwrap().len();
+        if destroy_ancestor {
+            // generation 1 had state; if it is gone, generation 3 must refuse rather than start over
+            std::fs::remove_file(s10_state_file(&fx, "s10-chain", &t1)).unwrap();
+            s10_refused(
+                &s10_resume(&sock, &g2.run_id),
+                at,
+                &fx,
+                "engine-state-missing",
+            );
+        } else {
+            // generation 3 inherits generation 1's history THROUGH the state-less generation 2
+            let g3 = s10_resume(&sock, &g2.run_id).expect("resume");
+            assert_eq!(g3.state, "completed", "{g3:?}");
+            let rec = store
+                .load(g3.task_instance_id.as_deref().unwrap())
+                .unwrap()
+                .unwrap();
+            let l = rec.lineage.as_ref().unwrap();
+            assert_eq!(
+                (l.inherited, l.predecessor_task.as_deref()),
+                (true, Some(t1.as_str()))
+            );
+            assert!(rec
+                .events
+                .iter()
+                .any(|e| e.kind == "predecessor-state-from-ancestor"));
+        }
+    }
+    b.shutdown();
+}
+
+/// SEC-3: an adaptive budget the A614 guard would refuse mid-run is refused before dispatch.
+#[test]
+fn s10_a_sealed_adaptive_budget_above_the_hard_guard_never_dispatches() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s6_fixture(s6_claims(), Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "s10-budget", None, None);
+    for (n, budget) in [450_001u64, 4_194_304].into_iter().enumerate() {
+        s7_set_budget(&fx, Some(budget));
+        let run = submit_wait(
+            b.socket_path(),
+            &s4_intent(&format!("s10-budget-{n:0>8}"), Some(ADAPTIVE_MODE)),
+            120,
+        );
+        assert_eq!(
+            run.error_code.as_deref(),
+            Some("engine-budget-required"),
+            "{budget}: {run:?}"
+        );
+        assert_eq!(
+            fx.provider.accepted.load(Ordering::SeqCst),
+            0,
+            "{budget}: no provider request"
+        );
+    }
+    // the guard itself is still accepted
+    s7_set_budget(&fx, Some(450_000));
+    let ok = submit_wait(
+        b.socket_path(),
+        &s4_intent("s10-budget-ok000000", Some(ADAPTIVE_MODE)),
+        180,
+    );
+    assert_eq!(ok.state, "completed", "{ok:?}");
+    b.shutdown();
+}
+
+/// SEC-1: the broker-owned facts a state-less continuation relies on are checked one by one.
+#[test]
+fn s10_a_run_record_that_cannot_prove_it_dispatched_nothing_is_refused() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s6_fixture(s6_claims(), Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "s10-facts", None, None);
+    let sock = b.socket_path().to_owned();
+    let runs = fx.config("s10-facts").state_dir.join("runs");
+    // (label, edit of the crashed run's record, continues?)
+    type Edit = fn(&mut Value);
+    let cases: [(&str, Edit, bool); 7] = [
+        ("untouched: bound, state never created, nothing dispatched", |_| {}, true),
+        ("a turn was counted (a dispatch may have happened)", |r| r["run"]["turn"] = json!(1), false),
+        ("an HTTP status was recorded", |r| r["run"]["httpStatus"] = json!(200), false),
+        ("a provider response id was recorded", |r| r["run"]["providerResponseId"] = json!("resp_x"), false),
+        ("usage was recorded", |r| r["run"]["usageInputTokens"] = json!(10), false),
+        ("a record from before the marker existed", |r| { r.as_object_mut().unwrap().remove("engineStateStarted"); }, false),
+        ("the engine binding is another engine (refused even earlier, by the engine-continuity gate)", |r| r["engineId"] = json!("muse-v0"), false),
+    ];
+    for (n, (label, edit, continues)) in cases.iter().enumerate() {
+        let run = s10_crashed(&sock, &format!("s10-facts-{n:0>11}"), "before-engine-state");
+        assert!(
+            !s10_state_file(&fx, "s10-facts", run.task_instance_id.as_deref().unwrap()).exists()
+        );
+        let path = runs.join(format!("{}.json", run.run_id));
+        let mut rec: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            rec["engineStateStarted"],
+            json!(false),
+            "{label}: the marker is recorded from the start"
+        );
+        assert_eq!(rec["engineId"], json!("muse-v1"), "{label}");
+        edit(&mut rec);
+        std::fs::write(&path, serde_json::to_vec(&rec).unwrap()).unwrap();
+        let at = fx.provider.bodies.lock().unwrap().len();
+        let r = s10_resume(&sock, &run.run_id);
+        if *continues {
+            let r = r.unwrap_or_else(|e| panic!("{label}: {e}"));
+            assert_eq!(r.state, "completed", "{label}: {r:?}");
+        } else {
+            let code = if label.starts_with("the engine binding") {
+                "engine-continuity-mismatch"
+            } else {
+                "engine-state-missing"
+            };
+            s10_refused(&r, at, &fx, code);
+        }
+    }
+    b.shutdown();
+}

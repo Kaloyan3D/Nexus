@@ -1115,12 +1115,16 @@ impl EngineExtension for MuseV1 {
             (true, Some(aa), Some(bb)) => {
                 // the observations THIS transition folded, from the Core's own feed and the two
                 // frontiers (never from the engine's claim)
+                // SEC-4: one execution is one observation, however often the feed repeats it - the
+                // same de-duplication `evaluate` applies, so the engine and the host cannot disagree
+                let mut counted = std::collections::HashSet::new();
                 let folded_failed = super::muse_v1_adaptive::failed_verifications(
                     snap.activity.iter().filter(|o| {
                         o.generation == b.generation
                             && o.seq > floor
                             && o.seq <= b.observed_through
                             && !a.seen.contains(&o.execution_id)
+                            && counted.insert(o.execution_id.clone())
                     }),
                 );
                 let evaluated = b.evaluations == a.evaluations + 1;

@@ -205,6 +205,25 @@ check('wireProfile is emitted only when the provider declares a known profile (A
   assert.equal(bad.code, 'registry-target-incomplete');
 });
 
+// EM-04C2 S10 SEC-5: the mode -> engine mapping and the saved-configuration requirement are pinned
+// here as well as in RegistryAdaptiveMode, so the authorization boundary does not rest on one suite
+check('the mode/engine table and the saved-configuration requirement are pinned (SEC-5)', function () {
+  const issuer = require('../config/registry/native-issuer.cjs');
+  assert.deepEqual(Object.keys(issuer.NATIVE_SCOPES).sort(), ['engineering-v2', 'engineering-v2-adaptive']);
+  assert.equal(issuer.scopeOf('engineering-v2').engineId, 'muse-v0');
+  assert.equal(issuer.scopeOf('engineering-v2-adaptive').engineId, 'muse-v1');
+  assert.equal(issuer.scopeOf('engineering-v2').requiresSavedConfiguration, false);
+  assert.equal(issuer.scopeOf('engineering-v2-adaptive').requiresSavedConfiguration, true);
+  assert.equal(issuer.engineAllowed(issuer.scopeOf('engineering-v2'), 'muse-v1'), false, 'the adaptive engine is never issued under the default mode');
+  assert.equal(issuer.engineAllowed(issuer.scopeOf('engineering-v2-adaptive'), 'muse-v0'), false);
+  // a selection naming any other mode is refused before anything is compiled
+  for (const bad of ['engineering-v3', 'engineering-v1', '__proto__']) {
+    const r = v2.issueExecutionTargetV2({ taskInstanceId: 't', sessionId: 's', selection: { modeId: bad } }, { service: {} });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'registry-unsupported-scope', bad);
+  }
+});
+
 check('unsupported scope never reaches extension', function () {
   const r = harness({ roleId: 'engineer_normal' });
   assert.equal(r.ok, false);

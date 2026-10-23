@@ -16,7 +16,7 @@
 //   3. runs the repository's own installer steps inside the copy with HOME=<out>/home:
 //        MusePresetDependencyClosure.cjs prepare (muse, engineering, deepseek), Complete-Install.ps1;
 //   4. makes the copy a git repository (several suites assert "protected trees clean") and runs
-//      tests/Muse*.Tests.cjs, tests/Registry*.Tests.cjs, tests/Native*.Tests.cjs;
+//      tests/{Muse,Registry,Native,Controller,Aih,EM04C2Gate}*.Tests.cjs;
 //   5. classifies every non-passing suite: `env:*` (a named missing prerequisite) or `REAL`.
 // A suite that cannot execute is reported UNVERIFIED, never as passed. Exit status: 0 = every suite
 // passed; 1 = at least one REAL failure; 3 = the environment could not be built (all UNVERIFIED).
@@ -35,7 +35,7 @@ const repo = path.resolve(__dirname, '..')
 const out = path.resolve(opt('--out', path.join(os.homedir(), '.cache', 'em04c2-jsenv')))
 const reportPath = opt('--report', null)
 const keep = args.includes('--keep')
-const suiteRx = new RegExp(opt('--suites', '^tests/(Muse|Registry|Native)[A-Za-z0-9]*\\.Tests\\.cjs$'))
+const suiteRx = new RegExp(opt('--suites', '^tests/(Muse|Registry|Native|Controller|Aih|EM04C2Gate)[A-Za-z0-9]*\\.Tests\\.cjs$'))
 const appSrc = process.env.NEXUS_JSENV_APP || path.join(os.homedir(), '.cache', 'nexus-release-toolchain', 'app')
 const rtSrc = process.env.NEXUS_JSENV_RUNTIME || path.join(os.homedir(), '.local', 'share', 'nexus', 'runtime')
 
@@ -133,13 +133,9 @@ const PARAMETERIZED = new Set(['tests/RegistryR75InstallationAudit.Tests.cjs', '
 report.environment = { built: true, copiedFiles: copied, steps, app: 'linked read-only', pwsh: run('pwsh', ['--version'], { env }).stdout.trim(), node: run(nodeBin, ['--version']).stdout.trim() }
 
 // 4/5. the suites
-const classes = [
-  [/Cannot find module '@deepseek-ai\/dsh-tools'/, 'env:dsh-tools-missing'],
-  [/spawn pwsh ENOENT|pwsh: command not found|no pwsh host/i, 'env:pwsh-missing'],
-  [/nexusd binary exists|kernel binary exists|nexus-kernel/i, 'env:native-binaries-not-built'],
-  // the linked toolchain is an OLDER installation: it carries other dependency versions than the lock file pins
-  [/'\d+\.\d+\.\d+' !== '\d+\.\d+\.\d+'/, 'env:toolchain-dependency-version-differs-from-lockfile'],
-]
+const gateLib = require('./lib/em04c2-gate-lib.cjs')
+// failure classes live in the gate library so the negative controls can attack them
+const classes = gateLib.JS_ENV_CLASSES
 const suites = fs.readdirSync(path.join(root, 'tests')).map((f) => 'tests/' + f).filter((f) => suiteRx.test(f)).sort()
 let pass = 0
 let real = 0
@@ -161,7 +157,8 @@ for (const s of suites) {
     report.suites[s] = { status: 'UNVERIFIED', class: hit[1], ms, first }
   } else {
     real++
-    report.suites[s] = { status: 'FAIL', class: 'REAL', ms, first }
+    // keep the tail of the output so a failure can be diagnosed from the report alone (S10 R74 work)
+    report.suites[s] = { status: 'FAIL', class: 'REAL', ms, first, outputTail: text.slice(-6000) }
   }
 }
 report.summary = { suites: suites.length, passed: pass, failedReal: real, unverifiedEnvironment: envFail }

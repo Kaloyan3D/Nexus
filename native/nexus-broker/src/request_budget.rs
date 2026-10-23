@@ -37,6 +37,11 @@ use nexus_model::request::InputItem;
 /// Version of this budget contract.
 pub const REQUEST_BUDGET_VERSION: u32 = 1;
 
+/// EM-04C2 S10 (SEC-3): the largest request-size budget an engine that REQUIRES a sealed budget may
+/// run under - the A614 acceptance guard (450,000 B). The Registry's own range is wider (65,536 to
+/// 4,194,304); a sealed budget above this would only be discovered mid-run.
+pub const MAX_REQUIRED_SEALED_BUDGET_BYTES: u64 = 450_000;
+
 /// The ceiling for one request and the bytes held back inside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestBudget {

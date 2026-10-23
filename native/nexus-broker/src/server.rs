@@ -194,6 +194,23 @@ impl Broker {
         self.store.put(&rec).is_ok()
     }
 
+    /// EM-04C2 S10: record that the run's engine state now exists. `false` = it could not be
+    /// recorded, and the run must not go on.
+    pub(crate) fn mark_engine_state_started(&self, run_id: &str) -> bool {
+        let _g = self.store.lock();
+        let Some(mut rec) = self.store.load(run_id) else {
+            return false;
+        };
+        if rec.engine_state_started == Some(true) {
+            return true;
+        }
+        if rec.run.terminal {
+            return false;
+        }
+        rec.engine_state_started = Some(true);
+        self.store.put(&rec).is_ok()
+    }
+
     /// Annotate a record that is already final (links between runs, what happened to its
     /// patch). Never changes its state, outcome or counters.
     pub fn annotate(&self, run_id: &str, f: impl FnOnce(&mut IntentRun)) {
@@ -613,6 +630,7 @@ impl Broker {
                 task_binding_identity: None,
                 task_binding_identity_version: None,
                 tool_catalog_digest: None,
+                engine_state_started: Some(false),
             };
             // Record first, then the index: a crash between the two leaves
             // an unindexed record (recovered as abandoned), never a key that

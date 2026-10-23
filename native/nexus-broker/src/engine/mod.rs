@@ -494,6 +494,49 @@ fn engines_with(test_build: bool, muse_v1_enabled: bool) -> Vec<&'static dyn Eng
     v
 }
 
+/// EM-04C2 S10 (RG-1): what THIS compiled artifact contains, for `nexus-broker engines`. Read-only and
+/// secret-free: it lets the release gate ask the exact shipped executable which engines it registers
+/// and which (mode, engine) pairs resolve, instead of inferring it from a different build.
+pub fn build_report() -> serde_json::Value {
+    const MODES: [&str; 6] = [
+        "engineering-v1",
+        "engineering-v2",
+        "engineering-v2-adaptive",
+        "engineering-v3",
+        "engineering-v2-adaptive ",
+        "",
+    ];
+    let registered: Vec<&str> = built_in()
+        .iter()
+        .map(|e| e.descriptor().engine_id)
+        .collect();
+    let mut resolvable = Vec::new();
+    for mode in MODES {
+        for engine in [
+            "muse-v0",
+            "muse-v1",
+            "muse-v1-shadow",
+            "muse-v1-signals",
+            "effort-test-v0",
+            "dual-v1",
+            "MUSE-V0",
+            "",
+        ] {
+            if resolve(mode, engine).is_ok() {
+                resolvable.push(serde_json::json!([mode, engine]));
+            }
+        }
+    }
+    serde_json::json!({
+        "report": "nexus-broker-engines/1",
+        "testEnginesFeature": cfg!(feature = "test-engines"),
+        "testFixturesFeature": cfg!(feature = "test-fixtures"),
+        "adaptiveProductionEnabled": MUSE_V1_PRODUCTION_ENABLED,
+        "registered": registered,
+        "resolvable": resolvable,
+    })
+}
+
 /// Resolve the extension for a run from its SEALED Registry resolution. Unknown or
 /// unavailable engines, and an engine not declared for the mode, fail closed.
 pub fn resolve(

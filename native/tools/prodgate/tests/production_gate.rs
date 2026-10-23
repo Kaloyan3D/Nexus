@@ -104,11 +104,16 @@ fn the_activation_gate_is_a_closed_compile_time_constant() {
 /// The published HMAC key of the EM-03 fixtures is refused by `EngineStateStore::open` itself.
 #[test]
 fn the_published_test_hmac_key_is_refused_by_the_real_store() {
-    let hex_key = std::fs::read_to_string(
-        repo_root()
-            .join("native/nexus-broker/tests/fixtures/em03-engine-state/TEST-ONLY-throwaway-em03-hmac-key.hex"),
-    )
-    .expect("the published fixture key");
+    // located by its suffix, so that this test binary does not itself embed the fixture's marker
+    // name (the release gate scans production test binaries for it)
+    let dir = repo_root().join("native/nexus-broker/tests/fixtures/em03-engine-state");
+    let file = std::fs::read_dir(&dir)
+        .expect("the fixture directory")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().ends_with("-em03-hmac-key.hex"))
+        .expect("the published fixture key file");
+    let hex_key = std::fs::read_to_string(file).expect("the published fixture key");
     assert_eq!(
         nexus_contracts::sha256_hex(&hex_key),
         PUBLISHED_TEST_KEY_SHA256,

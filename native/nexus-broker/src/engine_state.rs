@@ -470,10 +470,42 @@ pub struct EngineRun {
     pub env: crate::engine::EngineEnv,
 }
 
-/// What a continuation knows about the run it continues.
+/// What a continuation knows about the run it continues, and about the chain behind it.
+///
+/// EM-04C2 S10 (SEC-1): for an engine that INHERITS state, a predecessor without a durable engine
+/// record may be continued only when the facts below PROVE that nothing could have been spent. The
+/// facts come from the broker's own run store (never from model-authored data): which engine the run
+/// was bound to, and whether its record shows any sign that a model attempt was dispatched. The engine
+/// state of a run is created before its first attempt can be dispatched (`EngineRun::start` precedes
+/// `InspectSession::begin`), so a bound run with no state and no sign of dispatch consumed nothing.
+#[derive(Debug, Clone)]
 pub struct Predecessor {
     pub run_id: String,
     pub task_instance_id: Option<String>,
+    /// The engine the broker recorded for this run (`None` = none recorded).
+    pub bound_engine: Option<String>,
+    /// The run record shows any sign that a model attempt may have been dispatched.
+    pub may_have_dispatched: bool,
+    /// Older runs of the same chain, nearest first (bounded).
+    pub ancestors: Vec<Predecessor>,
+    /// Whether `ancestors` reaches the first run of the chain (false = the walk was cut short).
+    pub chain_complete: bool,
+}
+
+impl Predecessor {
+    /// A predecessor about which nothing else is known: for an inheriting engine this can only be
+    /// continued when its engine state exists (the conservative default: it may have dispatched,
+    /// and no engine is recorded).
+    pub fn new(run_id: impl Into<String>, task_instance_id: Option<String>) -> Self {
+        Self {
+            run_id: run_id.into(),
+            task_instance_id,
+            bound_engine: None,
+            may_have_dispatched: true,
+            ancestors: Vec::new(),
+            chain_complete: true,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -722,22 +754,53 @@ pub fn examine_predecessor(
     let mut lineage = None;
     let mut notes: Vec<(String, Option<u32>, Option<String>, String)> = Vec::new();
     if let Some(p) = predecessor {
-        let prev = match &p.task_instance_id {
+        let mut prev = match &p.task_instance_id {
             Some(t) => store.load(t)?,
             None => None,
         };
+        // EM-04C2 S10 (SEC-1): an inheriting engine never silently starts over. Without the
+        // predecessor's own record, either an ancestor's authenticated record carries the history
+        // (every run in between PROVEN to have dispatched nothing), or nothing in the whole chain
+        // could have been spent, or the continuation is refused before anything is authorized.
+        let mut inherited_from: Option<String> = None;
+        let mut proven_fresh = false;
+        if prev.is_none() && d.inherits_state {
+            match state_source(store, d.engine_id, &p)? {
+                Some((rec, run)) => {
+                    inherited_from = Some(run);
+                    prev = Some(rec);
+                }
+                None => proven_fresh = true,
+            }
+        }
         match prev {
             // a run from before EM-03 (or one that never reached its task): its engine was
             // already checked equal by the EM-01 continuity rule; nothing to inherit
             None => {
+                let (rule, why) = if proven_fresh {
+                    (
+                        "no-state-proven-undispatched",
+                        "no run of the chain has engine state and every one is proven (bound to this engine, no sign of a dispatched attempt) to have spent nothing; this task starts from the engine's initial state",
+                    )
+                } else {
+                    (
+                        "pre-em03-no-state",
+                        "the interrupted run has no engine state (pre-EM-03); this task starts from the engine's initial state at the default effort",
+                    )
+                };
                 lineage = Some(Lineage {
                     predecessor_run: p.run_id.clone(),
                     predecessor_task: p.task_instance_id.clone(),
                     predecessor_revision: None,
                     inherited: false,
-                    rule: "pre-em03-no-state".into(),
+                    rule: rule.into(),
                 });
-                notes.push(("continued-without-predecessor-state".into(), None, None, "the interrupted run has no engine state (pre-EM-03); this task starts from the engine's initial state at the default effort".into()));
+                notes.push((
+                    "continued-without-predecessor-state".into(),
+                    None,
+                    None,
+                    why.into(),
+                ));
             }
             Some(prev) => {
                 if prev.engine_id != d.engine_id || prev.mode_id != mode_id {
@@ -772,9 +835,12 @@ pub fn examine_predecessor(
                 {
                     notes.push(("effort-reset-continuation".into(), None, Some(sel.effort.clone()), "the continuation starts at the default effort under its own task binding; another effort needs a new proposal and a new authorization".into()));
                 }
+                if let Some(run) = &inherited_from {
+                    notes.push(("predecessor-state-from-ancestor".into(), None, None, format!("the interrupted run left no engine state and is proven to have dispatched nothing; the budget and history are inherited from the authenticated record of {run}")));
+                }
                 lineage = Some(Lineage {
                     predecessor_run: p.run_id.clone(),
-                    predecessor_task: p.task_instance_id.clone(),
+                    predecessor_task: Some(prev.task_instance_id.clone()),
                     predecessor_revision: Some(prev.revision),
                     inherited: d.inherits_state,
                     rule: if d.inherits_state {
@@ -792,6 +858,50 @@ pub fn examine_predecessor(
         lineage,
         notes,
     })
+}
+
+/// Largest chain of predecessors examined for a state-less continuation.
+pub const MAX_CHAIN_DEPTH: usize = 8;
+
+/// The authenticated engine record that carries the history of `p`'s chain, for an engine that
+/// inherits state: `Ok(Some((record, run)))` when an older run's record is found and every run in
+/// between is proven to have dispatched nothing; `Ok(None)` when no run of the chain has a record
+/// and all are proven to have spent nothing; `Err(engine-state-missing)` otherwise. A record that
+/// exists but is tampered with, foreign or unreadable is an error of `store.load`, never skipped.
+fn state_source(
+    store: &EngineStateStore,
+    engine_id: &str,
+    p: &Predecessor,
+) -> Result<Option<(EngineStateRecord, String)>, StateError> {
+    let missing = |m: String| err("engine-state-missing", m);
+    let chain: Vec<&Predecessor> = std::iter::once(p).chain(p.ancestors.iter()).collect();
+    for (i, node) in chain.iter().enumerate() {
+        if i > 0 {
+            if let Some(t) = &node.task_instance_id {
+                if let Some(rec) = store.load(t)? {
+                    return Ok(Some((rec, node.run_id.clone())));
+                }
+            }
+        }
+        if node.bound_engine.as_deref() != Some(engine_id) {
+            return Err(missing(format!(
+                "the interrupted run {} has no engine state and is not recorded as bound to engine {engine_id}; refusing to start the task's history over",
+                node.run_id
+            )));
+        }
+        if node.may_have_dispatched {
+            return Err(missing(format!(
+                "the interrupted run {} has no engine state but its record shows an attempt may have been dispatched; its budget and history cannot be reconstructed, so the continuation is refused before anything is authorized",
+                node.run_id
+            )));
+        }
+    }
+    if !p.chain_complete || p.ancestors.len() >= MAX_CHAIN_DEPTH {
+        return Err(missing(
+            "the chain of interrupted runs is longer than can be examined; refusing to assume an empty history".into(),
+        ));
+    }
+    Ok(None)
 }
 
 fn write_atomic_unique(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -976,11 +1086,166 @@ mod tests {
             "engineering-v2",
             &"b".repeat(64),
             "low",
-            pred.map(|(r, t)| Predecessor {
-                run_id: r.into(),
-                task_instance_id: t.map(str::to_owned),
-            }),
+            pred.map(|(r, t)| Predecessor::new(r, t.map(str::to_owned))),
         )
+    }
+
+    /// A state-less predecessor with explicit broker-owned facts.
+    #[cfg(feature = "test-engines")]
+    fn node(run: &str, task: Option<&str>, engine: Option<&str>, dispatched: bool) -> Predecessor {
+        let mut p = Predecessor::new(run, task.map(str::to_owned));
+        p.bound_engine = engine.map(str::to_owned);
+        p.may_have_dispatched = dispatched;
+        p
+    }
+
+    #[cfg(feature = "test-engines")]
+    fn start_with(
+        dir: &Path,
+        ext: &'static dyn crate::engine::EngineExtension,
+        task: &str,
+        p: Option<Predecessor>,
+    ) -> Result<EngineRun, StateError> {
+        EngineRun::start(
+            EngineStateStore::open(dir).unwrap(),
+            ext,
+            &format!("run_{task}"),
+            task,
+            "engineering-v2",
+            &"b".repeat(64),
+            "low",
+            p,
+        )
+    }
+
+    /// EM-04C2 S10 SEC-1: an inheriting engine never silently starts over.
+    #[cfg(feature = "test-engines")]
+    #[test]
+    fn an_inheriting_engine_never_silently_starts_a_fresh_history() {
+        use crate::engine::test_engine::EFFORT_TEST_V0;
+        let id = "effort-test-v0";
+        let d = tempfile::tempdir().unwrap();
+        let code = |r: Result<EngineRun, StateError>| r.err().map(|e| e.code);
+        // 1. missing record, nothing known about the predecessor: refused
+        assert_eq!(
+            code(start_with(
+                d.path(),
+                &EFFORT_TEST_V0,
+                "t1",
+                Some(Predecessor::new("run_x", Some("task-x".into())))
+            )),
+            Some("engine-state-missing")
+        );
+        // 2. missing record, bound to this engine but an attempt may have been dispatched: refused
+        assert_eq!(
+            code(start_with(
+                d.path(),
+                &EFFORT_TEST_V0,
+                "t2",
+                Some(node("run_x", Some("task-x"), Some(id), true))
+            )),
+            Some("engine-state-missing")
+        );
+        // 3. bound to ANOTHER engine (or none): refused
+        for e in [Some("muse-v0"), None] {
+            assert_eq!(
+                code(start_with(
+                    d.path(),
+                    &EFFORT_TEST_V0,
+                    "t3",
+                    Some(node("run_x", Some("task-x"), e, false))
+                )),
+                Some("engine-state-missing")
+            );
+        }
+        // 4. no task instance at all and not proven: refused
+        assert_eq!(
+            code(start_with(
+                d.path(),
+                &EFFORT_TEST_V0,
+                "t4",
+                Some(node("run_x", None, Some(id), true))
+            )),
+            Some("engine-state-missing")
+        );
+        // none of the refusals created a record
+        assert!(EngineStateStore::open(d.path())
+            .unwrap()
+            .load("t1")
+            .unwrap()
+            .is_none());
+        // 5. proven undispatched, whole chain empty: starts fresh, rule recorded, nothing granted
+        let ok = start_with(
+            d.path(),
+            &EFFORT_TEST_V0,
+            "t5",
+            Some(node("run_x", Some("task-x"), Some(id), false)),
+        )
+        .unwrap();
+        let l = ok.rec.lineage.clone().unwrap();
+        assert_eq!(
+            (l.rule.as_str(), l.inherited),
+            ("no-state-proven-undispatched", false)
+        );
+        // 6. over-long / cut chain is unknown, not empty
+        let mut cut = node("run_x", Some("task-x"), Some(id), false);
+        cut.chain_complete = false;
+        assert_eq!(
+            code(start_with(d.path(), &EFFORT_TEST_V0, "t6", Some(cut))),
+            Some("engine-state-missing")
+        );
+        let mut deep = node("run_x", Some("task-x"), Some(id), false);
+        deep.ancestors = (0..MAX_CHAIN_DEPTH)
+            .map(|i| {
+                node(
+                    &format!("run_a{i}"),
+                    Some(&format!("task-a{i}")),
+                    Some(id),
+                    false,
+                )
+            })
+            .collect();
+        assert_eq!(
+            code(start_with(d.path(), &EFFORT_TEST_V0, "t7", Some(deep))),
+            Some("engine-state-missing")
+        );
+        // 7. an ancestor with an authenticated record carries the history, only through proven-quiet runs
+        let a = start(d.path(), &EFFORT_TEST_V0, "task-anc", None).unwrap();
+        let anc_rev = a.rec.revision;
+        let mut mid = node("run_mid", Some("task-mid"), Some(id), false);
+        mid.ancestors = vec![node("run_task-anc", Some("task-anc"), Some(id), true)];
+        let c = start_with(d.path(), &EFFORT_TEST_V0, "t8", Some(mid)).unwrap();
+        let l = c.rec.lineage.clone().unwrap();
+        assert_eq!(
+            (
+                l.inherited,
+                l.predecessor_revision,
+                l.predecessor_task.as_deref()
+            ),
+            (true, Some(anc_rev), Some("task-anc"))
+        );
+        assert!(c
+            .rec
+            .events
+            .iter()
+            .any(|e| e.kind == "predecessor-state-from-ancestor"));
+        // 8. an intermediate run that may have dispatched blocks the inheritance
+        let mut bad = node("run_mid", Some("task-mid"), Some(id), true);
+        bad.ancestors = vec![node("run_task-anc", Some("task-anc"), Some(id), true)];
+        assert_eq!(
+            code(start_with(d.path(), &EFFORT_TEST_V0, "t9", Some(bad))),
+            Some("engine-state-missing")
+        );
+        // 9. an engine that does not inherit keeps the legacy rule
+        use crate::engine::muse_v0::MUSE_V0;
+        let m = start_with(
+            d.path(),
+            &MUSE_V0,
+            "t10",
+            Some(Predecessor::new("run_old", Some("task-old".into()))),
+        )
+        .unwrap();
+        assert_eq!(m.rec.lineage.unwrap().rule, "pre-em03-no-state");
     }
 
     #[cfg(feature = "test-engines")]
@@ -1312,10 +1577,10 @@ mod em03_records_compatibility {
             "engineering-v2",
             &"b".repeat(64),
             "low",
-            Some(Predecessor {
-                run_id: format!("run_{pred}"),
-                task_instance_id: Some(pred.to_owned()),
-            }),
+            Some(Predecessor::new(
+                format!("run_{pred}"),
+                Some(pred.to_owned()),
+            )),
         )
     }
 

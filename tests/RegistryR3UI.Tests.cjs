@@ -148,6 +148,8 @@ async function main() {
       assert.equal(adaptive.selectable, false)
       assert.equal(adaptive.runnable, false)
       assert.equal(adaptive.executable, false)
+      // EM-04C2 S10 SEC-5: even if it were opened, it runs only from an operator-saved configuration
+      assert.equal(require('../config/registry/native-issuer.cjs').scopeOf('engineering-v2-adaptive').requiresSavedConfiguration, true)
     }
     assert.equal(modes.length, adaptive ? 4 : 3)
     const byId = Object.fromEntries(modes.map((m) => [m.id, m]))

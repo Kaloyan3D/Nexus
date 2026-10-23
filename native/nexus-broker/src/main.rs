@@ -401,6 +401,11 @@ fn run() -> i32 {
     if args.first().map(String::as_str) == Some("authorize-live-session") {
         return authorize_live_session(&args[1..]);
     }
+    if args.first().map(String::as_str) == Some("engines") {
+        // EM-04C2 S10: read-only description of this build (used by scripts/EM04C2-ReleaseGate.cjs)
+        println!("{}", nexus_broker::engine::build_report());
+        return 0;
+    }
     if args.first().map(String::as_str) == Some("identity") {
         return identity_report(&args[1..]);
     }

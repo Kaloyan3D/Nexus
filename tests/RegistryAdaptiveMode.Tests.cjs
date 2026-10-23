@@ -475,4 +475,125 @@ check('snapshot completeness is judged by REQUIRED legacy modes, not by a count 
   process.on('exit', () => fs.rmSync(reviewTmp, { recursive: true, force: true }))
 }
 
+
+// ---- EM-04C2 S10 preflight SEC-2: the adaptive reasoning contract is a closed, enforced table ----
+{
+  const resolver = require('../config/registry/resolver.cjs')
+  const okModel = { id: 'm', dataUseTier: 'standard', capabilities: { toolCalling: true, reasoning: true } }
+  const okRoute = { id: 'r', executionKind: 'raw-model', compatibility: { transport: 'openai-responses' }, reasoningLevels: ['low', 'medium', 'high', 'xhigh'] }
+  const okProvider = { id: 'p', metadata: {} }
+  const okAssign = { reasoning: 'low', allowedReasoning: ['low', 'medium', 'high', 'xhigh'] }
+  const judge = (over) => resolver.checkAdaptiveContract('muse-v1', {}, 'muse_main', Object.assign({}, okModel, over.model), Object.assign({}, okRoute, over.route), { provider: Object.assign({}, okProvider, over.provider), assignment: over.assignment === null ? undefined : Object.assign({}, okAssign, over.assignment) })
+  const codes = (errs) => errs.map((e) => e.code)
+
+  check('the contract table is closed and frozen: muse-v0 (legacy) and muse-v1 only; unknown contracts fail closed', () => {
+    assert.deepEqual(Object.keys(resolver.ADAPTIVE_CONTRACTS).sort(), ['muse-v0', 'muse-v1'])
+    assert.ok(Object.isFrozen(resolver.ADAPTIVE_CONTRACTS) && Object.isFrozen(resolver.ADAPTIVE_CONTRACTS['muse-v1']))
+    for (const bad of ['muse-v2', 'MUSE-V1', 'muse-v1 ', '', '__proto__', 'constructor', 'toString', 'nexus-adaptive-v1', null, 7, {}]) {
+      const e = resolver.checkAdaptiveContract(bad, {}, 'muse_main', okModel, okRoute, {})
+      assert.deepEqual(codes(e), ['slot-capability-not-satisfied'], JSON.stringify(bad))
+      assert.match(e[0].message, /unknown adaptiveReasoningContract/)
+    }
+    assert.deepEqual(resolver.checkAdaptiveContract('muse-v0', {}, 'muse_main', okModel, okRoute, {}), [], 'muse-v0 is judged by its own, unchanged rule')
+  })
+
+  check('muse-v1: a model, route and policy that meet the engine\'s real requirements are accepted', () => {
+    assert.deepEqual(judge({}), [])
+    // both data-use tiers the Registry defines are acceptable when DECLARED; the legacy contributor-only rule is not imposed
+    assert.deepEqual(judge({ model: { dataUseTier: 'contributor' } }), [])
+    assert.deepEqual(judge({ model: { dataUseTier: 'standard' } }), [])
+    // the one known provider wire profile is fine; so is none
+    assert.deepEqual(judge({ provider: { metadata: { wireProfile: 'opencode-go-responses' } } }), [])
+    // a default-only slot is legal (an adaptive mode that never adapts)
+    assert.deepEqual(judge({ assignment: { allowedReasoning: undefined } }), [])
+    // listing routes (no assignment yet) judges the model/route/provider part only
+    assert.deepEqual(judge({ assignment: null }), [])
+  })
+
+  check('muse-v1: every unmet requirement is refused, each for its own reason', () => {
+    const refuse = (over, rx) => {
+      const e = judge(over)
+      assert.ok(e.length >= 1 && e.every((x) => x.code === 'slot-capability-not-satisfied'), JSON.stringify(over))
+      assert.ok(e.some((x) => rx.test(x.message)), JSON.stringify(over) + ' :: ' + e.map((x) => x.message).join(' | '))
+    }
+    refuse({ model: { dataUseTier: undefined } }, /data-use tier/)
+    refuse({ model: { dataUseTier: 'public' } }, /data-use tier/)
+    refuse({ model: { dataUseTier: null } }, /data-use tier/)
+    refuse({ model: { capabilities: { toolCalling: false, reasoning: true } } }, /toolCalling/)
+    refuse({ model: { capabilities: { toolCalling: true, reasoning: false } } }, /reasoning/)
+    refuse({ model: { capabilities: {} } }, /toolCalling/)
+    refuse({ route: { executionKind: 'agent-sdk' } }, /execution kind/)
+    // transports with no implemented, tested adaptive path (Gemini included) are refused, never assumed
+    for (const t of ['openai-chat-completions', 'anthropic-messages', 'gemini-generate-content', 'local-openai-compatible', 'agent-sdk', 'unknown', '', undefined]) {
+      refuse({ route: { compatibility: { transport: t } } }, /only openai-responses/)
+    }
+    refuse({ route: { compatibility: {} } }, /only openai-responses/)
+    refuse({ provider: { metadata: { wireProfile: 'gemini-native' } } }, /wireProfile/)
+    // levels outside the Governor ladder can never be applied
+    for (const lvl of ['off', 'minimal', 'max', 'managed', 'ultra']) {
+      refuse({ assignment: { reasoning: lvl, allowedReasoning: [lvl] } }, /Governor ladder/)
+      refuse({ assignment: { allowedReasoning: ['low', lvl] } }, /could never be applied/)
+    }
+    refuse({ assignment: { reasoning: undefined } }, /default reasoning/)
+  })
+
+  check('the contract is enforced by the Registry itself on the real catalog: compile and eligible-route listing', () => {
+    // the shipped catalog, in memory: the adaptive definition ACTIVATED and every model scoped to
+    // muse-v1 (what an operator would have to do; the built-in catalog scopes none)
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'registry-contract-'))
+    try {
+      const root = path.join(tmp, 'inst')
+      const cfg = path.join(root, 'config')
+      fs.mkdirSync(cfg, { recursive: true })
+      fs.cpSync(path.join(repoRoot, 'config', 'registry'), path.join(cfg, 'registry'), { recursive: true })
+      for (const f of ['model-registry.json', 'engineering-profiles.json', 'muse-profiles.json']) fs.copyFileSync(path.join(repoRoot, 'config', f), path.join(cfg, f))
+      const svc = require(path.join(cfg, 'registry', 'service.cjs')).createService({ installRoot: root, dataRoot: path.join(tmp, 'data') })
+      const snap = JSON.parse(JSON.stringify(svc.effectiveSnapshot().snapshot))
+      for (const model of snap.models) model.engines = Array.from(new Set((model.engines || []).concat(['muse-v1'])))
+      const mode = snap.modes.find((x) => x.id === 'engineering-v2-adaptive')
+      Object.assign(mode, { status: 'active', selectable: true, runnable: true })
+      const compile = (routeId, modelId, reasoning, allowed) => {
+        const config = { schemaVersion: 1, modeId: 'engineering-v2-adaptive', revision: 0, slots: { main: { logicalModelId: modelId, routeId, reasoning } }, roleOverrides: {} }
+        if (allowed) config.slots.main.allowedReasoning = allowed
+        return resolver.compileModeConfig(config, snap, null)
+      }
+      const codesOf = (r) => (r.errors || []).map((e) => e.code)
+      // the only catalog route on the Native Responses transport: Muse Spark through OpenCode Go
+      const ok = compile('opencode-go/meta/muse-spark-1.3-contributor', 'meta/muse-spark-1.3-contributor', 'low', ['low', 'medium', 'high', 'xhigh'])
+      assert.equal(ok.ok, true, JSON.stringify(ok.errors || ok))
+      // ... and the binding it seals carries the contract and the allowed levels
+      const binding = Object.values(ok.snapshot.roles)[0]
+      assert.equal(binding.slotRequirements.adaptiveReasoningContract, 'muse-v1')
+      assert.deepEqual(binding.allowedReasoning, ['high', 'low', 'medium', 'xhigh'])
+      // a ladder-external default or authorized level is refused (the route declares minimal)
+      let r = compile('opencode-go/meta/muse-spark-1.3-contributor', 'meta/muse-spark-1.3-contributor', 'minimal', ['minimal', 'low'])
+      assert.ok(codesOf(r).includes('slot-capability-not-satisfied'), JSON.stringify(r))
+      // the same model on a chat-completions route has no implemented adaptive transport
+      r = compile('meta-model-api/meta/muse-spark-1.3-contributor', 'meta/muse-spark-1.3-contributor', 'low')
+      assert.ok(codesOf(r).includes('slot-capability-not-satisfied') && /openai-responses/.test(JSON.stringify(r)), JSON.stringify(r))
+      // models that lack tool calling / a declared transport / a data-use tier are refused
+      for (const [route, model] of [['sol-local/gpt-5.6-sol', 'gpt-5.6-sol'], ['zai-direct/glm-5.3', 'glm-5.3'], ['deepseek-pro-direct/deepseek-v4-pro', 'deepseek-v4-pro']]) {
+        r = compile(route, model, 'high')
+        assert.equal(r.ok, false, route)
+        assert.ok(codesOf(r).includes('slot-capability-not-satisfied'), route + ' ' + JSON.stringify(r))
+      }
+      // eligible-route listing offers exactly the routes the contract (and the shared checks) accept
+      assert.deepEqual(resolver.listEligibleRoutes('engineering-v2-adaptive', 'main', snap, null).map((x) => x.id), ['opencode-go/meta/muse-spark-1.3-contributor'])
+      // an unknown contract in a (hand-edited) definition fails closed at compile time
+      const original = mode.slots[0].requirements.adaptiveReasoningContract
+      mode.slots[0].requirements.adaptiveReasoningContract = 'nexus-adaptive-v9'
+      r = compile('opencode-go/meta/muse-spark-1.3-contributor', 'meta/muse-spark-1.3-contributor', 'low')
+      assert.ok(/unknown adaptiveReasoningContract/.test(JSON.stringify(r)), JSON.stringify(r))
+      mode.slots[0].requirements.adaptiveReasoningContract = original
+      // muse-v0's own restriction is untouched: a model without the contributor tier is still refused for engineering-v2
+      for (const model of snap.models) model.engines = Array.from(new Set((model.engines || []).concat(['muse-v0'])))
+      const v2 = resolver.compileModeConfig({ schemaVersion: 1, modeId: 'engineering-v2', revision: 0, slots: { main: { logicalModelId: 'gpt-5.6-sol', routeId: 'sol-local/gpt-5.6-sol', reasoning: 'high' } }, roleOverrides: {} }, snap, null)
+      assert.equal(v2.ok, false)
+      assert.ok(/contributor data-use tier/.test(JSON.stringify(v2)), JSON.stringify(v2))
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+}
+
 console.log('SUITE RESULT: PASS ' + passed + ' | FAIL 0 | total ' + passed)

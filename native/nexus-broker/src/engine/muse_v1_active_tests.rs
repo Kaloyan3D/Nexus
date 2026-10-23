@@ -234,10 +234,7 @@ fn start(dir: &std::path::Path, gen_no: u32, prev: Option<u32>) -> EngineRun {
         ADAPTIVE_MODE_ID,
         &"b".repeat(64),
         "low",
-        prev.map(|p| Predecessor {
-            run_id: format!("run_task-{p}"),
-            task_instance_id: Some(format!("task-{p}")),
-        }),
+        prev.map(|p| Predecessor::new(format!("run_task-{p}"), Some(format!("task-{p}")))),
     )
     .expect("start")
 }
@@ -1460,4 +1457,25 @@ fn a_governor_max_is_never_applied_even_when_the_binding_authorizes_it() {
             "{forbidden}"
         );
     }
+}
+
+/// EM-04C2 S10 SEC-4: a feed that repeats an execution id is one observation for the engine AND for
+/// the host's independent recount - the transition is accepted, and the failure counts once.
+#[test]
+fn a_repeated_execution_id_in_the_feed_is_one_observation_for_engine_and_host_alike() {
+    need_node!();
+    let mut d = Drive::new(&["low", "medium", "high", "xhigh"]);
+    for _ in 0..6 {
+        escalate_in_this_generation(&mut d);
+        d.interrupt();
+    }
+    d.act("fail");
+    let mut dup = d.activity.last().unwrap().clone();
+    d.seq += 1;
+    dup.seq = d.seq; // a later position of the SAME execution
+    d.activity.push(dup);
+    d.act("mutation"); // a later, distinct observation moves the frontier past the repeat
+    let e = escalate_in_this_generation(&mut d);
+    assert_eq!(e, "xhigh", "the single failed check is trusted evidence");
+    assert_eq!(d.adaptive().pending_trusted, 0);
 }

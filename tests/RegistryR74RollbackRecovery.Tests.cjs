@@ -52,6 +52,7 @@ async function childMain() {
   if (step === 'request-no-header') delete session.header;
   let nextCount = 0;
   let errorCode = null;
+  let errorMessage = null; // diagnostic only, never asserted on: lets a code-less rejection be explained
   let request = null;
   let result;
   if (step === 'request' || step === 'request-worker' || step === 'request-no-header') {
@@ -67,10 +68,10 @@ async function childMain() {
       requestHandlers['agent/pre-step']({ agent }, () => {});
       request = await requestHandlers['agent/request'](payload, () => scoped['agent/request'](payload, () => { nextCount++; return { provider: 'seed', model: 'seed' }; }));
       result = 'next';
-    } catch (e) { result = { kind: 'reject' }; errorCode = e.code; }
+    } catch (e) { result = { kind: 'reject' }; errorCode = e.code; errorMessage = String((e && e.stack) || e).slice(0, 600); }
   } else result = await handlers['agent/pre-step']({ agent: { session }, messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] }], step: Number(step || 1), turn: 'r74-turn' }, () => { nextCount++; return 'next'; });
   await new Promise((resolve) => process.stdout.write('TURN-RESULT ' + JSON.stringify({ kind: typeof result === 'string' ? result : result && result.kind, nextCount,
-    errorCode, request, attemptsDelta: attemptRows(workspace).length - before.length,
+    errorCode, errorMessage, request, attemptsDelta: attemptRows(workspace).length - before.length,
     logs: readLines(logFile).slice(logStart), messages: session.messages.map((m) => m.source && m.source.form),
   }) + '\n', resolve));
 }

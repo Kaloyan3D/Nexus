@@ -1146,6 +1146,9 @@ pub(crate) fn run(
     #[cfg(feature = "test-engines")]
     crate::engine::test_faults::bind(&intent.idempotency_key, &task_instance);
     let predecessor = predecessor_of(b, run_id);
+    // EM-04C2 S10: a crash here leaves a run that is bound to its engine but has no engine state yet
+    #[cfg(feature = "test-engines")]
+    crate::engine::test_faults::crash(&intent.idempotency_key, "before-engine-state");
     let bound_mode = task_target
         .binding
         .target
@@ -1167,6 +1170,12 @@ pub(crate) fn run(
             )
         })
         .map_err(|e| discard(se(e.code, e.message)))?;
+    if !b.mark_engine_state_started(run_id) {
+        return Err(discard(se(
+            "engine-state-unpersisted",
+            "the run's engine state could not be recorded as started; nothing was sent",
+        )));
+    }
     // EM-04A: only the shadow Governor engines are lent the historical Muse policy (a bounded,
     // pure Node bridge); every other engine runs exactly as in EM-03.
     // EM-04B: only the experimental signals engine, in a coding run, offers the signals tool.
@@ -1542,12 +1551,12 @@ fn engine_for_run(
         && !resolution
             .pointer("/target/requestBudgetBytes")
             .and_then(|v| v.as_u64())
-            .is_some_and(|n| n > 0)
+            .is_some_and(|n| n > 0 && n <= crate::request_budget::MAX_REQUIRED_SEALED_BUDGET_BYTES)
     {
         return Err(se(
             "engine-budget-required",
             format!(
-                "mode '{mode_id}' runs engine '{id}', which must not dispatch without a Registry-sealed request-size budget, and this resolution carries none; nothing was sent"
+                "mode '{mode_id}' runs engine '{id}', which must not dispatch without a Registry-sealed request-size budget of 1 to 450000 bytes, and this resolution carries none (or one outside that range); nothing was sent"
             ),
         ));
     }
@@ -1588,15 +1597,76 @@ fn engine_for_run(
     Ok(engine)
 }
 
-/// EM-03: the run this one continues (after an interruption or a restart), if any.
+/// EM-04C2 S10 (SEC-1): whether a run record shows any sign that a model attempt may have been
+/// dispatched. Deliberately conservative: only a record that never got past `executing`, with no
+/// turn (the turn counter is persisted BEFORE the request leaves, `ctx.progress`), HTTP status,
+/// provider id or usage, is proven undispatched. The pipeline's own request digest is set before
+/// the engine exists and is therefore no evidence either way. Broker-owned facts only; nothing the
+/// model wrote is consulted.
+fn may_have_dispatched(r: &crate::store::RunRecord) -> bool {
+    let run = &r.run;
+    let quiet_state = matches!(
+        run.state.as_str(),
+        "received" | "preparing" | "authorized" | "executing" | "rejected" | "refused"
+    );
+    !(quiet_state
+        && run.turn == 0
+        && run.http_status.is_none()
+        && run.provider_request_id.is_none()
+        && run.provider_response_id.is_none()
+        && run.usage_input_tokens.is_none()
+        && run.usage_output_tokens.is_none())
+}
+
+fn predecessor_node(r: &crate::store::RunRecord) -> crate::engine_state::Predecessor {
+    crate::engine_state::Predecessor {
+        run_id: r.run.run_id.clone(),
+        task_instance_id: r.run.task_instance_id.clone(),
+        bound_engine: r.engine_id.clone(),
+        // spent-or-unknown: a dispatch sign, an engine state that existed (and is now gone), or a
+        // record that predates the marker (`None`) and so cannot say
+        may_have_dispatched: may_have_dispatched(r) || r.engine_state_started != Some(false),
+        ancestors: Vec::new(),
+        chain_complete: true,
+    }
+}
+
+/// EM-03: the run this one continues (after an interruption or a restart), if any, with (SEC-1) the
+/// bounded chain of older runs behind it, so a continuation can prove that a missing engine record
+/// means "nothing was ever spent" rather than "the record was lost".
 fn predecessor_of(b: &Broker, run_id: &str) -> Option<crate::engine_state::Predecessor> {
-    b.store
-        .load(run_id)
-        .and_then(|r| r.run.continuation_of)
-        .map(|old| crate::engine_state::Predecessor {
-            task_instance_id: b.store.load(&old).and_then(|o| o.run.task_instance_id),
-            run_id: old,
-        })
+    let mut next = b.store.load(run_id).and_then(|r| r.run.continuation_of)?;
+    let mut nodes: Vec<crate::engine_state::Predecessor> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(run_id.to_owned());
+    let mut complete = true;
+    loop {
+        if !seen.insert(next.clone()) || nodes.len() >= crate::engine_state::MAX_CHAIN_DEPTH {
+            complete = false; // a cycle or an over-long chain is never "empty history"
+            break;
+        }
+        match b.store.load(&next) {
+            Some(rec) => {
+                let up = rec.run.continuation_of.clone();
+                nodes.push(predecessor_node(&rec));
+                match up {
+                    Some(u) => next = u,
+                    None => break,
+                }
+            }
+            None => {
+                // the run record itself is gone: unknown, not empty
+                nodes.push(crate::engine_state::Predecessor::new(next.clone(), None));
+                complete = false;
+                break;
+            }
+        }
+    }
+    let mut it = nodes.into_iter();
+    let mut head = it.next()?;
+    head.ancestors = it.collect();
+    head.chain_complete = complete;
+    Some(head)
 }
 
 /// EM-02: a continuation (after an interruption or a broker restart) is a new task generation

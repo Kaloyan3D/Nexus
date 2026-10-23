@@ -114,12 +114,101 @@ function isOptionalRole(mode, role) {
 }
 
 /**
+ * EM-04C2 S10 preflight (SEC-2): the adaptive reasoning contracts are a CLOSED table.
+ *
+ * A slot's `requirements.adaptiveReasoningContract` names what the engine behind the mode needs from
+ * the model and route assigned to it. Before this table only `muse-v0` was enforced (its Muse
+ * Spark single-agent data-use rule) and every other string - including the adaptive engine's own
+ * `muse-v1` - was silently ignored. Now:
+ *
+ *  - `muse-v0` keeps EXACTLY its historical rule (contributor data-use tier), above, unchanged;
+ *  - `muse-v1` is judged against the requirements the adaptive engine really has, each decided from
+ *    trusted Registry metadata only;
+ *  - any other contract string FAILS CLOSED.
+ *
+ * What `muse-v1` needs, and why (nothing here claims support that is not implemented and tested):
+ *  - an explicitly DECLARED data-use tier from the closed set the Registry defines (the legacy
+ *    `contributor` restriction is Muse-Spark-specific and is deliberately not imposed on the
+ *    general-purpose engine; an undeclared tier is refused: there is no provenance to judge);
+ *  - tool calling and reasoning support (the Signals tool and effort changes), on a single-agent
+ *    `raw-model` route (the adaptive engine drives one model through the Native loop);
+ *  - the Native Responses transport (`openai-responses`): the only dialect whose per-request
+ *    `reasoning.effort`, encrypted-reasoning replay and sealed request budget are implemented and
+ *    tested; a provider wire profile, if declared, must be one the issuer knows;
+ *  - the Governor's ladder as the default and as every authorized level (`low`..`xhigh`): levels
+ *    outside it (`off`, `minimal`, `max`) can never be applied by the limiter, so authorizing or
+ *    defaulting to them would make the "adaptive" slot silently inert or dishonest;
+ *  - engine scope, model/route identity and slot policy are checked by the shared code around it.
+ *
+ * NOT provable from Registry metadata (reported, not invented): whether a given provider accepts
+ * replayed encrypted reasoning items after the effort changed mid-conversation (risk R3) - that
+ * needs a live observation; and any non-Responses transport (Gemini, chat-completions, ...) has no
+ * implemented transport and is therefore refused here.
+ */
+const ADAPTIVE_LADDER = Object.freeze(['low', 'medium', 'high', 'xhigh'])
+const ADAPTIVE_CONTRACTS = Object.freeze({
+  'muse-v0': Object.freeze({ legacy: true }),
+  'muse-v1': Object.freeze({
+    dataUseTiers: Object.freeze(['standard', 'contributor']),
+    transports: Object.freeze(['openai-responses']),
+    wireProfiles: Object.freeze(['opencode-go-responses']),
+    executionKinds: Object.freeze(['raw-model']),
+    capabilities: Object.freeze(['toolCalling', 'reasoning']),
+    levels: ADAPTIVE_LADDER,
+  }),
+})
+
+function checkAdaptiveContract(contractId, slot, role, model, route, extra) {
+  const where = 'roles.' + role
+  const contract = typeof contractId === 'string' && Object.prototype.hasOwnProperty.call(ADAPTIVE_CONTRACTS, contractId) ? ADAPTIVE_CONTRACTS[contractId] : null
+  if (!contract) {
+    return [err('slot-capability-not-satisfied', where, 'unknown adaptiveReasoningContract ' + JSON.stringify(contractId) + '; an unknown contract fails closed')]
+  }
+  if (contract.legacy === true) return []
+  const errors = []
+  const fail = (msg) => errors.push(err('slot-capability-not-satisfied', where, 'adaptive contract ' + contractId + ': ' + msg))
+  const m = model || {}
+  const caps = m.capabilities || {}
+  for (const c of contract.capabilities) {
+    if (caps[c] !== true) fail('model ' + m.id + ' does not declare ' + c)
+  }
+  if (typeof m.dataUseTier !== 'string' || !contract.dataUseTiers.includes(m.dataUseTier)) {
+    fail('model ' + m.id + ' must declare a data-use tier from ' + contract.dataUseTiers.join(', ') + ' (declared: ' + JSON.stringify(m.dataUseTier === undefined ? null : m.dataUseTier) + ')')
+  }
+  if (route) {
+    if (!contract.executionKinds.includes(route.executionKind)) fail('route ' + route.id + ' execution kind ' + route.executionKind + ' is not supported')
+    const transport = route.compatibility && route.compatibility.transport
+    if (!contract.transports.includes(transport)) {
+      fail('route ' + route.id + ' uses transport ' + JSON.stringify(transport === undefined ? null : transport) + '; only ' + contract.transports.join(', ') + ' is implemented and tested for adaptive reasoning')
+    }
+  }
+  const provider = extra && extra.provider
+  const wire = provider && provider.metadata && provider.metadata.wireProfile
+  if (wire !== undefined && !contract.wireProfiles.includes(wire)) {
+    fail('provider ' + (provider && provider.id) + ' declares an unknown wireProfile ' + JSON.stringify(wire))
+  }
+  // the assignment-level checks apply only when an assignment is being judged (not when routes are listed)
+  const assignment = extra && extra.assignment
+  if (assignment) {
+    if (!contract.levels.includes(assignment.reasoning)) {
+      fail('the default reasoning ' + JSON.stringify(assignment.reasoning === undefined ? null : assignment.reasoning) + ' is outside the Governor ladder ' + contract.levels.join(', '))
+    }
+    if (assignment.allowedReasoning !== undefined) {
+      for (const level of Array.isArray(assignment.allowedReasoning) ? assignment.allowedReasoning : []) {
+        if (!contract.levels.includes(level)) fail('authorized level ' + JSON.stringify(level) + ' is outside the Governor ladder ' + contract.levels.join(', ') + ' and could never be applied')
+      }
+    }
+  }
+  return errors
+}
+
+/**
  * Portable role/capability contract. Slot requirements are declarative;
  * enforcement of read-only/approval behavior stays with the controller —
  * the compiler records the requirement and refuses models that cannot
  * satisfy the model's share of the contract.
  */
-function checkRoleCapability(slot, role, model, route) {
+function checkRoleCapability(slot, role, model, route, extra) {
   const errors = []
   const requirements = (slot && slot.requirements) || {}
   const capabilities = (model && model.capabilities) || {}
@@ -131,6 +220,9 @@ function checkRoleCapability(slot, role, model, route) {
   }
   if (requirements.adaptiveReasoningContract === 'muse-v0' && model.dataUseTier !== 'contributor') {
     errors.push(err('slot-capability-not-satisfied', 'roles.' + role, 'muse-v0 single-agent contract requires the contributor data-use tier'))
+  }
+  if (requirements.adaptiveReasoningContract !== undefined) {
+    errors.push(...checkAdaptiveContract(requirements.adaptiveReasoningContract, slot, role, model, route, extra))
   }
   if (requirements.singleAgent === true && route && route.executionKind !== 'raw-model') {
     errors.push(err('slot-capability-not-satisfied', 'roles.' + role, 'single-agent slot requires a raw-model route, not ' + route.executionKind))
@@ -233,7 +325,7 @@ function resolveRoleBinding(registry, mode, role, assignment, runtime) {
     }
   }
   errors.push(...checkEngineScope(mode, model, role))
-  errors.push(...checkRoleCapability(slot, role, model, route))
+  errors.push(...checkRoleCapability(slot, role, model, route, { provider, assignment }))
   if (!Array.isArray(route.reasoningLevels) || !route.reasoningLevels.includes(assignment.reasoning)) {
     errors.push(err('reasoning-level-not-supported', 'roles.' + role + '.reasoning', 'reasoning ' + JSON.stringify(assignment.reasoning) + ' is not supported by route ' + route.id + '; never downshifted'))
   }
@@ -440,7 +532,7 @@ function listEligibleRoutes(modeId, slotId, registry, runtime) {
       if (connection.providerId !== route.providerId) continue
     }
     if (checkEngineScope(mode, model, slotId).length > 0) continue
-    if (checkRoleCapability(slot, slotId, model, route).length > 0) continue
+    if (checkRoleCapability(slot, slotId, model, route, { provider }).length > 0) continue
     if (checkRuntimeCompatibility(route, runtime || null, slotId).length > 0) continue
     out.push(route)
   }
@@ -456,4 +548,6 @@ module.exports = {
   connectionEligibility,
   deepFreeze,
   canonicalize,
+  checkAdaptiveContract,
+  ADAPTIVE_CONTRACTS,
 }

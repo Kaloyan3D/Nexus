@@ -39,6 +39,12 @@ pub struct RunRecord {
     /// profile). Absent on records written before EM-04C1. Broker-internal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_catalog_digest: Option<String>,
+    /// EM-04C2 S10 (SEC-1): whether the run's durable engine state was created. `Some(false)` from
+    /// the moment the run is recorded; `Some(true)` right after `EngineRun::start` returns (before any
+    /// attempt can exist). `None` = a record written before S10: unknown, so a continuation that finds
+    /// no authentic engine record treats it as possibly LOST. Broker-internal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_state_started: Option<bool>,
 }
 
 pub struct Store {
