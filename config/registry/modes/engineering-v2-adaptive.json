@@ -3,7 +3,7 @@
   "id": "engineering-v2-adaptive",
   "displayName": "Engineering Mode v2 (Adaptive reasoning)",
   "status": "planned",
-  "orchestrationEngineId": "muse-v1",
+  "orchestrationEngineId": "nexus-adaptive-v1",
   "selectable": false,
   "runnable": false,
   "slots": [
@@ -16,7 +16,7 @@
       ],
       "requirements": {
         "toolCalling": true,
-        "adaptiveReasoningContract": "muse-v1",
+        "adaptiveReasoningContract": "nexus-adaptive-v1",
         "singleAgent": true
       }
     }

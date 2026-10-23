@@ -269,7 +269,7 @@ section('release-binaries', () => {
     const d2 = defs['engineering-v2.json']
     const ad = defs['engineering-v2-adaptive.json']
     if (!(d2.orchestrationEngineId === 'muse-v0' && d2.selectable === true && d2.runnable === true)) failures.push('engineering-v2 is not the selectable muse-v0 default')
-    if (!(ad.status === 'planned' && ad.selectable === false && ad.runnable === false && ad.orchestrationEngineId === 'muse-v1')) failures.push('the adaptive definition is not dormant (planned, not selectable, not runnable)')
+    if (!(ad.status === 'planned' && ad.selectable === false && ad.runnable === false && ad.orchestrationEngineId === 'nexus-adaptive-v1')) failures.push('the adaptive definition is not dormant (planned, not selectable, not runnable)')
     if (ad.requestBudgetBytes !== 440000) failures.push('the adaptive definition does not seal 440000 bytes')
   } catch (e) {
     failures.push('bundled definitions unreadable: ' + String(e.message).slice(0, 80))

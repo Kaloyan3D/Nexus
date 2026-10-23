@@ -1,4 +1,4 @@
-//! EM-04C2 S6: the ACTIVE `muse-v1` engine, driven through the real durable EM-03 machinery
+//! EM-04C2 S6: the ACTIVE `nexus-adaptive-v1` engine, driven through the real durable EM-03 machinery
 //! (`EngineRun`: host admission, HMAC-protected record, write-ahead attempt binding, continuation
 //! with `examine_predecessor`) and the REAL, unchanged historical Governor (through the Node
 //! worker). No provider, no Registry, no network: those layers are covered by the end-to-end suite
@@ -242,7 +242,7 @@ fn start(dir: &std::path::Path, gen_no: u32, prev: Option<u32>) -> EngineRun {
 fn st(h: &EngineHost) -> &MuseV1State {
     match &h.state().data {
         EngineStateData::MuseV1(d) => d,
-        _ => panic!("not a muse-v1 state"),
+        _ => panic!("not a nexus-adaptive-v1 state"),
     }
 }
 
@@ -259,7 +259,7 @@ fn the_active_engine_has_the_reserved_identity_one_mode_and_the_gates() {
     let d = MUSE_V1_ACTIVE.descriptor();
     assert_eq!(
         (d.engine_id, d.mode_ids),
-        ("muse-v1", &["engineering-v2-adaptive"][..])
+        ("nexus-adaptive-v1", &["engineering-v2-adaptive"][..])
     );
     assert_eq!(d.roles, &["muse_main"]);
     assert_eq!(
@@ -287,7 +287,7 @@ fn the_active_engine_has_the_reserved_identity_one_mode_and_the_gates() {
             other.descriptor().engine_id
         );
     }
-    assert_eq!(ACTIVE_ENGINE_ID, "muse-v1");
+    assert_eq!(ACTIVE_ENGINE_ID, "nexus-adaptive-v1");
 }
 
 #[test]
@@ -302,10 +302,15 @@ fn the_production_gate_registers_only_muse_v1_and_only_when_opened() {
     assert_eq!(ids(false, MUSE_V1_PRODUCTION_ENABLED), ["muse-v0"]);
     assert_eq!(ids(false, false), ["muse-v0"]);
     // the day the gate is opened (S10): the ACTIVE engine only, never an experimental one
-    assert_eq!(ids(false, true), ["muse-v0", "muse-v1"]);
+    assert_eq!(ids(false, true), ["muse-v0", "nexus-adaptive-v1"]);
     // test builds also carry the experimental engines
     let t = ids(true, false);
-    for want in ["muse-v0", "muse-v1", "muse-v1-shadow", "muse-v1-signals"] {
+    for want in [
+        "muse-v0",
+        "nexus-adaptive-v1",
+        "muse-v1-shadow",
+        "muse-v1-signals",
+    ] {
         assert!(t.contains(&want), "{want} in {t:?}");
     }
 }
@@ -1478,4 +1483,43 @@ fn a_repeated_execution_id_in_the_feed_is_one_observation_for_engine_and_host_al
     let e = escalate_in_this_generation(&mut d);
     assert_eq!(e, "xhigh", "the single failed check is trusted evidence");
     assert_eq!(d.adaptive().pending_trusted, 0);
+}
+
+/// S9.5: a record that carries the PREVIOUS engine identity (`muse-v1`), even one that is perfectly
+/// authenticated, is never reinterpreted by `nexus-adaptive-v1` - there is no alias and no migration.
+#[test]
+fn a_predecessor_with_the_previous_engine_identity_is_refused_even_when_authentic() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = start(dir.path(), 1, None);
+    drop(first);
+    let store = EngineStateStore::open(dir.path()).unwrap();
+    let mut rec = store.load("task-1").unwrap().expect("generation 1 record");
+    assert_eq!(rec.engine_id, ACTIVE_ENGINE_ID);
+    rec.engine_id = "muse-v1".into();
+    store
+        .commit(&mut rec)
+        .expect("re-authenticated under the real key");
+    assert!(
+        store.load("task-1").unwrap().is_some(),
+        "the forged-identity record is authentic"
+    );
+    let r = EngineRun::start(
+        EngineStateStore::open(dir.path()).unwrap(),
+        &MUSE_V1_ACTIVE,
+        "run_task-2",
+        "task-2",
+        ADAPTIVE_MODE_ID,
+        &"b".repeat(64),
+        "low",
+        Some(Predecessor::new("run_task-1", Some("task-1".into()))),
+    );
+    assert_eq!(r.err().expect("refused").code, "engine-state-identity");
+    assert!(
+        EngineStateStore::open(dir.path())
+            .unwrap()
+            .load("task-2")
+            .unwrap()
+            .is_none(),
+        "a refused continuation creates nothing"
+    );
 }

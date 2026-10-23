@@ -1,4 +1,4 @@
-//! EM-04C2 S6: the adaptive half of the active `muse-v1` engine - the durable limiter state, the
+//! EM-04C2 S6: the adaptive half of the active `nexus-adaptive-v1` engine - the durable limiter state, the
 //! durable evidence baseline, the audit record of every limiter decision, and the pure functions
 //! that produce AND re-validate them.
 //!
@@ -22,7 +22,7 @@ use super::effort_limiter::{
 use super::{EngineSnapshot, ObservationKind, VerificationOutcome};
 use serde_json::{json, Map, Value};
 
-/// State schema of the active `muse-v1` payload (the shadow and signals engines stay at 1).
+/// State schema of the active `nexus-adaptive-v1` payload (the shadow and signals engines stay at 1).
 pub const ACTIVE_STATE_SCHEMA: u32 = 2;
 /// F-3: the complete Governor trace is bounded, not truncated. The real Governor emits at most
 /// five short entries; anything beyond these bounds is a malformed (or forged) answer and the whole

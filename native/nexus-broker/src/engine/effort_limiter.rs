@@ -9,7 +9,7 @@
 //!   (up moves), or the higher of two Governor proposals for consecutive attempts (confirmed
 //!   moves down). It cannot output `max`, an unauthorized level or the level already in force.
 //! * It performs no I/O, reads no clock and owns no storage. Its state is a tiny value
-//!   ([`LimiterState`]) that the future `muse-v1` engine will carry inside the EM-03 engine state
+//!   ([`LimiterState`]) that the future `nexus-adaptive-v1` engine will carry inside the EM-03 engine state
 //!   payload; this module adds no persistence of its own.
 //! * It is not an authority. Every `Change` still has to pass `EngineHost::accept`, the durable
 //!   selection, the Registry's `issue-attempt` under the sealed binding, the Kernel seal and the
@@ -22,7 +22,7 @@
 //! failure: the host derives that counter from receipts, never from signals.
 //!
 //! Parameters are constants of the engine policy version, not configuration. Changing any of them
-//! (or the algorithm) is a new `state_schema` for `muse-v1`.
+//! (or the algorithm) is a new `state_schema` for `nexus-adaptive-v1`.
 
 use serde_json::{json, Map, Value};
 
@@ -703,7 +703,7 @@ pub fn verify_transition(
 // Everything else is the S5 algorithm, shared code: the V1 tests and the pinned traces keep proving
 // it, and the V2 tests prove the differences.
 
-/// Version of this policy as recorded in the `muse-v1` payload.
+/// Version of this policy as recorded in the `nexus-adaptive-v1` payload.
 pub const LIMITER_POLICY_VERSION_V2: u32 = 2;
 
 /// Limiter state of Policy V2: the five V1 fields plus the logical-task drop history.

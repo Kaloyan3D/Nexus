@@ -19,12 +19,12 @@ created; the default `engineering-v2` still runs `muse-v0`.
 
 1. **Commit S7–S9** after review. Verify: clean tree; the four S7–S9 documents and the new scripts present.
 2. **Flip the compile-time constant**: `native/nexus-broker/src/engine/mod.rs` `MUSE_V1_PRODUCTION_ENABLED = true`.
-   Verify: `engines(false)` → `["muse-v0", "muse-v1"]` (already proven by
+   Verify: `engines(false)` → `["muse-v0", "nexus-adaptive-v1"]` (already proven by
    `the_production_gate_registers_only_muse_v1_and_only_when_opened`); the experimental engines stay test-only.
 3. **Update the production gate DELIBERATELY** (these tests are supposed to change, and only these):
    `native/tools/prodgate/tests/production_gate.rs` — `only_the_default_mode_with_muse_v0_resolves` (now also
-   `("engineering-v2-adaptive","muse-v1")`), `every_experimental_and_adaptive_engine_is_unavailable_under_every_mode`
-   (`muse-v1` leaves the list), `the_activation_gate_is_a_closed_compile_time_constant` (becomes "open, and no
+   `("engineering-v2-adaptive","nexus-adaptive-v1")`), `every_experimental_and_adaptive_engine_is_unavailable_under_every_mode`
+   (`nexus-adaptive-v1` leaves the list), `the_activation_gate_is_a_closed_compile_time_constant` (becomes "open, and no
    environment variable changes it"); the lib tests `catalog_tests` (`assert!(!MUSE_V1_PRODUCTION_ENABLED)`),
    `signals_tests::only_the_experimental_engine_takes_signals`. Add: in a production build the adaptive engine
    still refuses without a sealed budget / saved configuration (release-mode functional test through the broker).
@@ -34,7 +34,7 @@ created; the default `engineering-v2` still runs `muse-v0`.
    count (`MusePresetRegistryModes`, `RegistryR75InstallationAudit`) and the mode-list suites (`RegistryR3UI`,
    `RegistryInstalledRuntime`, `RegistryAdaptiveMode` — their "dormant" checks become "active").
 5. **Keep the operator in control**: no default ModeConfiguration, no auto-adoption (`mode-configuration-required`
-   stays), models scoped to `muse-v1` only by the operator (the shipped catalog lists none). Verify with
+   stays), models scoped to `nexus-adaptive-v1` only by the operator (the shipped catalog lists none). Verify with
    `s4_the_adaptive_mode_needs_a_saved_configuration_and_a_sealed_budget_to_dispatch`.
 6. **Documentation**: operator-facing statement of cost/risk (`xhigh` spend is bounded by `allowedReasoning`, by
    `1 + R = 3` claim-only episodes per logical task, and by whatever Kernel-verified failures justify), the F-5

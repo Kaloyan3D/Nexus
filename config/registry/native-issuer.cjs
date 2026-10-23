@@ -46,7 +46,7 @@ const SUPPORTED_ROLE = 'muse_main';
  * issue, with the orchestration engine each one MUST declare. Adding a mode here is a code
  * change that is reviewed like any other; nothing (no selection, no configuration, no model) can
  * add an entry. `engineering-v2` is the default and keeps its engine `muse-v0`. The adaptive mode
- * maps to `muse-v1` and additionally requires an operator-SAVED ModeConfiguration: no preview,
+ * maps to `nexus-adaptive-v1` and additionally requires an operator-SAVED ModeConfiguration: no preview,
  * no adoption from a legacy profile, nothing is created on the operator's behalf.
  */
 const NATIVE_SCOPES = Object.freeze({
@@ -55,13 +55,13 @@ const NATIVE_SCOPES = Object.freeze({
     // The deterministic EXPERIMENTAL engines of the Rust runtime (compiled only into `test-engines`
     // builds; a production runtime answers `engine-unavailable` for each). Fixture install roots
     // name them in the default mode to drive them end to end, exactly as before this table existed.
-    // The adaptive production engine `muse-v1` is NOT among them: it can never be issued here.
+    // The adaptive production engine `nexus-adaptive-v1` is NOT among them: it can never be issued here.
     experimentalEngineIds: Object.freeze(['effort-test-v0', 'muse-v1-shadow', 'muse-v1-signals']),
     role: SUPPORTED_ROLE,
     requiresSavedConfiguration: false,
   }),
   'engineering-v2-adaptive': Object.freeze({
-    engineId: 'muse-v1',
+    engineId: 'nexus-adaptive-v1',
     experimentalEngineIds: Object.freeze([]),
     role: SUPPORTED_ROLE,
     requiresSavedConfiguration: true,

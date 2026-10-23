@@ -42,12 +42,14 @@ fn the_catalog_follows_the_sealed_engine_identity_and_nothing_else() {
         P::RepoCodeMuseSignalsV1
     );
     for near in [
-        "muse-v1 ",
-        " muse-v1",
+        "nexus-adaptive-v1 ",
+        " nexus-adaptive-v1",
         "MUSE-V1",
-        "muse-v1\n",
+        "nexus-adaptive-v1\n",
         "muse-v11",
-        "muse-v1/../muse-v0",
+        "muse-v1", // the previous identity is NOT an alias: no signals catalog for it
+        "NEXUS-ADAPTIVE-V1",
+        "nexus-adaptive-v1/../muse-v0",
     ] {
         assert_eq!(tool_catalog_profile(near, true), P::RepoCodeV1, "{near:?}");
     }

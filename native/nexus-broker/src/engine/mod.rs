@@ -57,7 +57,7 @@ pub const MAX_STATE_BYTES: usize = 16 * 1024;
 /// EM-04B: largest acknowledgement an engine may return for a reasoning signal (it becomes the
 /// tool result the model reads).
 pub const MAX_SIGNAL_ACK_BYTES: usize = 1024;
-/// EM-04C2 production gate for the ACTIVE adaptive engine `muse-v1`: DISABLED until the final
+/// EM-04C2 production gate for the ACTIVE adaptive engine `nexus-adaptive-v1`: DISABLED until the final
 /// activation step (S10). With `false` the engine is compiled (and fully tested) but not built in,
 /// so the Registry cannot select it (`engine-unavailable`) in any production build; `test-engines`
 /// builds (this crate's tests) register it. This is a compile-time constant, deliberately NOT a
@@ -75,7 +75,7 @@ pub const MUSE_V1_PRODUCTION_ENABLED: bool = false;
 /// * a coding run of the experimental `muse-v1-signals` engine only: `RepoCodeMuseSignalsV1`
 ///   (`RepoCodeV1` plus `muse_update_reasoning_state`). That id exists only in `test-engines` builds.
 ///
-/// * a coding run of the active `muse-v1` engine (EM-04C2 S6): the same `RepoCodeMuseSignalsV1`
+/// * a coding run of the active `nexus-adaptive-v1` engine (EM-04C2 S6): the same `RepoCodeMuseSignalsV1`
 ///   catalog, deliberately by row and not by flag. Its digest is the frozen one; the signals tool is
 ///   scoped to Muse engines only.
 pub fn tool_catalog_profile(engine_id: &str, code_run: bool) -> nexus_model::ToolProfile {
@@ -477,7 +477,7 @@ fn engines(test_build: bool) -> Vec<&'static dyn EngineExtension> {
 }
 
 /// `engines` with the production gate as a parameter, so that the day the gate is opened (S10) is
-/// already proven by a test: opening it registers ONLY the active `muse-v1`.
+/// already proven by a test: opening it registers ONLY the active `nexus-adaptive-v1`.
 fn engines_with(test_build: bool, muse_v1_enabled: bool) -> Vec<&'static dyn EngineExtension> {
     let mut v: Vec<&'static dyn EngineExtension> = vec![&muse_v0::MUSE_V0];
     if muse_v1_enabled || test_build {
@@ -514,7 +514,7 @@ pub fn build_report() -> serde_json::Value {
     for mode in MODES {
         for engine in [
             "muse-v0",
-            "muse-v1",
+            "nexus-adaptive-v1",
             "muse-v1-shadow",
             "muse-v1-signals",
             "effort-test-v0",

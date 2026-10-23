@@ -119,14 +119,14 @@ function isOptionalRole(mode, role) {
  * A slot's `requirements.adaptiveReasoningContract` names what the engine behind the mode needs from
  * the model and route assigned to it. Before this table only `muse-v0` was enforced (its Muse
  * Spark single-agent data-use rule) and every other string - including the adaptive engine's own
- * `muse-v1` - was silently ignored. Now:
+ * `nexus-adaptive-v1` - was silently ignored. Now:
  *
  *  - `muse-v0` keeps EXACTLY its historical rule (contributor data-use tier), above, unchanged;
- *  - `muse-v1` is judged against the requirements the adaptive engine really has, each decided from
+ *  - `nexus-adaptive-v1` is judged against the requirements the adaptive engine really has, each decided from
  *    trusted Registry metadata only;
  *  - any other contract string FAILS CLOSED.
  *
- * What `muse-v1` needs, and why (nothing here claims support that is not implemented and tested):
+ * What `nexus-adaptive-v1` needs, and why (nothing here claims support that is not implemented and tested):
  *  - an explicitly DECLARED data-use tier from the closed set the Registry defines (the legacy
  *    `contributor` restriction is Muse-Spark-specific and is deliberately not imposed on the
  *    general-purpose engine; an undeclared tier is refused: there is no provenance to judge);
@@ -148,7 +148,7 @@ function isOptionalRole(mode, role) {
 const ADAPTIVE_LADDER = Object.freeze(['low', 'medium', 'high', 'xhigh'])
 const ADAPTIVE_CONTRACTS = Object.freeze({
   'muse-v0': Object.freeze({ legacy: true }),
-  'muse-v1': Object.freeze({
+  'nexus-adaptive-v1': Object.freeze({
     dataUseTiers: Object.freeze(['standard', 'contributor']),
     transports: Object.freeze(['openai-responses']),
     wireProfiles: Object.freeze(['opencode-go-responses']),

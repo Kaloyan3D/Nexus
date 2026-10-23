@@ -520,9 +520,9 @@ mod identity_tests {
         let mut other_mode = base.clone();
         other_mode.target["modeId"] = "engineering-v2-adaptive".into();
         let mut other_engine = base.clone();
-        other_engine.target["orchestrationEngineId"] = "muse-v1".into();
+        other_engine.target["orchestrationEngineId"] = "nexus-adaptive-v1".into();
         let mut both = other_mode.clone();
-        both.target["orchestrationEngineId"] = "muse-v1".into();
+        both.target["orchestrationEngineId"] = "nexus-adaptive-v1".into();
         for changed in [&other_mode, &other_engine, &both] {
             assert_ne!(identity_digest(changed), id);
             assert!(!identity_matches(&id, Some(IDENTITY_VERSION), changed));

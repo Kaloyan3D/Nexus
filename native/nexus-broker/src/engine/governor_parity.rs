@@ -5,9 +5,9 @@
 //!   their public DSH API against a real temporary routing-state file and model registry, with
 //!   DSH-shaped tool executions for the activity observer and a module reload for "restart";
 //! * **Native**: the embedded sources through the Native bridge (`muse_bridge.cjs`), the state
-//!   carried between requests exactly as `muse-v1` carries it in its engine payload, tool outcomes
+//!   carried between requests exactly as `nexus-adaptive-v1` carries it in its engine payload, tool outcomes
 //!   turned into observations by the Core's own derivation (`inspect::observe` with Native's
-//!   verification classifier), and "restart" = `muse-v1`'s persist/restore round trip.
+//!   verification classifier), and "restart" = `nexus-adaptive-v1`'s persist/restore round trip.
 //!
 //! Compared: the selected effort, requested effort, reason, trace, effective phase and source of
 //! every resolution (or the capability refusal), and the final semantic and activity blocks. The

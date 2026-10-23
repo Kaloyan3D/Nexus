@@ -37,7 +37,7 @@ const REQUIRED_MODE_IDS = ['engineering-v1', 'engineering-v2', 'engineering-v3']
 // at that path (another id, another engine, a malformed or schema-invalid document, invalid JSON) is
 // treated as ABSENT: it can neither break the three legacy modes nor become listable or importable.
 // No other file in the modes directory is ever read (there is no directory scan).
-const OPTIONAL_MODE = Object.freeze({ file: 'engineering-v2-adaptive.json', id: 'engineering-v2-adaptive', engineId: 'muse-v1' })
+const OPTIONAL_MODE = Object.freeze({ file: 'engineering-v2-adaptive.json', id: 'engineering-v2-adaptive', engineId: 'nexus-adaptive-v1' })
 function isOptionalModeDefinition(doc) {
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return false
   if (doc.id !== OPTIONAL_MODE.id || doc.orchestrationEngineId !== OPTIONAL_MODE.engineId) return false

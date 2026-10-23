@@ -40,7 +40,7 @@ use serde_json::{json, Value};
 /// The shadow engine's Registry id (test-only).
 pub const ENGINE_ID: &str = "muse-v1-shadow";
 /// EM-04C2 S6: the ACTIVE adaptive engine's Registry id and its one mode.
-pub const ACTIVE_ENGINE_ID: &str = "muse-v1";
+pub const ACTIVE_ENGINE_ID: &str = "nexus-adaptive-v1";
 pub const ADAPTIVE_MODE_ID: &str = "engineering-v2-adaptive";
 
 /// Exact wire bytes of the future `muse_update_reasoning_state` tool in the request's `tools`
@@ -129,9 +129,9 @@ pub static MUSE_V1_ACTIVE: MuseV1 = MuseV1 {
 
 pub struct MuseV1 {
     descriptor: EngineDescriptor,
-    /// Takes reasoning signals (`muse-v1-signals` and `muse-v1`).
+    /// Takes reasoning signals (`muse-v1-signals` and `nexus-adaptive-v1`).
     signals: bool,
-    /// The limiter-governed active engine (`muse-v1`): proposes efforts, carries `Adaptive` state.
+    /// The limiter-governed active engine (`nexus-adaptive-v1`): proposes efforts, carries `Adaptive` state.
     adaptive: bool,
 }
 
@@ -160,7 +160,7 @@ pub struct ShadowDecision {
     pub refused: u32,
     /// SHA-256 over the embedded sources, the bridge input and its output.
     pub evidence: String,
-    /// EM-04C2 S6: the limiter's decision for this attempt (`muse-v1` only; `None` for every other
+    /// EM-04C2 S6: the limiter's decision for this attempt (`nexus-adaptive-v1` only; `None` for every other
     /// engine and for evaluations the Governor did not resolve).
     pub limiter: Option<LimiterRecord>,
 }
@@ -194,7 +194,7 @@ pub struct MuseV1State {
     /// Signals of the LAST signal consultation that were consumed but not applied (the historical
     /// path refused them or the bridge was unavailable); the model was told so.
     pub last_unapplied: Vec<u32>,
-    /// EM-04C2 S6: limiter state, evidence baseline and pending trusted evidence (`muse-v1` only).
+    /// EM-04C2 S6: limiter state, evidence baseline and pending trusted evidence (`nexus-adaptive-v1` only).
     pub adaptive: Option<Adaptive>,
 }
 

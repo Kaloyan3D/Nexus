@@ -12607,7 +12607,7 @@ fn s4_listing(dir: &Path) -> Vec<String> {
 }
 
 /// A fixture whose install root ACTIVATES the dormant adaptive definition (what step S6 will
-/// ship), with the fixture models optionally scoped to `muse-v1`. No ModeConfiguration is saved:
+/// ship), with the fixture models optionally scoped to `nexus-adaptive-v1`. No ModeConfiguration is saved:
 /// that is the operator's explicit act (`s4_save_adaptive`).
 fn s4_fixture(responder: Responder, scoped: bool) -> Fx {
     s4_fixture_with(responder, scoped, Box::new(|_| {}))
@@ -12620,7 +12620,7 @@ fn s4_fixture_with(responder: Responder, scoped: bool, extra: Box<dyn Fn(&Path)>
         .install_root
         .join("config/registry/modes/engineering-v2-adaptive.json");
     let mut m: Value = serde_json::from_slice(&std::fs::read(&mode).unwrap()).unwrap();
-    assert_eq!(m["orchestrationEngineId"], "muse-v1");
+    assert_eq!(m["orchestrationEngineId"], "nexus-adaptive-v1");
     m["status"] = "active".into();
     m["selectable"] = true.into();
     m["runnable"] = true.into();
@@ -12630,7 +12630,7 @@ fn s4_fixture_with(responder: Responder, scoped: bool, extra: Box<dyn Fn(&Path)>
             "registry-engine-scope",
             fx.registry.to_str().unwrap(),
             fx.install_root.to_str().unwrap(),
-            "muse-v1",
+            "nexus-adaptive-v1",
         ]);
         assert_eq!(r["ok"], true, "{r}");
     }
@@ -12734,12 +12734,12 @@ fn s4_the_adaptive_mode_needs_a_saved_configuration_and_a_sealed_budget_to_dispa
     assert_eq!(issued["resolution"]["target"]["modeId"], ADAPTIVE_MODE);
     assert_eq!(
         issued["resolution"]["target"]["orchestrationEngineId"],
-        "muse-v1"
+        "nexus-adaptive-v1"
     );
     assert_eq!(issued["taskBinding"]["target"]["modeId"], ADAPTIVE_MODE);
     assert_eq!(
         issued["taskBinding"]["target"]["orchestrationEngineId"],
-        "muse-v1"
+        "nexus-adaptive-v1"
     );
     assert_eq!(
         issued["taskBinding"]["supportedReasoning"],
@@ -12799,7 +12799,7 @@ fn s4_the_adaptive_mode_needs_a_saved_configuration_and_a_sealed_budget_to_dispa
     b.shutdown();
 }
 
-/// The Registry validates the engine's model scope: models that are not scoped to `muse-v1` cannot
+/// The Registry validates the engine's model scope: models that are not scoped to `nexus-adaptive-v1` cannot
 /// be assigned to the adaptive mode, so no configuration can even be saved for it.
 #[test]
 fn s4_models_outside_the_engine_scope_cannot_be_assigned_to_the_adaptive_mode() {
@@ -12982,14 +12982,14 @@ fn s4_a_cross_mode_continuation_is_a_task_binding_mismatch() {
 }
 
 // =================================================================================================
-// EM-04C2 S6: the ACTIVE `muse-v1` engine on the mock provider (no paid inference)
+// EM-04C2 S6: the ACTIVE `nexus-adaptive-v1` engine on the mock provider (no paid inference)
 // =================================================================================================
 
 const S6_BUDGET: u64 = 440_000;
 const S6_WIDE: &str = "[\"low\",\"medium\",\"high\",\"xhigh\"]";
 
 /// The operator-complete adaptive installation: the definition activated (what the final activation
-/// step will ship), the models scoped to `muse-v1`, a SEALED request-size budget declared, and the
+/// step will ship), the models scoped to `nexus-adaptive-v1`, a SEALED request-size budget declared, and the
 /// operator's saved configuration with `policy` as the slot's allowed reasoning.
 fn s6_fixture(responder: Responder, budget: Option<u64>, policy: &str) -> Fx {
     s6_fixture_with(responder, budget, policy, Box::new(|_| {}))
@@ -13082,7 +13082,7 @@ fn s6_an_adaptive_run_changes_effort_only_through_registry_and_kernel_before_eac
     // 2. the durable record
     let task = run.task_instance_id.clone().unwrap();
     let st = em03_state(&fx, "s6-adaptive", &task);
-    assert_eq!(st["engineId"], "muse-v1");
+    assert_eq!(st["engineId"], "nexus-adaptive-v1");
     assert_eq!(st["modeId"], ADAPTIVE_MODE);
     assert_eq!(st["stateSchema"], 2);
     assert_eq!(st["payload"]["adaptive"]["policyVersion"], 2);
@@ -13326,7 +13326,7 @@ fn s6_crash_then_continue(point: &str, nth: u32, key: &str) -> S6Crash {
         .expect("present");
     let all = fx.provider.bodies.lock().unwrap().clone();
     let new_requests = all[old_requests.len()..].to_vec();
-    assert_eq!(new.engine_id, "muse-v1");
+    assert_eq!(new.engine_id, "nexus-adaptive-v1");
     assert_eq!(new.lineage.as_ref().unwrap().rule, "inherited");
     for (rec, requests) in [(&old, &old_requests), (&new, &new_requests)] {
         let bound: Vec<&str> = rec.attempts.iter().map(|a| a.effort.as_str()).collect();
@@ -13630,7 +13630,7 @@ fn s7_a614_with_the_real_adaptive_engine_stays_under_the_sealed_budget_and_the_g
     assert_eq!(run.tool_calls, 55);
     let max = *sizes.iter().max().unwrap();
     println!(
-        "EM-04C2 S7 A614 (adaptive muse-v1, real catalog + signals tool): max request {max} B \
+        "EM-04C2 S7 A614 (adaptive nexus-adaptive-v1, real catalog + signals tool): max request {max} B \
          (budget 440000, guard 450000, EM-04B reference 428722); {} requests; wall {:.1}s; compactions {}",
         sizes.len(),
         wall.as_secs_f64(),
@@ -13658,7 +13658,7 @@ fn s7_a614_with_the_real_adaptive_engine_stays_under_the_sealed_budget_and_the_g
     let rec = em02_record(&fx, "s7", &run.run_id);
     assert!(rec["taskBindingIdentity"].is_string());
     let st = em03_state(&fx, "s7", &run.task_instance_id.clone().unwrap());
-    assert_eq!(st["engineId"], "muse-v1");
+    assert_eq!(st["engineId"], "nexus-adaptive-v1");
     b.shutdown();
 }
 
@@ -14931,7 +14931,7 @@ fn s10_a_run_record_that_cannot_prove_it_dispatched_nothing_is_refused() {
     let runs = fx.config("s10-facts").state_dir.join("runs");
     // (label, edit of the crashed run's record, continues?)
     type Edit = fn(&mut Value);
-    let cases: [(&str, Edit, bool); 7] = [
+    let cases: [(&str, Edit, bool); 8] = [
         ("untouched: bound, state never created, nothing dispatched", |_| {}, true),
         ("a turn was counted (a dispatch may have happened)", |r| r["run"]["turn"] = json!(1), false),
         ("an HTTP status was recorded", |r| r["run"]["httpStatus"] = json!(200), false),
@@ -14939,6 +14939,7 @@ fn s10_a_run_record_that_cannot_prove_it_dispatched_nothing_is_refused() {
         ("usage was recorded", |r| r["run"]["usageInputTokens"] = json!(10), false),
         ("a record from before the marker existed", |r| { r.as_object_mut().unwrap().remove("engineStateStarted"); }, false),
         ("the engine binding is another engine (refused even earlier, by the engine-continuity gate)", |r| r["engineId"] = json!("muse-v0"), false),
+        ("the engine binding carries the PREVIOUS adaptive identity (no alias)", |r| r["engineId"] = json!("muse-v1"), false),
     ];
     for (n, (label, edit, continues)) in cases.iter().enumerate() {
         let run = s10_crashed(&sock, &format!("s10-facts-{n:0>11}"), "before-engine-state");
@@ -14952,7 +14953,7 @@ fn s10_a_run_record_that_cannot_prove_it_dispatched_nothing_is_refused() {
             json!(false),
             "{label}: the marker is recorded from the start"
         );
-        assert_eq!(rec["engineId"], json!("muse-v1"), "{label}");
+        assert_eq!(rec["engineId"], json!("nexus-adaptive-v1"), "{label}");
         edit(&mut rec);
         std::fs::write(&path, serde_json::to_vec(&rec).unwrap()).unwrap();
         let at = fx.provider.bodies.lock().unwrap().len();

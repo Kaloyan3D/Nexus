@@ -737,16 +737,16 @@ check('R1.1.1: null legacy agentEngines is rejected, never assumed Dual', () => 
 })
 
 check('EM-04C2 SEC-2: adaptive reasoning contracts are a closed table; muse-v0 keeps its exact rule', () => {
-  assert.deepEqual(Object.keys(resolver.ADAPTIVE_CONTRACTS).sort(), ['muse-v0', 'muse-v1'])
+  assert.deepEqual(Object.keys(resolver.ADAPTIVE_CONTRACTS).sort(), ['muse-v0', 'nexus-adaptive-v1'])
   const model = { id: 'm', dataUseTier: 'standard', capabilities: { toolCalling: true, reasoning: true } }
   const route = { id: 'r', executionKind: 'raw-model', compatibility: { transport: 'openai-responses' } }
-  // unknown contract: fail closed
-  assert.equal(resolver.checkAdaptiveContract('nexus-adaptive-v1', {}, 'muse_main', model, route, {}).length, 1)
+  // unknown contract (the previous engine identity is not an alias): fail closed
+  assert.equal(resolver.checkAdaptiveContract('muse-v1', {}, 'muse_main', model, route, {}).length, 1)
   // muse-v0 is judged by checkRoleCapability's historical rule only: the contract table adds nothing for it
   assert.deepEqual(resolver.checkAdaptiveContract('muse-v0', {}, 'muse_main', model, route, {}), [])
-  // muse-v1 refuses an undeclared data-use tier and a transport without an implemented adaptive path
-  assert.equal(resolver.checkAdaptiveContract('muse-v1', {}, 'muse_main', { ...model, dataUseTier: undefined }, route, {}).length, 1)
-  assert.equal(resolver.checkAdaptiveContract('muse-v1', {}, 'muse_main', model, { ...route, compatibility: { transport: 'gemini-generate-content' } }, {}).length, 1)
+  // nexus-adaptive-v1 refuses an undeclared data-use tier and a transport without an implemented adaptive path
+  assert.equal(resolver.checkAdaptiveContract('nexus-adaptive-v1', {}, 'muse_main', { ...model, dataUseTier: undefined }, route, {}).length, 1)
+  assert.equal(resolver.checkAdaptiveContract('nexus-adaptive-v1', {}, 'muse_main', model, { ...route, compatibility: { transport: 'gemini-generate-content' } }, {}).length, 1)
 })
 
 console.log('SUITE RESULT: PASS ' + passed + ' | FAIL 0 | total ' + passed)

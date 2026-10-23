@@ -1882,7 +1882,7 @@ mod s2_signal_audit {
     fn muse(run: &EngineRun) -> &MuseV1State {
         match &run.host.state().data {
             EngineStateData::MuseV1(d) => d,
-            _ => panic!("not a muse-v1 state"),
+            _ => panic!("not a nexus-adaptive-v1 state"),
         }
     }
 

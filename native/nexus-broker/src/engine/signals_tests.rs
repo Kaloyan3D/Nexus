@@ -48,7 +48,7 @@ fn snap(signals: Vec<SignalObservation>) -> EngineSnapshot {
 fn st(h: &EngineHost) -> &MuseV1State {
     match &h.state().data {
         EngineStateData::MuseV1(d) => d,
-        _ => panic!("not a muse-v1 state"),
+        _ => panic!("not a nexus-adaptive-v1 state"),
     }
 }
 

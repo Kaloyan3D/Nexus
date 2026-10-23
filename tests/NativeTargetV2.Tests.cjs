@@ -211,10 +211,10 @@ check('the mode/engine table and the saved-configuration requirement are pinned 
   const issuer = require('../config/registry/native-issuer.cjs');
   assert.deepEqual(Object.keys(issuer.NATIVE_SCOPES).sort(), ['engineering-v2', 'engineering-v2-adaptive']);
   assert.equal(issuer.scopeOf('engineering-v2').engineId, 'muse-v0');
-  assert.equal(issuer.scopeOf('engineering-v2-adaptive').engineId, 'muse-v1');
+  assert.equal(issuer.scopeOf('engineering-v2-adaptive').engineId, 'nexus-adaptive-v1');
   assert.equal(issuer.scopeOf('engineering-v2').requiresSavedConfiguration, false);
   assert.equal(issuer.scopeOf('engineering-v2-adaptive').requiresSavedConfiguration, true);
-  assert.equal(issuer.engineAllowed(issuer.scopeOf('engineering-v2'), 'muse-v1'), false, 'the adaptive engine is never issued under the default mode');
+  assert.equal(issuer.engineAllowed(issuer.scopeOf('engineering-v2'), 'nexus-adaptive-v1'), false, 'the adaptive engine is never issued under the default mode');
   assert.equal(issuer.engineAllowed(issuer.scopeOf('engineering-v2-adaptive'), 'muse-v0'), false);
   // a selection naming any other mode is refused before anything is compiled
   for (const bad of ['engineering-v3', 'engineering-v1', '__proto__']) {

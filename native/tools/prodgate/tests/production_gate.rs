@@ -22,19 +22,20 @@ const MODES: [&str; 6] = [
     "engineering-v2-adaptive ",
     "",
 ];
-const ENGINES: [&str; 12] = [
+const ENGINES: [&str; 13] = [
+    "muse-v1", // the previous identity of the adaptive engine: not an alias, never resolvable
     "muse-v0",
-    "muse-v1",
+    "nexus-adaptive-v1",
     "muse-v1-shadow",
     "muse-v1-signals",
     "effort-test-v0",
     "dual-v1",
     "MUSE-V0",
     "muse-v0 ",
-    "muse-v1\n",
+    "nexus-adaptive-v1\n",
     "muse_v1",
     "",
-    "../muse-v1",
+    "../nexus-adaptive-v1",
 ];
 
 /// Exactly one (mode, engine) pair resolves in a production build: the default mode with muse-v0.
@@ -55,6 +56,7 @@ fn only_the_default_mode_with_muse_v0_resolves() {
 fn every_experimental_and_adaptive_engine_is_unavailable_under_every_mode() {
     for engine in [
         "muse-v1",
+        "nexus-adaptive-v1",
         "muse-v1-shadow",
         "muse-v1-signals",
         "effort-test-v0",
@@ -92,7 +94,7 @@ fn the_activation_gate_is_a_closed_compile_time_constant() {
         unsafe { std::env::set_var(var, "1") };
     }
     assert_eq!(
-        resolve("engineering-v2-adaptive", "muse-v1")
+        resolve("engineering-v2-adaptive", "nexus-adaptive-v1")
             .err()
             .unwrap()
             .code,
@@ -155,7 +157,7 @@ fn the_shipped_adaptive_definition_is_dormant_and_budgeted() {
     )
     .unwrap();
     assert_eq!(def["id"], "engineering-v2-adaptive");
-    assert_eq!(def["orchestrationEngineId"], "muse-v1");
+    assert_eq!(def["orchestrationEngineId"], "nexus-adaptive-v1");
     assert_eq!(def["status"], "planned");
     assert_eq!(def["selectable"], false);
     assert_eq!(def["runnable"], false);
@@ -200,15 +202,15 @@ fn the_frozen_tool_catalog_digests_are_the_pinned_ones() {
     }
     // the adaptive engine's row exists, by exact id only
     assert_eq!(
-        engine::tool_catalog_profile("muse-v1", true),
+        engine::tool_catalog_profile("nexus-adaptive-v1", true),
         P::RepoCodeMuseSignalsV1
     );
     assert_eq!(
-        engine::tool_catalog_profile("muse-v1 ", true),
+        engine::tool_catalog_profile("nexus-adaptive-v1 ", true),
         P::RepoCodeV1
     );
     assert_eq!(
-        engine::tool_catalog_profile("muse-v1", false),
+        engine::tool_catalog_profile("nexus-adaptive-v1", false),
         P::RepoInspectV1
     );
 }

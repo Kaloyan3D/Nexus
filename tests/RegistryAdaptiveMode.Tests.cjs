@@ -31,7 +31,7 @@ check('the Native scope table is closed, frozen and exactly the two reviewed mod
   for (const s of Object.values(issuer.NATIVE_SCOPES)) assert.ok(Object.isFrozen(s))
   assert.equal(issuer.scopeOf('engineering-v2').engineId, 'muse-v0')
   assert.equal(issuer.scopeOf('engineering-v2').requiresSavedConfiguration, false)
-  assert.equal(issuer.scopeOf('engineering-v2-adaptive').engineId, 'muse-v1')
+  assert.equal(issuer.scopeOf('engineering-v2-adaptive').engineId, 'nexus-adaptive-v1')
   assert.equal(issuer.scopeOf('engineering-v2-adaptive').requiresSavedConfiguration, true)
   // nothing else is a mode: unknown, planned, inherited and non-string names
   for (const bad of ['engineering-v3', 'engineering-v1', 'engineering-v2-adaptive ', 'ENGINEERING-V2', '', '__proto__', 'constructor', 'toString', 'hasOwnProperty', null, undefined, 3, {}, []]) {
@@ -40,11 +40,11 @@ check('the Native scope table is closed, frozen and exactly the two reviewed mod
   assert.equal(issuer.SUPPORTED_MODE_ID, 'engineering-v2', 'the default mode is unchanged')
 })
 
-check('the shipped adaptive definition is valid, names muse-v1 and is DORMANT; engineering-v2 is untouched', () => {
+check('the shipped adaptive definition is valid, names nexus-adaptive-v1 and is DORMANT; engineering-v2 is untouched', () => {
   const adaptive = readMode('engineering-v2-adaptive.json')
   assert.deepEqual(schemas.validateModeDefinition(adaptive, 'mode'), [])
   assert.equal(adaptive.id, 'engineering-v2-adaptive')
-  assert.equal(adaptive.orchestrationEngineId, 'muse-v1')
+  assert.equal(adaptive.orchestrationEngineId, 'nexus-adaptive-v1')
   assert.equal(adaptive.runnable, false)
   assert.equal(adaptive.selectable, false)
   assert.equal(adaptive.status, 'planned')
@@ -95,24 +95,24 @@ check('engineering-v2 compiles exactly as before: unsaved is fine, engine muse-v
 })
 
 check('the adaptive mode requires an operator-SAVED configuration; nothing is created or previewed for it', () => {
-  const unsaved = fakeService({ modeId: 'engineering-v2-adaptive', engineId: 'muse-v1', persisted: false })
+  const unsaved = fakeService({ modeId: 'engineering-v2-adaptive', engineId: 'nexus-adaptive-v1', persisted: false })
   const r = issuer.compileTrustedMode(Object.assign({ modeId: 'engineering-v2-adaptive' }, OPTS), { service: unsaved })
   assert.equal(r.ok, false)
   assert.equal(r.code, 'registry-mode-configuration-required')
   assert.ok(!unsaved.calls.some((c) => c[0] === 'compile'), 'it never even compiled a preview')
-  const unresolved = fakeService({ modeId: 'engineering-v2-adaptive', engineId: 'muse-v1', unresolved: true })
+  const unresolved = fakeService({ modeId: 'engineering-v2-adaptive', engineId: 'nexus-adaptive-v1', unresolved: true })
   assert.equal(issuer.compileTrustedMode(Object.assign({ modeId: 'engineering-v2-adaptive' }, OPTS), { service: unresolved }).code, 'registry-mode-configuration-required')
   // while engineering-v2 keeps its own code for an unresolvable configuration
   assert.equal(issuer.compileTrustedMode(OPTS, { service: fakeService({ modeId: 'engineering-v2', engineId: 'muse-v0', unresolved: true }) }).code, 'registry-unresolved')
-  const saved = fakeService({ modeId: 'engineering-v2-adaptive', engineId: 'muse-v1', persisted: true })
+  const saved = fakeService({ modeId: 'engineering-v2-adaptive', engineId: 'nexus-adaptive-v1', persisted: true })
   const ok = issuer.compileTrustedMode(Object.assign({ modeId: 'engineering-v2-adaptive' }, OPTS), { service: saved })
   assert.equal(ok.ok, true, JSON.stringify(ok))
   assert.equal(ok.persisted, true)
 })
 
 check('the shipped definition must declare an engine the reviewed table allows for its mode', () => {
-  // the adaptive mode may name only muse-v1; engineering-v2 only muse-v0 or a listed experimental engine
-  for (const [mode, engine] of [['engineering-v2-adaptive', 'muse-v0'], ['engineering-v2', 'muse-v1'], ['engineering-v2-adaptive', 'dual-v1'], ['engineering-v2', 'nova-v3'], ['engineering-v2', 'dual-v1'], ['engineering-v2-adaptive', 'muse-v1-shadow'], ['engineering-v2-adaptive', 'effort-test-v0'], ['engineering-v2', '']]) {
+  // the adaptive mode may name only nexus-adaptive-v1; engineering-v2 only muse-v0 or a listed experimental engine
+  for (const [mode, engine] of [['engineering-v2-adaptive', 'muse-v0'], ['engineering-v2', 'nexus-adaptive-v1'], ['engineering-v2-adaptive', 'dual-v1'], ['engineering-v2', 'nova-v3'], ['engineering-v2', 'dual-v1'], ['engineering-v2-adaptive', 'muse-v1-shadow'], ['engineering-v2-adaptive', 'effort-test-v0'], ['engineering-v2', '']]) {
     const svc = fakeService({ modeId: mode, engineId: engine, persisted: true })
     const r = issuer.compileTrustedMode(Object.assign({ modeId: mode }, OPTS), { service: svc })
     assert.equal(r.ok, false, mode + '/' + engine)
@@ -123,8 +123,8 @@ check('the shipped definition must declare an engine the reviewed table allows f
     const r = issuer.compileTrustedMode(OPTS, { service: fakeService({ modeId: 'engineering-v2', engineId: engine }) })
     assert.equal(r.ok, true, engine)
   }
-  assert.equal(issuer.engineAllowed(issuer.scopeOf('engineering-v2-adaptive'), 'muse-v1'), true)
-  assert.equal(issuer.engineAllowed(issuer.scopeOf('engineering-v2'), 'muse-v1'), false, 'production muse-v1 is never issuable in the default mode')
+  assert.equal(issuer.engineAllowed(issuer.scopeOf('engineering-v2-adaptive'), 'nexus-adaptive-v1'), true)
+  assert.equal(issuer.engineAllowed(issuer.scopeOf('engineering-v2'), 'nexus-adaptive-v1'), false, 'production nexus-adaptive-v1 is never issuable in the default mode')
 })
 
 check('unknown modes, inherited names and foreign roles are refused with the scope code', () => {
@@ -138,18 +138,18 @@ check('unknown modes, inherited names and foreign roles are refused with the sco
 })
 
 check('issuance seals the mode and engine of the chosen scope, and refuses any mismatched binding', () => {
-  const svc = fakeService({ modeId: 'engineering-v2-adaptive', engineId: 'muse-v1', persisted: true })
+  const svc = fakeService({ modeId: 'engineering-v2-adaptive', engineId: 'nexus-adaptive-v1', persisted: true })
   const c = issuer.compileTrustedMode(Object.assign({ modeId: 'engineering-v2-adaptive' }, OPTS), { service: svc })
   const out = issuer.issueForGeneration(c, 'task-1')
   assert.equal(out.ok, true, JSON.stringify(out))
   assert.equal(out.issuance.modeId, 'engineering-v2-adaptive')
   assert.equal(out.issuance.resolution.target.modeId, 'engineering-v2-adaptive')
-  assert.equal(out.issuance.resolution.target.orchestrationEngineId, 'muse-v1')
+  assert.equal(out.issuance.resolution.target.orchestrationEngineId, 'nexus-adaptive-v1')
   const def = issuer.issueForGeneration(issuer.compileTrustedMode(OPTS, { service: fakeService({ modeId: 'engineering-v2', engineId: 'muse-v0' }) }), 'task-1')
   assert.equal(def.ok, true)
   assert.equal(def.issuance.modeId, 'engineering-v2')
   // a binding whose engine disagrees with its mode's reviewed engines
-  for (const [mode, engine] of [['engineering-v2-adaptive', 'muse-v0'], ['engineering-v2', 'muse-v1'], ['engineering-v2-adaptive', 'muse-v1-signals']]) {
+  for (const [mode, engine] of [['engineering-v2-adaptive', 'muse-v0'], ['engineering-v2', 'nexus-adaptive-v1'], ['engineering-v2-adaptive', 'muse-v1-signals']]) {
     const forged = { ok: true, binding: Object.assign({}, c.binding, { modeId: mode, orchestrationEngineId: engine }), snapshot: c.snapshot, modeConfig: c.modeConfig, persisted: true }
     const r = issuer.issueForGeneration(forged, 'task-1')
     assert.equal(r.ok, false, mode + '/' + engine)
@@ -197,11 +197,11 @@ check('the real Registry has no default for the adaptive mode, cannot adopt a le
     const saved = svc.save('engineering-v2-adaptive', cfg, null, {})
     assert.equal(saved.ok, false)
     assert.deepEqual(listing(dataRoot), before, 'a refused save writes nothing')
-    // the mode is listed honestly: present, engine muse-v1, not executable, not persisted
+    // the mode is listed honestly: present, engine nexus-adaptive-v1, not executable, not persisted
     const modes = svc.listModes().modes
     const m = modes.find((x) => x.id === 'engineering-v2-adaptive')
     assert.ok(m && m.present)
-    assert.equal(m.orchestrationEngineId, 'muse-v1')
+    assert.equal(m.orchestrationEngineId, 'nexus-adaptive-v1')
     assert.equal(m.executable, false)
     assert.equal(m.persisted, false)
     assert.equal(m.selectable, false)
@@ -483,13 +483,13 @@ check('snapshot completeness is judged by REQUIRED legacy modes, not by a count 
   const okRoute = { id: 'r', executionKind: 'raw-model', compatibility: { transport: 'openai-responses' }, reasoningLevels: ['low', 'medium', 'high', 'xhigh'] }
   const okProvider = { id: 'p', metadata: {} }
   const okAssign = { reasoning: 'low', allowedReasoning: ['low', 'medium', 'high', 'xhigh'] }
-  const judge = (over) => resolver.checkAdaptiveContract('muse-v1', {}, 'muse_main', Object.assign({}, okModel, over.model), Object.assign({}, okRoute, over.route), { provider: Object.assign({}, okProvider, over.provider), assignment: over.assignment === null ? undefined : Object.assign({}, okAssign, over.assignment) })
+  const judge = (over) => resolver.checkAdaptiveContract('nexus-adaptive-v1', {}, 'muse_main', Object.assign({}, okModel, over.model), Object.assign({}, okRoute, over.route), { provider: Object.assign({}, okProvider, over.provider), assignment: over.assignment === null ? undefined : Object.assign({}, okAssign, over.assignment) })
   const codes = (errs) => errs.map((e) => e.code)
 
-  check('the contract table is closed and frozen: muse-v0 (legacy) and muse-v1 only; unknown contracts fail closed', () => {
-    assert.deepEqual(Object.keys(resolver.ADAPTIVE_CONTRACTS).sort(), ['muse-v0', 'muse-v1'])
-    assert.ok(Object.isFrozen(resolver.ADAPTIVE_CONTRACTS) && Object.isFrozen(resolver.ADAPTIVE_CONTRACTS['muse-v1']))
-    for (const bad of ['muse-v2', 'MUSE-V1', 'muse-v1 ', '', '__proto__', 'constructor', 'toString', 'nexus-adaptive-v1', null, 7, {}]) {
+  check('the contract table is closed and frozen: muse-v0 (legacy) and nexus-adaptive-v1 only; unknown contracts fail closed', () => {
+    assert.deepEqual(Object.keys(resolver.ADAPTIVE_CONTRACTS).sort(), ['muse-v0', 'nexus-adaptive-v1'])
+    assert.ok(Object.isFrozen(resolver.ADAPTIVE_CONTRACTS) && Object.isFrozen(resolver.ADAPTIVE_CONTRACTS['nexus-adaptive-v1']))
+    for (const bad of ['muse-v2', 'MUSE-V1', 'NEXUS-ADAPTIVE-V1', 'nexus-adaptive-v1 ', 'muse-v1', 'muse-v1 ', '', '__proto__', 'constructor', 'toString', null, 7, {}]) {
       const e = resolver.checkAdaptiveContract(bad, {}, 'muse_main', okModel, okRoute, {})
       assert.deepEqual(codes(e), ['slot-capability-not-satisfied'], JSON.stringify(bad))
       assert.match(e[0].message, /unknown adaptiveReasoningContract/)
@@ -497,7 +497,7 @@ check('snapshot completeness is judged by REQUIRED legacy modes, not by a count 
     assert.deepEqual(resolver.checkAdaptiveContract('muse-v0', {}, 'muse_main', okModel, okRoute, {}), [], 'muse-v0 is judged by its own, unchanged rule')
   })
 
-  check('muse-v1: a model, route and policy that meet the engine\'s real requirements are accepted', () => {
+  check('nexus-adaptive-v1: a model, route and policy that meet the engine\'s real requirements are accepted', () => {
     assert.deepEqual(judge({}), [])
     // both data-use tiers the Registry defines are acceptable when DECLARED; the legacy contributor-only rule is not imposed
     assert.deepEqual(judge({ model: { dataUseTier: 'contributor' } }), [])
@@ -510,7 +510,7 @@ check('snapshot completeness is judged by REQUIRED legacy modes, not by a count 
     assert.deepEqual(judge({ assignment: null }), [])
   })
 
-  check('muse-v1: every unmet requirement is refused, each for its own reason', () => {
+  check('nexus-adaptive-v1: every unmet requirement is refused, each for its own reason', () => {
     const refuse = (over, rx) => {
       const e = judge(over)
       assert.ok(e.length >= 1 && e.every((x) => x.code === 'slot-capability-not-satisfied'), JSON.stringify(over))
@@ -539,7 +539,7 @@ check('snapshot completeness is judged by REQUIRED legacy modes, not by a count 
 
   check('the contract is enforced by the Registry itself on the real catalog: compile and eligible-route listing', () => {
     // the shipped catalog, in memory: the adaptive definition ACTIVATED and every model scoped to
-    // muse-v1 (what an operator would have to do; the built-in catalog scopes none)
+    // nexus-adaptive-v1 (what an operator would have to do; the built-in catalog scopes none)
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'registry-contract-'))
     try {
       const root = path.join(tmp, 'inst')
@@ -549,7 +549,7 @@ check('snapshot completeness is judged by REQUIRED legacy modes, not by a count 
       for (const f of ['model-registry.json', 'engineering-profiles.json', 'muse-profiles.json']) fs.copyFileSync(path.join(repoRoot, 'config', f), path.join(cfg, f))
       const svc = require(path.join(cfg, 'registry', 'service.cjs')).createService({ installRoot: root, dataRoot: path.join(tmp, 'data') })
       const snap = JSON.parse(JSON.stringify(svc.effectiveSnapshot().snapshot))
-      for (const model of snap.models) model.engines = Array.from(new Set((model.engines || []).concat(['muse-v1'])))
+      for (const model of snap.models) model.engines = Array.from(new Set((model.engines || []).concat(['nexus-adaptive-v1'])))
       const mode = snap.modes.find((x) => x.id === 'engineering-v2-adaptive')
       Object.assign(mode, { status: 'active', selectable: true, runnable: true })
       const compile = (routeId, modelId, reasoning, allowed) => {
@@ -563,7 +563,7 @@ check('snapshot completeness is judged by REQUIRED legacy modes, not by a count 
       assert.equal(ok.ok, true, JSON.stringify(ok.errors || ok))
       // ... and the binding it seals carries the contract and the allowed levels
       const binding = Object.values(ok.snapshot.roles)[0]
-      assert.equal(binding.slotRequirements.adaptiveReasoningContract, 'muse-v1')
+      assert.equal(binding.slotRequirements.adaptiveReasoningContract, 'nexus-adaptive-v1')
       assert.deepEqual(binding.allowedReasoning, ['high', 'low', 'medium', 'xhigh'])
       // a ladder-external default or authorized level is refused (the route declares minimal)
       let r = compile('opencode-go/meta/muse-spark-1.3-contributor', 'meta/muse-spark-1.3-contributor', 'minimal', ['minimal', 'low'])
