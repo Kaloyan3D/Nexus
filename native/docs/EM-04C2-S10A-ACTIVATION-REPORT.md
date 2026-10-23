@@ -40,5 +40,8 @@ Set `MUSE_V1_PRODUCTION_ENABLED = false` and the definition back to `planned`/`s
 ## 8. Conditions for S10-B (default decision) — not met by this milestone
 Live R3 validation passed; real-model comparison Adaptive vs `muse-v0` (quality, cost, latency, failures) on the owner's tasks; token/cost accounting verified; no unexplained authorization failure; owner decision; separate commit.
 
+## 8b. Failed first acceptance attempt (kept for the record)
+The first battery on the feature commit `08179b9` failed once: `s6_an_adaptive_run_changes_effort_only_through_registry_and_kernel_before_each_request` read the last attempt as `bound` instead of `answered` (log kept as `battery1.FAILED.log`; 161 passed / 1 failed in `code_a56`). Root cause (code-evidenced, not an authorization defect): by design `inspect.rs` writes the run record's terminal state BEFORE the engine record's end (`finish`, which commits the last attempt's outcome), so a client that polls the run status can read the engine state a moment before that last commit. The test asserted the FINAL attempt state without waiting for `run-ended`; the same pattern was in `em03_…_lhl`. Fix (test-only, assertions unchanged): `em03_state_settled` waits (bounded 30 s) for the `run-ended` event. This is a new corrective commit; the acceptance sequence was restarted on its SHA. Earlier batteries (S9.5, hardening, integration) had passed because the window is small.
+
 ## 9. Validation results
 See `EM-04C2-S10A-ACCEPTANCE-RESULTS.md` (recorded after the commit, against the exact committed SHA).

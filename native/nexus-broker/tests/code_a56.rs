@@ -9695,6 +9695,28 @@ fn em03_state(fx: &Fx, broker: &str, task: &str) -> Value {
     serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap()
 }
 
+/// The engine record once the run's end has been written. By design (see `inspect.rs`, "the engine
+/// record's end is written AFTER the run record") a client that sees the run terminal can read the
+/// engine state a moment before its last commit; a test that asserts the FINAL state of the last
+/// attempt must wait for `run-ended`. Bounded; fails (with the record) if the end never appears.
+fn em03_state_settled(fx: &Fx, broker: &str, task: &str) -> Value {
+    let end = Instant::now() + Duration::from_secs(30);
+    loop {
+        let st = em03_state(fx, broker, task);
+        let ended = st["events"]
+            .as_array()
+            .is_some_and(|e| e.last().is_some_and(|x| x["kind"] == "run-ended"));
+        if ended || Instant::now() >= end {
+            assert!(
+                ended,
+                "the engine record never recorded the end of the run: {st}"
+            );
+            return st;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// A responder that answers `reads` tool-call rounds, then a final text.
 fn em03_responder(reads: usize) -> Responder {
     Arc::new(move |n, body| {
@@ -9796,7 +9818,7 @@ fn em03_a_test_engine_moves_low_high_low_through_registry_and_kernel_one_attempt
         assert_eq!(x["model"], "e2e-mock-model");
     }
     let task = run.task_instance_id.clone().unwrap();
-    let st = em03_state(&fx, "em03-lhl", &task);
+    let st = em03_state_settled(&fx, "em03-lhl", &task);
     assert_eq!(st["engineId"], "effort-test-v0");
     assert_eq!(st["defaultEffort"], "low");
     let att: Vec<(u64, String)> = st["attempts"]
@@ -13081,7 +13103,7 @@ fn s6_an_adaptive_run_changes_effort_only_through_registry_and_kernel_before_eac
     }
     // 2. the durable record
     let task = run.task_instance_id.clone().unwrap();
-    let st = em03_state(&fx, "s6-adaptive", &task);
+    let st = em03_state_settled(&fx, "s6-adaptive", &task);
     assert_eq!(st["engineId"], "nexus-adaptive-v1");
     assert_eq!(st["modeId"], ADAPTIVE_MODE);
     assert_eq!(st["stateSchema"], 2);
