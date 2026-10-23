@@ -36,7 +36,7 @@ function stub(calls, overrides) {
       const ev = 'event: response.output_text.delta\ndata: ' + JSON.stringify({ type: 'response.output_text.delta', delta: 'probe-ok' }) + '\n\n';
       return { status: 200, text: async () => ev + 'data: [DONE]\n\n' };
     }
-    return { status: 200, text: async () => JSON.stringify({ status: 'completed', output_text: 'probe-ok', reasoning: { effort: 'low' } }) };
+    return { status: 200, text: async () => JSON.stringify({ status: 'completed', output_text: 'probe-ok', reasoning: { effort: (parsed.reasoning && parsed.reasoning.effort) || 'low' } }) };
   };
 }
 
@@ -172,6 +172,84 @@ function stub(calls, overrides) {
     for (const lit of ['http://2130706433/', 'http://0x7f.1/', 'http://0177.0.0.1/', 'http://127.1/', 'http://[::1]/']) {
       assert.ok(pc.validateEndpoint(lit, 'openai-responses', {}).length > 0, lit);
     }
+  });
+
+  // ---- S10: first-party onboarding of Nexus Adaptive (explicit, idempotent, verified through the real mechanism) ----
+  const REPO = path.resolve(__dirname, '..');
+  const regOf = (d) => require('../config/registry/service.cjs').createService({ installRoot: REPO, dataRoot: d });
+  const ADAPTIVE = gate.ADAPTIVE_ROUTE_ID;
+
+  await check('adaptive onboarding is idempotent, scoped ONLY to nexus-adaptive-v1, and leaves the historical entries alone', async () => {
+    const d = root(); // default setup first (an existing installation)
+    const before = regOf(d).effectiveSnapshot().snapshot;
+    const lines = [];
+    assert.equal(setup.run(['--data-root', d, '--apply', '--adaptive'], (l) => lines.push(l)), 0);
+    assert.equal(setup.run(['--data-root', d, '--apply', '--adaptive'], (l) => lines.push(l)), 0, 'a repeated setup succeeds');
+    assert.ok(lines.filter((l) => /already present/.test(l)).length >= 6, 'the second run leaves every record unchanged');
+    const snap = regOf(d).effectiveSnapshot().snapshot;
+    const models = snap.models.filter((m) => m.id === 'meta/muse-spark-1.3-contributor-adaptive');
+    const routes = snap.routes.filter((r) => r.id === ADAPTIVE);
+    assert.equal(models.length, 1); assert.equal(routes.length, 1, 'no duplicate entries');
+    assert.deepEqual(models[0].engines, ['nexus-adaptive-v1']);
+    assert.equal(routes[0].availability, 'probe-required', 'never pre-verified');
+    assert.equal(routes[0].compatibility.transport, 'openai-responses');
+    assert.deepEqual(routes[0].reasoningLevels, ['low', 'medium', 'high', 'xhigh']);
+    // historical entries byte-identical
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+    for (const id of ['meta/muse-spark-1.3-contributor', 'meta/muse-spark-1.3-contributor-native']) assert.ok(same(before.models.find((m) => m.id === id), snap.models.find((m) => m.id === id)), id);
+    assert.ok(same(before.routes.find((r) => r.id === 'opencode-go-native/muse'), snap.routes.find((r) => r.id === 'opencode-go-native/muse')));
+    // no operator configuration was created
+    assert.equal(regOf(d).listModes().modes.find((m) => m.id === 'engineering-v2-adaptive').persisted, false)
+  });
+
+  await check('an authorization record names ONE route: the default record cannot verify the adaptive route and vice versa', async () => {
+    const d = root(); setup.run(['--data-root', d, '--apply', '--adaptive'], quiet);
+    const f = creds(d, 'SECRETKEY'); const calls = [];
+    gate.authorize(['--data-root', d, '--acknowledge-billable'], quiet); // default route
+    assert.equal(await gate.verify(['--data-root', d, '--credentials', f, '--adaptive'], quiet, { opts: { fetchImpl: stub(calls), lookup: publicLookup } }), 3);
+    assert.equal(calls.length, 0, 'nothing sent');
+    gate.authorize(['--data-root', d, '--acknowledge-billable', '--adaptive'], quiet); // adaptive route
+    assert.equal(await gate.verify(['--data-root', d, '--credentials', f], quiet, { opts: { fetchImpl: stub(calls), lookup: publicLookup } }), 3);
+    assert.equal(calls.length, 0, 'nothing sent');
+  });
+
+  await check('the adaptive route is verified by the real mechanism; the ModeConfiguration is saved only on the explicit flag', async () => {
+    const d = root(); setup.run(['--data-root', d, '--apply', '--adaptive'], quiet);
+    const f = creds(d, 'SECRETKEY'); const calls = []; const lines = [];
+    gate.authorize(['--data-root', d, '--acknowledge-billable', '--adaptive'], quiet);
+    assert.equal(await gate.verify(['--data-root', d, '--credentials', f, '--adaptive'], (l) => lines.push(l), { opts: { fetchImpl: stub(calls), lookup: publicLookup } }), 0, lines.join('\n'));
+    // 1 GET + one text probe per declared level (low, medium, high, xhigh) + stream + tool + continuation
+    assert.equal(calls.length, 8);
+    const efforts = calls.filter((c) => c.method === 'POST').map((c) => JSON.parse(c.body)).filter((b) => !b.stream && !b.tools && !Array.isArray(b.input)).map((b) => b.reasoning.effort);
+    assert.deepEqual(efforts, ['low', 'medium', 'high', 'xhigh'], 'the provider is asked once per authorized effort');
+    assert.equal(JSON.parse(fs.readdirSync(d).filter((f) => /consumed/.test(f)).map((f) => fs.readFileSync(path.join(d, f), 'utf8'))[0]).maxRequests, 8, 'the authorization stated exactly what was sent');
+    assert.ok(!lines.join('\n').includes('SECRETKEY'), 'the key is never printed');
+    let reg = regOf(d);
+    assert.equal(reg.effectiveSnapshot().snapshot.routes.find((r) => r.id === ADAPTIVE).availability, 'verified');
+    assert.equal(reg.listModes().modes.find((m) => m.id === 'engineering-v2-adaptive').persisted, false, 'verification alone saves nothing');
+    // the explicit authorized save
+    gate.authorize(['--data-root', d, '--acknowledge-billable', '--adaptive'], quiet);
+    const lines2 = [];
+    assert.equal(await gate.verify(['--data-root', d, '--credentials', f, '--adaptive', '--save-adaptive-config'], (l) => lines2.push(l), { opts: { fetchImpl: stub([]), lookup: publicLookup } }), 0, lines2.join('\n'));
+    reg = regOf(d);
+    const got = reg.getModeConfiguration('engineering-v2-adaptive', {});
+    assert.equal(got.result.persisted, true);
+    assert.equal(got.result.config.slots.main.routeId, ADAPTIVE);
+    assert.deepEqual(got.result.config.slots.main.allowedReasoning.slice().sort(), ['high', 'low', 'medium', 'xhigh']);
+    // the default mode is untouched by the adaptive flow (this fixture never bound it)
+    assert.equal(reg.listModes().modes.find((m) => m.id === 'engineering-v2').persisted, false);
+  });
+
+  await check('a failed adaptive verification saves no configuration (an unverified route can never be bound)', async () => {
+    const d = root(); setup.run(['--data-root', d, '--apply', '--adaptive'], quiet);
+    const f = creds(d, 'K'); const calls = [];
+    gate.authorize(['--data-root', d, '--acknowledge-billable', '--adaptive'], quiet);
+    const code = await gate.verify(['--data-root', d, '--credentials', f, '--adaptive', '--save-adaptive-config'], quiet, { opts: { fetchImpl: stub(calls, { 1: { status: 429, text: async () => 'rate limited' } }), lookup: publicLookup } });
+    assert.equal(code, 1);
+    assert.equal(regOf(d).listModes().modes.find((m) => m.id === 'engineering-v2-adaptive').persisted, false);
+    // verification is PER LEVEL: the level whose probe failed is not claimed, and the configuration that needs it is refused
+    const route = regOf(d).effectiveSnapshot().snapshot.routes.find((r) => r.id === ADAPTIVE);
+    assert.ok(!route.reasoningLevels.includes('low'), 'a level whose probe failed is never claimed: ' + JSON.stringify(route.reasoningLevels));
   });
 
   console.log('SUITE RESULT: PASS ' + passed + ' | FAIL 0 | total ' + passed);

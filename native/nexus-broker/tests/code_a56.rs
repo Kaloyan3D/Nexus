@@ -15129,3 +15129,45 @@ fn s95_repeated_continuation_cannot_launder_the_former_identity() {
     );
     b.shutdown();
 }
+
+// ===================================================================================================
+// R3 readiness: the real broker never dispatches an adaptive task through a route that was saved but
+// not probe-verified, whatever the saved configuration says. (`e2e-mock/e2e-3` is such a route.)
+// ===================================================================================================
+#[test]
+fn r3_an_adaptive_task_selecting_an_unverified_route_is_refused_before_any_request() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s6_fixture(s6_claims(), Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "r3-unverified", None, None);
+    let mut i = s4_intent("r3-unverified-0000001", Some(ADAPTIVE_MODE));
+    {
+        let m = i.model.as_mut().unwrap();
+        m.remote_model_id = "e2e-mock-model-3".into();
+        m.logical_model_id = Some("e2e/e2e-3".into());
+        m.route_id = Some("e2e-mock/e2e-3".into());
+    }
+    let before = fx.provider.accepted.load(Ordering::SeqCst);
+    // refused at submission itself: no run is even created for it
+    let err = ic::submit(b.socket_path(), &i).expect_err("an unverified route must be refused");
+    assert_eq!(err.code, "model-not-available", "{err:?}");
+    assert!(err.message.contains("route-not-verified"), "{err:?}");
+    assert_eq!(
+        fx.provider.accepted.load(Ordering::SeqCst),
+        before,
+        "no provider request"
+    );
+    // and the default mode with that same unverified route is refused the same way
+    let mut j = s4_intent("r3-unverified-0000002", None);
+    {
+        let m = j.model.as_mut().unwrap();
+        m.remote_model_id = "e2e-mock-model-3".into();
+        m.logical_model_id = Some("e2e/e2e-3".into());
+        m.route_id = Some("e2e-mock/e2e-3".into());
+    }
+    let err2 = ic::submit(b.socket_path(), &j).expect_err("refused");
+    assert_eq!(err2.code, "model-not-available", "{err2:?}");
+    assert_eq!(fx.provider.accepted.load(Ordering::SeqCst), before);
+    b.shutdown();
+}
