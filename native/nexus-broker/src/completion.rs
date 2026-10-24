@@ -434,6 +434,109 @@ pub fn failing_checks_note(n: u32) -> String {
     )
 }
 
+/// The identity under which a verification command's failure is remembered and later cleared.
+///
+/// A pass clears a failure only when both have the SAME identity. By default the identity is the exact
+/// command (`fallback`, the arguments digest). The one narrow equivalence: `cargo test|build|check|clippy`
+/// whose arguments differ only in OUTPUT-ONLY flags - `--verbose`/`-v`/`-vv`, `--quiet`/`-q`,
+/// `--color=<when>` before `--`, and `--nocapture`/`--show-output` after it (libtest's capture/printing,
+/// which cannot change what is executed or the exit status). Everything else - test names and filters,
+/// `-p`/`--package`/`--workspace`/`--test`/`--lib`, `--features`, `--release`/`--profile`, other libtest flags
+/// (`--test-threads`, `--ignored`, `--include-ignored`, `--exact`, `--skip`), the working directory, ordering -
+/// stays part of the identity, so a narrower or different command never clears a failure. Anything that is
+/// not one of those four cargo subcommands keeps its exact identity. (The sandbox has no per-command
+/// environment: `proc_run` takes only program, args and cwd.)
+pub fn check_identity(args: &serde_json::Value, fallback: &str) -> String {
+    use serde_json::Value;
+    let prog = args.get("program").and_then(Value::as_str).unwrap_or("");
+    let Some(argv) = args.get("args").and_then(Value::as_array).map(|a| {
+        a.iter()
+            .map(|x| x.as_str().map(str::to_owned))
+            .collect::<Option<Vec<String>>>()
+    }) else {
+        return fallback.to_owned();
+    };
+    let Some(argv) = argv else {
+        return fallback.to_owned();
+    };
+    if prog != "cargo"
+        || !matches!(
+            argv.first().map(String::as_str),
+            Some("test" | "build" | "check" | "clippy")
+        )
+    {
+        return fallback.to_owned();
+    }
+    let sep = argv.iter().position(|a| a == "--");
+    let (head, tail) = match sep {
+        Some(i) => (&argv[..i], &argv[i + 1..]),
+        None => (&argv[..], &[][..]),
+    };
+    let head: Vec<&str> = head
+        .iter()
+        .map(String::as_str)
+        .filter(|a| {
+            !matches!(*a, "--verbose" | "-v" | "-vv" | "--quiet" | "-q")
+                && !matches!(*a, "--color=always" | "--color=never" | "--color=auto")
+        })
+        .collect();
+    let tail: Vec<&str> = tail
+        .iter()
+        .map(String::as_str)
+        .filter(|a| !matches!(*a, "--nocapture" | "--show-output"))
+        .collect();
+    let cwd = match args.get("cwd").and_then(Value::as_str) {
+        None | Some("") | Some("./") => ".",
+        Some(c) => c.trim_end_matches('/'),
+    };
+    let doc =
+        serde_json::json!({ "v": 1, "program": "cargo", "head": head, "tail": tail, "cwd": cwd });
+    format!(
+        "norm:{}",
+        nexus_contracts::sha256_hex(&nexus_contracts::canonical_json(&doc))
+    )
+}
+
+/// What the host tells the model when it refuses to accept a final answer because verification commands
+/// failed and were never re-run successfully: exactly which commands, whether the problem is a mismatch
+/// (a command of the same kind HAS passed with different arguments) or a failure still to fix, and which
+/// checks already passed (so they are not re-run for nothing). Built only from command lines the model
+/// itself issued, bounded in size.
+pub fn unresolved_checks_message(unresolved: &[String], passed: &[String]) -> String {
+    let kind = |c: &str| c.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+    let list = |v: &[String]| {
+        v.iter()
+            .take(6)
+            .map(|c| format!("`{}`", c.chars().take(120).collect::<String>()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut out = format!(
+        "Not finished: {} verification command{} failed earlier in this run and {} not passed since: {}.",
+        unresolved.len(),
+        if unresolved.len() == 1 { "" } else { "s" },
+        if unresolved.len() == 1 { "has" } else { "have" },
+        list(unresolved)
+    );
+    let mismatched: Vec<&String> = unresolved
+        .iter()
+        .filter(|u| passed.iter().any(|p| kind(p) == kind(u)))
+        .collect();
+    if !mismatched.is_empty() {
+        out.push_str(" A command of the same kind has passed with DIFFERENT arguments, so this is a verification mismatch, not a new failure: it is only cleared by re-running the failed command itself (or the same command with only output flags such as --verbose or --nocapture changed).");
+    } else {
+        out.push_str(" None of them has passed yet: treat this as a failure to fix, then re-run that command.");
+    }
+    if !passed.is_empty() {
+        out.push_str(&format!(
+            " Already passing since your last change (do not re-run these): {}.",
+            list(passed)
+        ));
+    }
+    out.push_str(" If a failure was already there and is unrelated to your change, say so explicitly in your final answer with the evidence instead.");
+    out
+}
+
 /// Sent when the model stops while verification commands are still failing.
 pub const MSG_UNRESOLVED_CHECKS: &str = "Some verification commands failed and were never re-run successfully. Run them again after fixing the cause until they pass, or - if a failure was already there and is unrelated to the task - say so explicitly in your final answer with the evidence. Do not finish while they are unexplained.";
 

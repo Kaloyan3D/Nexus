@@ -601,6 +601,214 @@ fn unresolved_failed_checks_are_asked_about_whatever_the_length_of_the_closing_t
     assert!(stop(&mut MuseV0State::default(), &short, "All done.").is_some());
 }
 
+// ------------------------------------------------ completion verification loop (owner finding)
+
+fn cargo(args: &[&str]) -> serde_json::Value {
+    serde_json::json!({ "program": "cargo", "args": args, "cwd": "." })
+}
+
+/// A. cargo test -- --nocapture failed; a later plain `cargo test` clears it (output-only flags).
+#[test]
+fn p2_output_only_flags_do_not_change_a_checks_identity() {
+    use crate::completion::check_identity as id;
+    let base = id(&cargo(&["test"]), "exact-a");
+    assert!(base.starts_with("norm:"));
+    for same in [
+        vec!["test", "--", "--nocapture"],
+        vec!["test", "--verbose"],
+        vec!["test", "-v"],
+        vec!["test", "-q", "--", "--show-output"],
+        vec!["test", "--color=never"],
+    ] {
+        assert_eq!(id(&cargo(&same), "x"), base, "{same:?}");
+    }
+    // an absent or "./" cwd is the repository root
+    assert_eq!(
+        id(&serde_json::json!({"program":"cargo","args":["test"]}), "x"),
+        base
+    );
+    assert_eq!(
+        id(
+            &serde_json::json!({"program":"cargo","args":["test"],"cwd":"./"}),
+            "x"
+        ),
+        base
+    );
+}
+
+/// B. Anything that selects or configures a different run is a different check.
+#[test]
+fn p2_different_selections_are_never_equivalent() {
+    use crate::completion::check_identity as id;
+    let base = id(&cargo(&["test"]), "x");
+    for different in [
+        vec!["test", "median"],
+        vec!["test", "--test", "stats"],
+        vec!["test", "-p", "stats-kit"],
+        vec!["test", "--workspace"],
+        vec!["test", "--lib"],
+        vec!["test", "--release"],
+        vec!["test", "--features", "extra"],
+        vec!["test", "--", "--ignored"],
+        vec!["test", "--", "--test-threads=1"],
+        vec!["test", "--", "--exact", "median"],
+        vec!["test", "--", "median", "--nocapture"],
+        vec!["build"],
+        vec!["clippy", "--all-targets", "--", "-D", "warnings"],
+        vec!["test", "--no-fail-fast"],
+    ] {
+        assert_ne!(id(&cargo(&different), "x"), base, "{different:?}");
+    }
+    // a different working directory
+    let sub = serde_json::json!({"program":"cargo","args":["test"],"cwd":"crates/a"});
+    assert_ne!(id(&sub, "x"), base);
+    // a filter keeps its identity whatever the output flags
+    assert_eq!(
+        id(&cargo(&["test", "median", "--", "--nocapture"]), "x"),
+        id(&cargo(&["test", "median"]), "x")
+    );
+    // other programs and subcommands fall back to the exact command
+    assert_eq!(
+        id(
+            &serde_json::json!({"program":"npm","args":["test"]}),
+            "exact-npm"
+        ),
+        "exact-npm"
+    );
+    assert_eq!(id(&cargo(&["fmt", "--check"]), "exact-fmt"), "exact-fmt");
+    assert_eq!(
+        id(&cargo(&["run", "--", "--nocapture"]), "exact-run"),
+        "exact-run"
+    );
+}
+
+fn unresolved_snapshot(tests: u32) -> EngineSnapshot {
+    EngineSnapshot {
+        expects_change: true,
+        tool_calls: 40,
+        edits_used: 3,
+        tests_used: tests,
+        last_test: Some("pass".into()),
+        failed_checks: 1,
+        resolved_checks: 0,
+        unresolved_checks: vec!["cargo test --test stats median".into()],
+        passed_checks: vec!["cargo test".into(), "cargo fmt --check".into()],
+        response_text: "All done. The change is complete and the checks pass.".into(),
+        ..snap()
+    }
+}
+
+fn guided_rounds(rounds: u32) -> (u32, bool) {
+    let mut h = host();
+    let mut guided = 0;
+    let mut finished = false;
+    for i in 0..rounds {
+        // every round the model re-ran a check that ALREADY passed: tests_used grows, nothing is resolved
+        match h
+            .consult(Hook::FinalResponse, &unresolved_snapshot(4 + i))
+            .expect("valid")
+        {
+            EngineDecision::Guide(_) => guided += 1,
+            EngineDecision::Finish => {
+                finished = true;
+                break;
+            }
+            EngineDecision::Continue => unreachable!(),
+        }
+    }
+    (guided, finished)
+}
+
+/// C. Re-running passing checks cannot reset the refusal cap forever; the refusals are bounded.
+#[test]
+fn p2_repeated_passing_checks_cannot_reset_the_refusal_cap() {
+    let (guided, finished) = guided_rounds(60);
+    assert_eq!(
+        guided,
+        muse_v0::MAX_FAIL_NUDGES,
+        "exactly the cap, never more"
+    );
+    assert!(
+        finished,
+        "after the cap the host stops asking and finishes the run"
+    );
+}
+
+/// ... but an edit, or a verification that resolves a failure, IS progress and earns a fresh budget.
+#[test]
+fn p2_a_resolved_failure_or_an_edit_is_still_progress() {
+    let mut h = host();
+    let mut s = unresolved_snapshot(4);
+    for _ in 0..2 {
+        assert!(matches!(
+            h.consult(Hook::FinalResponse, &s).unwrap(),
+            EngineDecision::Guide(_)
+        ));
+    }
+    assert!(matches!(
+        h.consult(Hook::FinalResponse, &s).unwrap(),
+        EngineDecision::Finish
+    ));
+    s.edits_used += 1; // the model fixed something
+    s.last_test = Some("pass".into());
+    assert!(matches!(
+        h.consult(Hook::FinalResponse, &s).unwrap(),
+        EngineDecision::Guide(_)
+    ));
+}
+
+/// D. The cap ending the refusals never turns unresolved failures into a verified success.
+#[test]
+fn p2_an_exhausted_cap_with_an_unresolved_failure_is_never_fulfilled() {
+    let (_, finished) = guided_rounds(10);
+    assert!(finished);
+    let s = unresolved_snapshot(20);
+    let c =
+        crate::completion::decide_run(true, 3, Some("pass"), "All checks pass.", s.failed_checks);
+    assert_eq!(c, crate::completion::Completion::FailingChecks);
+    assert_ne!(c, crate::completion::Completion::Fulfilled);
+    // resolved: the same facts with no unresolved check are fulfilled
+    assert_eq!(
+        crate::completion::decide_run(true, 3, Some("pass"), "All checks pass.", 0),
+        crate::completion::Completion::Fulfilled
+    );
+}
+
+/// The refusal names the unresolved command, says whether it is a mismatch or a failure, and lists what passed.
+#[test]
+fn p2_the_refusal_is_specific() {
+    let mut h = host();
+    let EngineDecision::Guide(g) = h
+        .consult(Hook::FinalResponse, &unresolved_snapshot(5))
+        .unwrap()
+    else {
+        panic!("guided");
+    };
+    assert!(
+        g.message.contains("`cargo test --test stats median`"),
+        "{}",
+        g.message
+    );
+    assert!(g.message.contains("Already passing"), "{}", g.message);
+    assert!(g.message.contains("`cargo fmt --check`"), "{}", g.message);
+    assert!(g.message.contains("mismatch"), "{}", g.message); // a `cargo test` passed with other arguments
+    assert!(!g.message.contains("Run them again"), "no generic wording");
+    let msg = crate::completion::unresolved_checks_message(
+        &["cargo build".into()],
+        &["cargo test".into()],
+    );
+    assert!(msg.contains("failure to fix"), "{msg}");
+    // without detail (parity fixtures) the historical wording is unchanged
+    let mut plain = unresolved_snapshot(5);
+    plain.unresolved_checks.clear();
+    plain.passed_checks.clear();
+    let mut h2 = host();
+    let EngineDecision::Guide(g2) = h2.consult(Hook::FinalResponse, &plain).unwrap() else {
+        panic!("guided");
+    };
+    assert_eq!(g2.message, crate::completion::MSG_UNRESOLVED_CHECKS);
+}
+
 // ------------------------------------------------------------------ differential parity
 
 /// Deterministic xorshift (no dependency, reproducible).
@@ -675,7 +883,9 @@ fn muse_v0_makes_exactly_the_decisions_of_the_pre_extension_loop() {
                 }
             }
             if rng.chance(10) {
-                old.tests_used += 1;
+                // DELIBERATE divergence from the frozen policy (see `muse_v0::progress_of`): a verification run
+                // is no longer "progress" for the stall budgets, so the reference is fed no test counts
+                // (its progress = edits only) while everything else stays compared byte for byte.
                 old.dirty_since_test = false;
                 old.last_test = Some(rng.pick(&["pass", "fail", "unverified"]).to_string());
                 if old.last_test.as_deref() == Some("fail") {

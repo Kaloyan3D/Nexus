@@ -111,8 +111,16 @@ pub(crate) fn looks_like_report(t: &str) -> bool {
 /// run (20 edits, 7 files, 4 test runs) ended "incomplete" at turn 120 because the model's habit of
 /// ending turns on "Next: ..." had used the run-wide budget of 5 over those 120 turns. A real edit or
 /// check since the last refresh proves the earlier stalls were overcome, so the budgets start over.
+///
+/// What counts as progress: an edit, or a verification that RESOLVED an outstanding failure. Re-running a
+/// check that already passed does not (found live: a resumed run re-ran passing checks about 75 times while the
+/// host kept refusing to finish, each re-run resetting the very cap meant to end that).
+pub(crate) fn progress_of(snap: &EngineSnapshot) -> u32 {
+    snap.edits_used + snap.resolved_checks
+}
+
 pub(crate) fn refresh_stall_budget(s: &mut MuseV0State, snap: &EngineSnapshot) {
-    let progress = snap.edits_used + snap.tests_used;
+    let progress = progress_of(snap);
     if progress > s.progress_mark {
         s.progress_mark = progress;
         s.nudges = 0;
@@ -342,8 +350,19 @@ impl EngineExtension for MuseV0 {
                 {
                     Some((message, reason)) => {
                         s.nudges += 1;
+                        // name the unresolved commands instead of repeating the generic refusal
+                        let message = if reason == "failed checks never re-run successfully"
+                            && !snap.unresolved_checks.is_empty()
+                        {
+                            completion::unresolved_checks_message(
+                                &snap.unresolved_checks,
+                                &snap.passed_checks,
+                            )
+                        } else {
+                            message.to_owned()
+                        };
                         EngineAction::Guide(Guidance {
-                            message: message.to_owned(),
+                            message,
                             reason: reason.to_owned(),
                             kind: GuidanceKind::Nudge,
                             ordinal: s.nudges,
@@ -379,7 +398,7 @@ impl EngineExtension for MuseV0 {
             return Err("state data of another engine".into());
         };
         let (a, b) = (data(from), data(to));
-        let progress = snap.edits_used + snap.tests_used;
+        let progress = progress_of(snap);
         let reset_ok = progress > a.progress_mark;
         if !(b.progress_mark == a.progress_mark || (reset_ok && b.progress_mark == progress)) {
             return Err("progress mark may only move to the receipts' progress".into());

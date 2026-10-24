@@ -1435,9 +1435,14 @@ struct LoopState {
     /// The copy already holds changes of earlier runs (a continuation / follow-up): a run that
     /// only verifies them is legitimately edit-free and tool-free.
     carried_work: bool,
-    /// Verification commands (by arguments digest) whose latest result is a failure. A later pass of
-    /// the SAME command clears it; a pass of a different, narrower command does not.
-    failed_checks: std::collections::BTreeSet<String>,
+    /// Verification commands (by `completion::check_identity`) whose latest result is a failure, with the
+    /// command line for the model's feedback. A later pass of the SAME check clears it (the same command, or
+    /// one differing only in output flags); a pass of a different or narrower command does not.
+    failed_checks: std::collections::BTreeMap<String, String>,
+    /// Distinct checks (identity -> command line) that passed since the last file change.
+    passed_checks: std::collections::BTreeMap<String, String>,
+    /// Failures resolved so far: a pass whose identity matched a recorded failure.
+    resolved_checks: u32,
     completion: Option<&'static str>,
     /// A turn was spent asking the model to write its working memory; its answer is that memory.
     memory_requested: bool,
@@ -1753,6 +1758,9 @@ fn engine_snapshot(
         last_test: ls.last_test.clone(),
         dirty_since_test: ls.dirty_since_test,
         failed_checks: ls.failed_checks.len() as u32,
+        resolved_checks: ls.resolved_checks,
+        unresolved_checks: ls.failed_checks.values().take(8).cloned().collect(),
+        passed_checks: ls.passed_checks.values().take(8).cloned().collect(),
         created_files: ls.created.iter().cloned().collect(),
         expects_change: ls.expects_change,
         carried_work: ls.carried_work,
@@ -3281,6 +3289,7 @@ fn record_receipts(ls: &mut LoopState, act: &mut ToolActivity, cp: &CodeProposal
         }
         "fs_write" | "fs_edit" => {
             ls.dirty_since_test = true;
+            ls.passed_checks.clear();
             act.pre_sha256 = out
                 .get("preSha256")
                 .and_then(|v| v.as_str())
@@ -3321,16 +3330,24 @@ fn record_receipts(ls: &mut LoopState, act: &mut ToolActivity, cp: &CodeProposal
             } else if is_verification_command(&cp.inner.args) {
                 ls.last_test = act.verification.clone();
                 ls.dirty_since_test = false;
-                let key = act
+                let exact = act
                     .args_digest
                     .clone()
                     .unwrap_or_else(|| act.args_summary.clone());
+                let key = crate::completion::check_identity(&cp.inner.args, &exact);
+                let line: String = act.args_summary.chars().take(160).collect();
                 match act.verification.as_deref() {
                     Some("pass") => {
-                        ls.failed_checks.remove(&key);
+                        if ls.failed_checks.remove(&key).is_some() {
+                            ls.resolved_checks += 1;
+                        }
+                        if ls.passed_checks.len() < 16 {
+                            ls.passed_checks.insert(key, line);
+                        }
                     }
                     Some("fail") => {
-                        ls.failed_checks.insert(key);
+                        ls.passed_checks.remove(&key);
+                        ls.failed_checks.insert(key, line);
                     }
                     _ => {}
                 }

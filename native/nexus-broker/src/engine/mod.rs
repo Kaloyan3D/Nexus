@@ -156,6 +156,13 @@ pub struct EngineSnapshot {
     pub dirty_since_test: bool,
     /// Verification commands whose latest result is a failure.
     pub failed_checks: u32,
+    /// Verification commands that resolved an outstanding failure so far (a pass whose identity matched a
+    /// recorded failure). Material verification progress, unlike re-running a check that already passed.
+    pub resolved_checks: u32,
+    /// The unresolved failed commands (command lines the model issued, bounded) and the distinct checks that
+    /// passed since the last change; used only to word the refusal to finish. Empty = the generic wording.
+    pub unresolved_checks: Vec<String>,
+    pub passed_checks: Vec<String>,
     /// Files this run created and has not deleted.
     pub created_files: Vec<String>,
     /// The request asks for an implementation (Controller classification).

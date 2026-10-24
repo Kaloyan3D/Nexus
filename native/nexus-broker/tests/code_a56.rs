@@ -8896,7 +8896,7 @@ fn r3_a_run_with_failed_checks_left_unresolved_is_not_fulfilled_and_is_asked_abo
     assert!(
         rn2_bodies(&fx, 0)
             .iter()
-            .any(|b| saw(b, "were never re-run successfully")),
+            .any(|b| saw(b, "has not passed since")),
         "no nudge about the unresolved failed check"
     );
     assert_eq!(run.unresolved_failed_checks, 1, "{run:?}");
@@ -11403,6 +11403,204 @@ fn em04b_production_and_shadow_runs_never_offer_or_accept_the_signals_tool() {
         );
         b.shutdown();
     }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Completion verification loop (owner finding, resumed run): deterministic offline reproduction
+// ------------------------------------------------------------------------------------------------
+
+fn lib_edit() -> String {
+    json!({"path": "src/lib.rs", "edits": [{"oldText": "a - b", "newText": "a + b"}]}).to_string()
+}
+
+fn last_item_is_tool_output(body: &Value) -> bool {
+    body["input"]
+        .as_array()
+        .and_then(|a| a.last())
+        .is_some_and(|i| i["type"] == "function_call_output")
+}
+
+fn plain_requests(fx: &Fx) -> usize {
+    fx.provider.bodies.lock().unwrap().len()
+}
+
+/// A + E + F: the first run of the checks fails with `--nocapture`; after the fix a plain
+/// `cargo test` passes. The earlier failure is the SAME check (output flags only), so the run
+/// ends at its first final answer: no refusal, no redundant tool call, fulfilled.
+#[test]
+fn p3_a_pass_of_the_same_check_without_output_flags_clears_the_failure_and_ends_the_run() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(script(
+        vec![
+            (
+                "proc_run",
+                r#"{"program":"cargo","args":["test","--offline","--","--nocapture"]}"#.into(),
+            ),
+            ("fs_read", r#"{"path":"src/lib.rs"}"#.into()),
+            ("fs_edit", lib_edit()),
+            (
+                "proc_run",
+                r#"{"program":"cargo","args":["test","--offline"]}"#.into(),
+            ),
+        ],
+        "Fixed add (a - b -> a + b). All tests pass.",
+    ));
+    let b = em04a_broker(&fx, "p3-same", None, None);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for(
+            "other",
+            "Fix the failing add test.",
+            "p3-same-0000001",
+            |_| {},
+        ),
+        240,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.completion.as_deref(), Some("fulfilled"), "{run:?}");
+    // 4 tool rounds + the final answer: nothing was refused and nothing re-run
+    assert_eq!(
+        plain_requests(&fx),
+        5,
+        "no extra request after the first final answer"
+    );
+    let all = serde_json::to_string(&*fx.provider.bodies.lock().unwrap()).unwrap();
+    assert!(
+        !all.contains("not passed since") && !all.contains("never re-run successfully"),
+        "no refusal"
+    );
+    b.shutdown();
+}
+
+/// B + C + D: the failing check is `cargo test --test add`; the model keeps re-running a DIFFERENT, broader
+/// command that passes (not equivalent), each time ending with a final answer. The refusals are bounded by
+/// the cap (re-running a passing check is not progress) and the run is then NOT reported as fulfilled.
+fn p3_loop_responder(rerun_exact_after: usize) -> (Responder, Arc<AtomicUsize>) {
+    let finals = Arc::new(AtomicUsize::new(0));
+    let f2 = finals.clone();
+    let r: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let done = body["input"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["type"] == "function_call_output")
+                    .count()
+            })
+            .unwrap_or(0);
+        let call = |name: &str, args: &str| {
+            Answer::Frames(call_frames(&resp, n, &format!("call_{done}"), name, args))
+        };
+        match done {
+            0 => call(
+                "proc_run",
+                r#"{"program":"cargo","args":["test","--offline","--test","add"]}"#,
+            ),
+            1 => call("fs_read", r#"{"path":"src/lib.rs"}"#),
+            2 => call("fs_edit", &lib_edit()),
+            3 => call(
+                "proc_run",
+                r#"{"program":"cargo","args":["test","--offline"]}"#,
+            ),
+            _ => {
+                if last_item_is_tool_output(body) {
+                    f2.fetch_add(1, Ordering::SeqCst);
+                    Answer::Frames(text_frames(&resp, "All tests pass; the fix is complete."))
+                } else if f2.load(Ordering::SeqCst) >= rerun_exact_after {
+                    call(
+                        "proc_run",
+                        r#"{"program":"cargo","args":["test","--offline","--test","add"]}"#,
+                    )
+                } else {
+                    call(
+                        "proc_run",
+                        r#"{"program":"cargo","args":["test","--offline"]}"#,
+                    )
+                }
+            }
+        }
+    });
+    (r, finals)
+}
+
+#[test]
+fn p3_re_running_passing_checks_cannot_reset_the_cap_and_unresolved_failures_are_never_fulfilled() {
+    if !sandbox_ready() {
+        return;
+    }
+    let (responder, finals) = p3_loop_responder(8);
+    let fx = fixture_autonomous(responder);
+    let b = em04a_broker(&fx, "p3-loop", None, None);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for(
+            "other",
+            "Fix the failing add test.",
+            "p3-loop-0000001",
+            |_| {},
+        ),
+        240,
+    );
+    assert!(run.terminal, "{run:?}");
+    // refused exactly twice, then the run ends: final answers = 1 + 2 refusals
+    assert_eq!(
+        finals.load(Ordering::SeqCst),
+        3,
+        "bounded by the cap, not by the model"
+    );
+    assert!(
+        plain_requests(&fx) <= 12,
+        "{} requests",
+        plain_requests(&fx)
+    );
+    // D: never reported as a verified success
+    assert_eq!(run.completion.as_deref(), Some("failing-checks"), "{run:?}");
+    assert_ne!(run.completion.as_deref(), Some("fulfilled"));
+    assert!(run.unresolved_failed_checks >= 1, "{run:?}");
+    // the refusal named the unresolved command, said it is a mismatch, and listed what passed
+    let all = serde_json::to_string(&*fx.provider.bodies.lock().unwrap()).unwrap();
+    assert!(
+        all.contains("cargo test --offline --test add"),
+        "names the command"
+    );
+    assert!(
+        all.contains("verification mismatch"),
+        "explains the mismatch"
+    );
+    assert!(all.contains("Already passing"), "lists what passed");
+    b.shutdown();
+}
+
+/// The strict requirement still holds: when the model does re-run the failed check itself it is resolved
+/// and the run is fulfilled (and that resolution IS progress).
+#[test]
+fn p3_re_running_the_failed_check_itself_resolves_it() {
+    if !sandbox_ready() {
+        return;
+    }
+    let (responder, finals) = p3_loop_responder(1);
+    let fx = fixture_autonomous(responder);
+    let b = em04a_broker(&fx, "p3-exact", None, None);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for(
+            "other",
+            "Fix the failing add test.",
+            "p3-exact-000001",
+            |_| {},
+        ),
+        240,
+    );
+    assert_eq!(run.completion.as_deref(), Some("fulfilled"), "{run:?}");
+    assert_eq!(
+        finals.load(Ordering::SeqCst),
+        2,
+        "one refusal, then the exact re-run resolved it"
+    );
+    assert_eq!(run.unresolved_failed_checks, 0);
+    b.shutdown();
 }
 
 /// Owner finding A: a CANCELLED adaptive run is resumed through the native `intent-resume` (not a chat
