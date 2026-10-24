@@ -97,14 +97,21 @@ async function verify(argv, log, hooks) {
     if (typeof bearer !== 'string' || bearer === '') throw new Error('missing');
   } catch { log('REFUSED, nothing sent: credential file is not a private file holding ' + CRED_REF); return 3; }
   const svc = require(path.join(REPO, 'config', 'registry', 'service.cjs')).createService({ installRoot: REPO, dataRoot: path.resolve(root) });
+  // Safe pre-flight diagnostics (never a value): which store the key came from, which reference was
+  // selected, and whether an Authorization header WILL be attached.
+  log('credential_present=true credential_selected=' + CRED_REF + ' credentials_file=' + (path.basename(credFile) === credFile ? credFile : path.basename(path.dirname(credFile)) + '/' + path.basename(credFile)) + ' authorization_header_present=true (attached to every probe; value never printed)');
   // The connection status is part of the verification fingerprint, so the
   // operator attestation (authorization record consumed, credential present)
-  // is applied BEFORE probing and reverted if the probes fail.
+  // is applied BEFORE probing. If the probes fail it is restored to what it WAS (S10-A fix): the old code
+  // forced 'not-connected', which invalidated every route already verified on this connection.
+  const priorConn = (svc.effectiveSnapshot().snapshot.connections || []).find((c) => c.id === 'conn-opencode-go-native');
+  const priorStatus = priorConn && typeof priorConn.status === 'string' ? priorConn.status : 'not-connected';
+  const restorePrior = () => svc.setConnectionStatus('conn-opencode-go-native', priorStatus, priorStatus === 'connected' ? { attested: true } : {});
   const pre = svc.setConnectionStatus('conn-opencode-go-native', 'connected', { attested: true });
   if (!pre.ok) { log('connection attestation refused: ' + JSON.stringify((pre.errors || []).map((e) => e.code))); return 1; }
   const r = await svc.verifyProviderRoute(routeId, Object.assign({ testBearer: bearer }, (hooks && hooks.opts) || {}));
   (r.checks || []).forEach((c) => log((c.ok ? 'PASS ' : 'FAIL ') + c.name + ' - ' + c.detail));
-  if (!r.ok) { svc.setConnectionStatus('conn-opencode-go-native', 'not-connected', {}); log('route NOT verified: ' + JSON.stringify((r.errors || []).map((e) => e.code))); return 1; }
+  if (!r.ok) { restorePrior(); log('route NOT verified: ' + JSON.stringify((r.errors || []).map((e) => e.code))); return 1; }
   log('route verified');
   if (routeId === ADAPTIVE_ROUTE_ID) {
     if (!argv.includes('--save-adaptive-config')) { log('adaptive route verified; no ModeConfiguration was saved (pass --save-adaptive-config to save it explicitly)'); return 0; }

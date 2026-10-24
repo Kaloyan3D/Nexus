@@ -38,6 +38,11 @@ const providerConfig = require('./provider-config.cjs')
 const pinnedTransport = require('./pinned-transport.cjs')
 
 const DEFAULT_TIMEOUT_MS = 15000
+// OpenCode Go (S10-A): a NON-streaming probe returns its headers only after the whole answer is generated, and
+// a reasoning model's latency is high-variance (a one-word answer measured 2.0 s at low, 4.2 s medium, 4.0 s
+// high and 10.0 s at xhigh on the real provider). 15 s left no margin; 45 s keeps every probe bounded
+// (8 probes < 6 min worst case) without touching any other provider or the production transport.
+const GO_PROBE_TIMEOUT_MS = 45000
 const MAX_RESPONSE_BYTES = 262144
 const MAX_PROBE_INFLIGHT = 4
 const PROBE_CONTRACT_VERSION = 3
@@ -373,6 +378,10 @@ async function boundedJson(fetchImpl, url, opts) {
   try {
     json = out.text.trim() === '' ? null : JSON.parse(out.text)
   } catch {
+    if (out.status < 200 || out.status >= 300) {
+      // an HTTP error with a non-JSON body: keep the STATUS (it is the finding), plus a redacted sample
+      return { status: out.status, json: null, bytes: out.bytes, textSample: redact(String(out.text)).slice(0, SAFE_BODY_LIMIT) }
+    }
     throw err('probe-failed', 'probe.body', 'provider returned a non-JSON response (redacted, ' + out.bytes + ' bytes)')
   }
   return { status: out.status, json, bytes: out.bytes }
@@ -402,6 +411,11 @@ function parseSseEvents(text) {
 
 async function boundedSse(fetchImpl, url, opts) {
   const out = await secureFetch(fetchImpl, url, Object.assign({}, opts, { accept: 'text/event-stream' }))
+  if (out.status < 200 || out.status >= 300) {
+    let json = null
+    try { json = JSON.parse(out.text) } catch { /* not JSON: the sample below is used */ }
+    return { status: out.status, events: [], done: false, bytes: out.bytes, json, textSample: redact(String(out.text)).slice(0, SAFE_BODY_LIMIT) }
+  }
   const parsed = parseSseEvents(out.text)
   if (!parsed.events) {
     throw err('probe-sse-invalid', 'probe.body', 'streaming response is not a valid SSE stream (' + (parsed.invalid || 'no data events') + ')')
@@ -424,6 +438,53 @@ function presentedBearer(connection) {
 function authHeaders(connection) {
   const bearer = presentedBearer(connection)
   return bearer ? { authorization: 'Bearer ' + bearer } : {}
+}
+
+// --- safe HTTP-failure diagnostics (S10-A, the OpenCode Go 403 investigation) ------------------------
+// A 401/403 used to read "rejected credential" for EVERY cause. This classifies what can honestly be
+// told apart WITHOUT a token ever being shown: whether a credential was selected and an Authorization
+// header attached (from the connection object, never its value), the HTTP status, and a class derived
+// from the status and from the provider's own (redacted, bounded) error text. The classes are
+// hypotheses ranked by evidence; `forbidden-unclassified` says "the provider did not say why".
+const SAFE_BODY_LIMIT = 160
+function sanitizedProviderText(json, text) {
+  let raw = ''
+  if (json && typeof json === 'object') {
+    const e = json.error !== undefined ? json.error : json
+    if (typeof e === 'string') raw = e
+    else if (e && typeof e === 'object') raw = [e.type, e.code, e.message].filter((x) => typeof x === 'string').join(' | ')
+  } else if (typeof text === 'string') raw = text
+  // never echo anything that looks like a credential, and keep it to one short plain line
+  return redact(String(raw)).replace(/[A-Za-z0-9_.\-+\/=]{24,}/g, '[redacted]').replace(/[^\x20-\x7e]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, SAFE_BODY_LIMIT)
+}
+function classifyHttpFailure(status, bearerPresent, providerText) {
+  const t = String(providerText || '').toLowerCase()
+  if (!bearerPresent) return 'credential-missing'
+  if (status === 401) return 'credential-invalid-or-expired'
+  if (status === 403) {
+    if (/region|country|countr|geograph|location|jurisdiction|not available in your|unsupported territory/.test(t)) return 'region-restricted'
+    if (/contributor|training|train |data.?use|privacy|consent|opt.?in|terms|agreement|policy/.test(t)) return 'contributor-privacy-or-terms'
+    if (/permission|scope|plan|subscription|upgrade|limit|quota|billing|balance|credit|payment|not allowed|entitle|access to (this )?model/.test(t)) return 'insufficient-permissions-or-plan'
+    if (/invalid|expired|revoked|unauthor|api.?key|token/.test(t)) return 'credential-invalid-or-expired'
+    return 'forbidden-unclassified'
+  }
+  return 'http-error'
+}
+function httpFailureDiagnostic(status, connection, out) {
+  const bearer = presentedBearer(connection)
+  let providerText = sanitizedProviderText(out && out.json, out && out.textSample)
+  if (bearer && providerText.indexOf(bearer) !== -1) providerText = providerText.split(bearer).join('[redacted]')
+  return {
+    http_status: status,
+    credential_present: !!bearer,
+    credential_selected: !!(connection && typeof connection.credentialRef === 'string' && connection.credentialRef !== ''),
+    authorization_header_present: !!bearer,
+    class: classifyHttpFailure(status, !!bearer, providerText),
+    provider_message: providerText,
+  }
+}
+function describeHttpFailure(d) {
+  return 'HTTP ' + d.http_status + ' [' + d.class + '] credential_present=' + d.credential_present + ' credential_selected=' + d.credential_selected + ' authorization_header_present=' + d.authorization_header_present + (d.provider_message ? ' provider_message="' + d.provider_message + '"' : ' provider_message=(none)')
 }
 
 // --- structural protocol validators (H2) ------------------------------------
@@ -661,7 +722,7 @@ async function testConnection(provider, connection, fetchImpl, options) {
     })
     const ms = Date.now() - started
     if (out.status === 401 || out.status === 403) {
-      return { ok: false, evidence: { kind: 'connection', reachable: true, authenticated: false, credentialPresented: !!bearer, authRequired: authReq.required, status: out.status, ms }, errors: [err('probe-auth-failed', where, 'provider rejected the credential (HTTP ' + out.status + '); connection is not authorized')] }
+      return { ok: false, evidence: { kind: 'connection', reachable: true, authenticated: false, credentialPresented: !!bearer, authRequired: authReq.required, status: out.status, ms }, errors: [err('probe-auth-failed', where, describeHttpFailure(httpFailureDiagnostic(out.status, connection, out)) + '; connection is not authorized')] }
     }
     if (out.status < 200 || out.status >= 300) {
       return { ok: false, evidence: { kind: 'connection', reachable: true, authenticated: false, credentialPresented: !!bearer, authRequired: authReq.required, status: out.status, ms }, errors: [err('probe-failed', where, 'provider answered HTTP ' + out.status + ' (redacted body, ' + out.bytes + ' bytes)')] }
@@ -693,7 +754,7 @@ async function discoverModels(provider, connection, fetchImpl, options) {
       headers: Object.assign({}, profileHeaders(provider), authHeaders(connection)),
     })
     if (out.status === 401 || out.status === 403) {
-      return { ok: false, advertised: [], errors: [err('probe-auth-failed', where, 'discovery rejected the credential (HTTP ' + out.status + ')')] }
+      return { ok: false, advertised: [], errors: [err('probe-auth-failed', where, 'discovery ' + describeHttpFailure(httpFailureDiagnostic(out.status, connection, out)))] }
     }
     if (out.status < 200 || out.status >= 300) {
       return { ok: false, advertised: [], errors: [err('probe-failed', where, 'discovery answered HTTP ' + out.status)] }
@@ -731,14 +792,16 @@ function toolPayload(transportId, remoteModelId, provider) {
   return { model: remoteModelId, messages: [{ role: 'user', content: 'nexus synthetic tool probe (no user content; call probe_echo with word set to probe-ok)' }], tools: [tool], tool_choice: 'auto', max_tokens: 64, stream: false }
 }
 
-function continuationPayload(transportId, remoteModelId, toolCallId, provider) {
+function continuationPayload(transportId, remoteModelId, toolCallId, provider, reasoning) {
   if (transportId === 'openai-responses' && isGoProfile(provider)) {
     // Stateless Responses continuation: the function_call item must precede
     // its output, otherwise a real Responses endpoint rejects the call id.
     return { model: remoteModelId, input: [
       { type: 'function_call', call_id: toolCallId, name: 'probe_echo', arguments: '{"word":"probe-ok"}' },
       { type: 'function_call_output', call_id: toolCallId, output: 'probe-ok' },
-    ], max_output_tokens: GO_PROBE_MAX_OUTPUT }
+    ], max_output_tokens: GO_PROBE_MAX_OUTPUT, ...(reasoning ? { reasoning: { effort: reasoning } } : {}) }
+    // ^ like every production request, the continuation PINS its reasoning effort; without it the provider's
+    //   default effort applies and the one non-streaming request without a pinned effort timed out (15 s)
   }
   if (transportId === 'openai-responses') {
     return { model: remoteModelId, input: [{ type: 'function_call_output', call_id: toolCallId, output: 'probe-ok' }], max_output_tokens: 16 }
@@ -766,7 +829,7 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
     transportId: provider.transportId,
     endpointOptions: opts.endpointOptions,
     lookup: opts.lookup || probeLookupFor(provider),
-    timeoutMs: opts.timeoutMs,
+    timeoutMs: typeof opts.timeoutMs === 'number' ? opts.timeoutMs : (isGoProfile(provider) ? GO_PROBE_TIMEOUT_MS : undefined),
     signal: opts.signal,
   }
   if (opts.signal && opts.signal.aborted) {
@@ -781,11 +844,11 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
       const out = await boundedJson(fetchImpl, joinUrl(provider.baseUrl, paths.text), requestOpts({ method: 'POST', body: JSON.stringify(payload) }))
       const ms = Date.now() - started
       if (out.status === 401 || out.status === 403) {
-        checks.push({ name, ok: false, ms, detail: 'rejected credential (HTTP ' + out.status + ')' })
+        checks.push({ name, ok: false, ms, detail: describeHttpFailure(httpFailureDiagnostic(out.status, connection, out)) })
         return { ok: false, fatal: true, out }
       }
       if (out.status < 200 || out.status >= 300) {
-        checks.push({ name, ok: false, ms, detail: 'HTTP ' + out.status + ' (' + out.bytes + ' redacted bytes)' })
+        checks.push({ name, ok: false, ms, detail: describeHttpFailure(httpFailureDiagnostic(out.status, connection, out)) })
         return { ok: false, fatal: false, out }
       }
       const verdict = validate(out.json)
@@ -795,7 +858,9 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
       return result
     } catch (e) {
       const item = e && e.code ? e : normalizeError(e, where + '.' + name)
-      checks.push({ name, ok: false, ms: Date.now() - started, detail: redact(item.message) })
+      const limit = typeof basePolicy.timeoutMs === 'number' ? basePolicy.timeoutMs : DEFAULT_TIMEOUT_MS
+      const phase = item.code !== 'probe-timeout' ? '' : (/stalled/.test(String(item.message)) ? ' [timed out while reading the response body]' : ' [timed out before any response headers]')
+      checks.push({ name, ok: false, ms: Date.now() - started, detail: redact(item.message) + (item.code === 'probe-timeout' ? phase + ' (limit ' + limit + ' ms)' : '') })
       return { ok: false, fatal: item.code === 'probe-timeout', error: item }
     }
   }
@@ -842,11 +907,11 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
       const out = await boundedSse(fetchImpl, joinUrl(provider.baseUrl, paths.text), requestOpts({ method: 'POST', body: JSON.stringify(streamPayload) }))
       const ms = Date.now() - started
       if (out.status === 401 || out.status === 403) {
-        checks.push({ name: 'streaming', ok: false, ms, detail: 'rejected credential (HTTP ' + out.status + ')' })
-        return { ok: false, checks, evidence: null, errors: [err('probe-auth-failed', where, 'streaming probe rejected the credential; route stays unverified')] }
+        checks.push({ name: 'streaming', ok: false, ms, detail: describeHttpFailure(httpFailureDiagnostic(out.status, connection, out)) })
+        return { ok: false, checks, evidence: null, errors: [err('probe-auth-failed', where, 'streaming probe was refused (HTTP ' + out.status + '); route stays unverified')] }
       }
       if (out.status < 200 || out.status >= 300) {
-        checks.push({ name: 'streaming', ok: false, ms, detail: 'HTTP ' + out.status })
+        checks.push({ name: 'streaming', ok: false, ms, detail: describeHttpFailure(httpFailureDiagnostic(out.status, connection, out)) })
         return { ok: false, checks, evidence: null, errors: [err('probe-failed', where, 'streaming probe failed; route stays unverified')] }
       }
       const verdict = validateSseEvents(provider.transportId, out.events)
@@ -867,7 +932,7 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
     if (!emission.ok) {
       return { ok: false, checks, evidence: null, errors: [err('probe-failed', where, 'tool-call emission probe failed; route stays unverified')] }
     }
-    const continuation = await postCheck('tool-result-continuation', continuationPayload(provider.transportId, route.remoteModelId, emission.callId, provider), (json) => validateContinuation(provider.transportId, json))
+    const continuation = await postCheck('tool-result-continuation', continuationPayload(provider.transportId, route.remoteModelId, emission.callId, provider, reasoning), (json) => validateContinuation(provider.transportId, json))
     if (!continuation.ok) {
       return { ok: false, checks, evidence: null, errors: [err('probe-failed', where, 'tool-result continuation probe failed; route stays unverified')] }
     }
@@ -902,6 +967,7 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
 
 module.exports = {
   DEFAULT_TIMEOUT_MS,
+  GO_PROBE_TIMEOUT_MS,
   MAX_RESPONSE_BYTES,
   MAX_PROBE_INFLIGHT,
   PROBE_CONTRACT_VERSION,

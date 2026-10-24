@@ -252,5 +252,137 @@ function stub(calls, overrides) {
     assert.ok(!route.reasoningLevels.includes('low'), 'a level whose probe failed is never claimed: ' + JSON.stringify(route.reasoningLevels));
   });
 
+  // ---- S10-A 403 investigation: honest, safe diagnostics, and a failed verification restores the connection ----
+  const forbid = (bodyText, status) => ({ status: status || 403, text: async () => bodyText });
+  async function failAt(index, response, key) {
+    const d = root(); setup.run(['--data-root', d, '--apply', '--adaptive'], quiet);
+    const f = creds(d, key || 'sk_SECRETKEYSECRETKEYSECRET1234'); const calls = []; const lines = [];
+    gate.authorize(['--data-root', d, '--acknowledge-billable', '--adaptive'], quiet);
+    const code = await gate.verify(['--data-root', d, '--credentials', f, '--adaptive'], (l) => lines.push(l), { opts: { fetchImpl: stub(calls, { [index]: response }), lookup: publicLookup } });
+    return { d, code, lines: lines.join('\n'), calls };
+  }
+
+  await check('a 403 on the first POST is classified and shown with credential_present / authorization_header_present, never a secret', async () => {
+    const cases = [
+      [JSON.stringify({ error: { type: 'forbidden', message: 'This model is not available in your region (Geographic Use Policy)' } }), 'region-restricted'],
+      [JSON.stringify({ error: { message: 'You must accept the Contributor data-use terms to use this model' } }), 'contributor-privacy-or-terms'],
+      [JSON.stringify({ error: { message: 'Your plan does not include access to this model; usage limit reached' } }), 'insufficient-permissions-or-plan'],
+      [JSON.stringify({ error: 'invalid api key' }), 'credential-invalid-or-expired'],
+      [JSON.stringify({}), 'forbidden-unclassified'],
+      ['<html>403 Forbidden</html>', 'forbidden-unclassified'], // a non-JSON body keeps its STATUS
+    ];
+    for (const [body, klass] of cases) {
+      const r = await failAt(1, forbid(body));
+      assert.equal(r.code, 1, klass);
+      assert.ok(/reachability-auth - reachable \+ authenticated/.test(r.lines), 'the GET with the same credential succeeded: ' + klass);
+      assert.ok(r.lines.includes('HTTP 403 [' + klass + ']'), klass + ' in: ' + r.lines);
+      assert.ok(r.lines.includes('credential_present=true') && r.lines.includes('authorization_header_present=true') && r.lines.includes('credential_selected=true'), r.lines);
+      assert.ok(!r.lines.includes('SECRETKEY'), 'the key is never printed');
+      assert.ok(!/Bearer\s+\S{8,}/.test(r.lines), 'no authorization value');
+      assert.equal(r.calls.length, 2, 'the fatal 403 stops further requests');
+      for (const c of r.calls) assert.equal(c.headers.authorization, 'Bearer sk_SECRETKEYSECRETKEYSECRET1234', 'the key was attached to every request');
+    }
+  });
+
+  await check('a provider message that echoes the key is redacted; 401 on the models call is a credential problem; an HTTP error body is bounded', async () => {
+    const key = 'sk_ECHOEDKEYECHOEDKEYECHOED99';
+    const echo = await failAt(1, forbid(JSON.stringify({ error: { message: 'bad request for ' + key + ' and Bearer ' + key + ' ' + 'x'.repeat(400) } })), key);
+    assert.ok(!echo.lines.includes('ECHOEDKEY'), echo.lines);
+    assert.ok(echo.lines.length < 2500);
+    const gone = await failAt(0, forbid(JSON.stringify({ error: 'unauthorized' }), 401));
+    assert.equal(gone.code, 1);
+    assert.ok(/HTTP 401 \[credential-invalid-or-expired\]/.test(gone.lines), gone.lines);
+  });
+
+  await check('a missing or wrongly-keyed credentials file sends NOTHING and names no secret', async () => {
+    const d = root(); setup.run(['--data-root', d, '--apply', '--adaptive'], quiet);
+    gate.authorize(['--data-root', d, '--acknowledge-billable', '--adaptive'], quiet);
+    const calls = []; const lines = [];
+    const other = path.join(d, 'other.json');
+    fs.writeFileSync(other, JSON.stringify({ 'credential://connections/some-other-connection': 'sk_OTHERKEYOTHERKEYOTHER12345' }), { mode: 0o600 });
+    assert.equal(await gate.verify(['--data-root', d, '--credentials', other, '--adaptive'], (l) => lines.push(l), { opts: { fetchImpl: stub(calls), lookup: publicLookup } }), 3);
+    assert.equal(calls.length, 0);
+    assert.ok(/REFUSED, nothing sent: credential file is not a private file holding credential:\/\/connections\/conn-opencode-go-native/.test(lines.join('\n')));
+    assert.ok(!lines.join('').includes('OTHERKEY'));
+  });
+
+  await check('a FAILED adaptive verification restores the connection and does not invalidate the already-verified default route', async () => {
+    const d = root(); setup.run(['--data-root', d, '--apply', '--adaptive'], quiet);
+    const f = creds(d, 'sk_SECRETKEYSECRETKEYSECRET1234');
+    // 1. the default route is verified and the mode bound, as in a working installation
+    gate.authorize(['--data-root', d, '--acknowledge-billable'], quiet);
+    assert.equal(await gate.verify(['--data-root', d, '--credentials', f], quiet, { opts: { fetchImpl: stub([]), lookup: publicLookup } }), 0);
+    const state = () => { const snap = regOf(d).effectiveSnapshot().snapshot; return { conn: snap.connections.find((c) => c.id === 'conn-opencode-go-native').status, route: snap.routes.find((r) => r.id === 'opencode-go-native/muse').availability }; };
+    assert.deepEqual(state(), { conn: 'connected', route: 'verified' });
+    // 2. the adaptive verification is refused by the provider (403 on the first POST)
+    gate.authorize(['--data-root', d, '--acknowledge-billable', '--adaptive'], quiet);
+    const code = await gate.verify(['--data-root', d, '--credentials', f, '--adaptive'], quiet, { opts: { fetchImpl: stub([], { 1: forbid('{}') }), lookup: publicLookup } });
+    assert.equal(code, 1);
+    // 3. nothing that worked before is broken by it
+    assert.deepEqual(state(), { conn: 'connected', route: 'verified' }, 'the default route and its connection are exactly as before');
+    assert.equal(regOf(d).listModes().modes.find((m) => m.id === 'engineering-v2-adaptive').persisted, false);
+  });
+
+  // ---- S10-A: the stateless tool-result continuation (the check that timed out on the real provider) ----
+  await check('the continuation reuses the EXACT emitted call id, serializes like the production transport and pins the effort', async () => {
+    const d = root(); setup.run(['--data-root', d, '--apply', '--adaptive'], quiet);
+    const f = creds(d, 'sk_SECRETKEYSECRETKEYSECRET1234'); const calls = [];
+    const emitted = { status: 200, text: async () => JSON.stringify({ status: 'completed', output: [{ type: 'reasoning', id: 'rs_1', summary: [] }, { type: 'function_call', name: 'probe_echo', call_id: 'call_unique-7f3a', arguments: '{"word":"probe-ok"}' }] }) };
+    gate.authorize(['--data-root', d, '--acknowledge-billable', '--adaptive'], quiet);
+    const code = await gate.verify(['--data-root', d, '--credentials', f, '--adaptive'], quiet, { opts: { fetchImpl: stub(calls, { 6: emitted }), lookup: publicLookup } });
+    assert.equal(code, 0);
+    assert.equal(calls.length, 8);
+    const cont = JSON.parse(calls[7].body);
+    assert.deepEqual(cont.input.map((i) => i.type), ['function_call', 'function_call_output']);
+    assert.equal(cont.input[0].call_id, 'call_unique-7f3a');
+    assert.equal(cont.input[1].call_id, 'call_unique-7f3a');
+    assert.equal(cont.input[0].name, 'probe_echo');
+    assert.equal(typeof cont.input[0].arguments, 'string');
+    assert.equal(typeof cont.input[1].output, 'string');
+    // exactly the field set of the production wire form (nexus-model prepare.rs `responses_input_item`)
+    assert.deepEqual(Object.keys(cont.input[0]).sort(), ['arguments', 'call_id', 'name', 'type']);
+    assert.deepEqual(Object.keys(cont.input[1]).sort(), ['call_id', 'output', 'type']);
+    assert.deepEqual(cont.reasoning, { effort: 'low' }, 'the effort is pinned, as in every production request');
+    assert.equal(cont.model, 'muse-spark-1.3-contributor');
+    assert.ok(!('stream' in cont) && !('tools' in cont), 'a plain stateless continuation');
+    // stable session header, model, endpoint and credential across the two requests (and all others)
+    const tool = calls[6]; const last = calls[7];
+    assert.equal(tool.url, last.url);
+    assert.equal(tool.headers['x-opencode-session'], last.headers['x-opencode-session']);
+    assert.equal(last.headers['x-opencode-session'], 'nexus-registry-probe-opencode-go-native');
+    assert.equal(last.headers.authorization, 'Bearer sk_SECRETKEYSECRETKEYSECRET1234');
+    assert.equal(JSON.parse(tool.body).model, cont.model);
+    assert.equal(new Set(calls.map((c) => c.headers['x-opencode-session'])).size, 1);
+  });
+
+  await check('a continuation that never answers is reported as a timeout BEFORE response headers, with its limit; it leaves the default route intact', async () => {
+    const d = root(); setup.run(['--data-root', d, '--apply', '--adaptive'], quiet);
+    const f = creds(d, 'sk_SECRETKEYSECRETKEYSECRET1234');
+    gate.authorize(['--data-root', d, '--acknowledge-billable'], quiet);
+    assert.equal(await gate.verify(['--data-root', d, '--credentials', f], quiet, { opts: { fetchImpl: stub([]), lookup: publicLookup } }), 0);
+    const base = stub([]); let n = 0; const lines = [];
+    const hangOnLast = async (url, init) => { n++; if (n === 8) return new Promise((_, reject) => { if (init.signal) init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))); }); return base(url, init); };
+    // (a real fetch rejects on abort, exactly like this: the provider sent no response headers within the limit)
+    gate.authorize(['--data-root', d, '--acknowledge-billable', '--adaptive'], quiet);
+    const t0 = Date.now();
+    const code = await gate.verify(['--data-root', d, '--credentials', f, '--adaptive'], (l) => lines.push(l), { opts: { fetchImpl: hangOnLast, lookup: publicLookup, timeoutMs: 150 } });
+    assert.equal(code, 1);
+    assert.ok(Date.now() - t0 < 5000, 'bounded');
+    const text = lines.join('\n');
+    assert.ok(/FAIL tool-result-continuation .*timed out before any response headers\] \(limit 150 ms\)/.test(text), text);
+    assert.ok(/PASS tool-call-emission/.test(text) && /PASS streaming/.test(text), 'the other seven checks passed');
+    const snap = regOf(d).effectiveSnapshot().snapshot;
+    assert.equal(snap.connections.find((c) => c.id === 'conn-opencode-go-native').status, 'connected');
+    assert.equal(snap.routes.find((r) => r.id === 'opencode-go-native/muse').availability, 'verified');
+    assert.equal(regOf(d).listModes().modes.find((m) => m.id === 'engineering-v2-adaptive').persisted, false, 'no configuration after a failed verification');
+  });
+
+  await check('the Go probe timeout leaves margin over the slowest measured probe and is bounded', async () => {
+    const probes = require('../config/registry/probes.cjs');
+    assert.ok(probes.GO_PROBE_TIMEOUT_MS > probes.DEFAULT_TIMEOUT_MS, 'more margin than the generic default');
+    assert.ok(probes.GO_PROBE_TIMEOUT_MS >= 3 * 9956, 'at least three times the slowest measured probe (xhigh text, 9.96 s)');
+    assert.ok(8 * probes.GO_PROBE_TIMEOUT_MS <= 6 * 60 * 1000, 'the whole 8-request verification stays within six minutes');
+  });
+
   console.log('SUITE RESULT: PASS ' + passed + ' | FAIL 0 | total ' + passed);
 })().catch((e) => { console.error(e); process.exit(1); });
