@@ -1,6 +1,7 @@
 # ADR: True in-place process execution for Nexus Native
 
-Status: **PROPOSED. Research and architecture only; no source was changed.** Branch `feature/rust-native-core` @ `9beace9`.
+Status: **PROPOSED — REVISION 2 (network and Full Access parity). Research and architecture only; no source was changed.** Branch `feature/rust-native-core`.
+Revision 1 = commit `34fd64d`. Revision 2 withdraws revision 1's universal rule "no network with the full project view" in favour of an explicit, user-granted network axis (§0, §7, §7A), adds the Claude Code / OpenCode comparison (§7B), a capability matrix (§8.5), and re-plans the stages (§12).
 Supersedes the *recommendation* (not the facts) of `NEXUS-DIRECT-PROCESS-EXECUTION-ASSESSMENT.md` ("Stage 2: adopt effects"). The owner has
 rejected scratch-copy + effect adoption as the Direct Workspace target; this ADR decides what replaces it.
 
@@ -13,25 +14,29 @@ manager running, `/dev/fuse` + `fusermount3` present, cgroup v2. (`A3.4-EVIDENCE
 
 ---
 
-## 0. Decision summary
+## 0. Decision summary (revision 2)
 
-1. **Adopt Option C, hardened ("Confined In-Place")**: the real project directory, pinned by an open file descriptor, is bind-mounted read-write
-   into the *existing* bubblewrap + seccomp + cgroup sandbox, with mount-level protections (read-only `.git`, masked secrets, masked sockets),
-   a mandatory Landlock layer, and **no network while the whole project is visible**. Verdict for Linux: **FEASIBLE, GO** — with guarantees that
-   are explicitly weaker than the `fs_write` guarantees (§6). Option B (unrestricted host execution with the project as cwd) is *not* a design;
-   it exists only as the separately consented **Full Access** mode. Option A is retained solely for Isolated Workspace.
-2. **Permission is two independent axes**: *Workspace* (Isolated | Direct) × *Exec access* (Sandboxed scratch | Workspace Access | Full Access).
-   The exec class is sealed into the Kernel process-scope grant and derived by the daemon from the task identity record. The model has no field,
-   verb or argument that can raise it.
-3. **Honest evidence, three layers**: Authority (Kernel-sealed, before spawn) → Observation (manifest diff, after) → Verified completion (settled
-   and independently checked). A command's effects are *observed*, never *authorized per file*.
-4. **Do not claim** per-file authorization, crash-atomic rollback, or exact attribution for arbitrary shell commands. A checkpoint (reflink clone
-   where the filesystem supports it, bounded copy otherwise) gives *best-effort guarded rollback*. A FUSE mediation layer is the only route to
-   per-operation guarantees; it is recorded as a later option, not part of the first implementation.
-5. **First implementation target is the safest one**: in-place execution over the **Isolated** task clone (daemon-owned, disposable). It fixes
-   `mkdir`/`npm install`/formatters for Isolated tasks with no host risk and proves the mount/evidence machinery before Direct is touched.
+Revision 2 changes the network position. Revision 1 forbade any network while the full project view was visible; the owner's goal is practical
+Claude Code / OpenCode parity, where network access is routine (package managers, API integration tests, git over HTTPS, web docs). That rule is
+withdrawn as a *universal* policy and replaced by an explicit, user-granted, auditable network scope (§7A) with an honest exfiltration statement.
 
-Owner decisions required before implementation: §14.
+1. **Three independent dimensions, all Kernel-sealed per execution** (§7.1): **filesystem scope** (Scratch | Workspace | Full), **network scope**
+   (Offline | Controlled Internet | Full Network), **approval behaviour** (Ask | Auto). They are granted together by one user-created *standing grant*
+   per project; the model can neither create nor widen it.
+2. **Trusted Workspace = Workspace + Controlled Internet + Auto** is the parity target: true in-place execution (Option C, hardened), project
+   source visible, internet through a host-side **egress proxy** with domain/address policy, explicit localhost-port permissions and explicit TCP
+   bridges for non-HTTP protocols, no per-command prompts for anything inside the grant.
+3. **A domain allowlist does not prevent exfiltration** of readable project source (§7A.3). It bounds *where* data can go, makes it observable (bytes
+   per destination in evidence), and removes the credential and anonymous-write cases that matter most. The ADR says so in product text.
+4. **Full Access** (§7.4) is a separate, user-authorized host backend: host filesystem and host network under the user's OS permissions, real cwd,
+   no per-tool prompts, with audit, cancellation and resource supervision. It is **never** selected after a sandbox failure (§7.5).
+5. Unchanged from revision 1: Option C for Workspace scope; Isolated Workspace untouched; first implementation over the Isolated clone; honest
+   guarantees (§6) — per-file authorization and crash-atomic rollback are not claimed for arbitrary commands.
+6. **Minimal change to the Kernel authority chain** (§8.3): one scope-schema bump (filesystem, network, approval, grant digest), one new
+   unprivileged process (`nexus-egress`) whose policy is the sealed digest, one registry record (standing grant), and a policy-v2 rule
+   "requested ⊆ granted". No change to the model-facing tool schema.
+
+Owner decisions required before implementation: §14.2.
 
 ---
 
@@ -120,9 +125,9 @@ per-file pre-image, per-file name policy and cheap rollback, and **right** that 
 | "secrets readable" | Existing secret-shaped files/dirs can be masked by bind (`/dev/null`, tmpfs); arbitrary-named secrets cannot (name heuristic, same as `fs_read`) | E3 [measured] |
 | "no cheap rollback" | On reflink filesystems a whole-tree checkpoint is O(metadata) (6 ms for a 40-file tree here; btrfs/XFS/APFS) | E7 [measured] |
 
-It is **missed** that in-place changes the *network* story: today install runs on a filtered copy with no secrets and no `.git`; in-place with the
-network on would put every readable project file next to an egress path (postinstall scripts). This ADR therefore forbids "full view + network".
-It also missed pathname Unix sockets (E4), which the stager had silently excluded.
+It is **missed** that in-place changes the *network* story: today installs run on a filtered copy with no secrets and no `.git`; in-place with the
+network on puts every readable project file next to an egress path. Revision 1 answered with a blanket prohibition; revision 2 treats it as an
+explicit, sealed grant with a stated exfiltration residual (§7A.3). It also missed pathname Unix sockets (E4), which the stager had silently excluded.
 
 ---
 
@@ -162,12 +167,12 @@ decide, per file class, which effects count; every decision is wrong for some to
                          TRUSTED (user-level, daemon identity)                       │      UNTRUSTED
 ┌──────────────┐  intent   ┌────────────┐ sealed scope ┌──────────────────────────┐  │  ┌─────────────────────────────┐
 │ Desktop/CLI  ├──────────►│  Broker    ├─────────────►│ Kernel (journal, HMAC    │  │  │ Model (proposes ProcessArgs │
-│ (user dialog)│ mode+     │ claim lease│              │ scopes incl. ExecClass)  │  │  │ {program,args,cwd} ONLY)    │
+│ (user dialog)│ mode+     │ claim lease│              │ scopes: fs,net,appr)  │  │  │ {program,args,cwd} ONLY)    │
 └──────┬───────┘ consent   └─────┬──────┘              └────────────┬─────────────┘  │  └──────────────┬──────────────┘
-       │ registry (workspaceMode, execAccess)                       │ grant          │                 │ tool call
+       │ registry (workspaceMode, grant)                            │ grant          │                 │ tool call
        ▼                         ▼                                  ▼                │                 ▼
 ┌──────────────┐          ┌─────────────────────────────────────────────────────┐    │  (no field can select class,
-│ Project      │ fd+ident │ Daemon: derive ExecClass from task identity record; │    │   mount, net, or path outside
+│ Project      │ fd+ident │ Daemon: derive grant from task identity record; │    │   mount, net, or path outside
 │ registry     ├─────────►│ policy autonomous-workspace/v2; ExecBackend.prepare │    │   cwd-relative)
 └──────────────┘          └───────────────┬─────────────────────────────────────┘    │
                                           │ PreparedExec{root_fd, view, masks, net}  │
@@ -191,6 +196,8 @@ decide, per file class, which effects count; every decision is wrong for some to
                                                                                      │   host spawn, user OS privileges,
                                                                                      │   user-dialog grant, §7.3
 ```
+
+Network path (rev. 2): a second trusted, unprivileged process (`nexus-egress`) sits outside the sandbox and is the only exit for Controlled Internet; see the diagram in §7A.2.
 
 Trust boundaries: (1) model ↔ daemon (tool arguments are untrusted data); (2) daemon ↔ sandbox (everything inside is hostile, including the project's
 own contents, dependency scripts and tool output); (3) project directory ↔ *user's other host tools* (editors, git, build runners that later execute
@@ -217,15 +224,19 @@ which are unchanged code paths.
 | E7 | Reflink checkpoint; stat-manifest cost | `cp --reflink=always` of a 40-file tree: 6 ms on btrfs. Manifest (`find -printf size,mtime,ctime,ino`) of the full Nexus repo excluding `node_modules/target/.git`: **71 434 files in 3.3 s (cold)**; including bulk dirs the tree is 437 092 files. | Checkpointing is cheap *only* on reflink filesystems; the manifest must be tiered (full for source, summarized for bulk dirs). |
 | E8 | Event-based evidence | `fanotify_init` → `EPERM` for the user and for a userns-root. | No unprivileged real-time or permission-event stream. Evidence = before/after manifest (+ optional inotify, which is lossy). Exact attribution is therefore unavailable without FUSE (D). |
 | E9 | Host requirements | `unprivileged_userns` available, `max_user_namespaces` 59 396; `fuse` yes; `overlay` not currently loaded; no `pasta/passt/slirp4netns`. | Host-requirement matrix §12; port-forwarding for dev servers needs a decision (§8.6). |
+| E10 | **Egress proxy over a Unix socket** (rev. 2). Sandbox: `--unshare-net`, a host-side CONNECT proxy (≈60 lines Python, name allowlist + post-resolution address-class check, connects to the checked IP) bound in as a socket file, a `socat` bridge to `127.0.0.1:3128`, `HTTPS_PROXY` set. Host had real internet. | **P1** direct connect without proxy: `000`, "no route". Via proxy to allowed `example.com`: **200**. **P2** `github.com` (not allowed): refused. **P2b/c** `169.254.169.254` and `10.0.0.1`: refused. **P3** explicitly allowed host loopback port: served; **P3b** another host loopback port (`:22`): refused. **P4** the project file `source.txt` was POSTed through the *allowed* destination and delivered (server replied 501 only because the toy server cannot POST). **P5** raw TCP / `/dev/tcp/1.1.1.1` ignoring the proxy: `Network is unreachable`; no resolver inside. Proxy decision log matched all of it. | The mechanism works and fails closed for proxy-ignoring tools. **It does not stop exfiltration to an allowed destination** (P4) — §7A.3. The sandbox needs no `resolv.conf`: resolution is the proxy's. |
+| E11 | Host → sandbox-only dev server | Server on `127.0.0.1:3000` inside the sandbox's netns: host `curl` to its own loopback `:3000` → `000`; `nsenter -t <bwrap-child> -U -n curl 127.0.0.1:3000` → **200**. | Resolves blocker B4: a forwarder helper that enters the user+net namespaces is feasible without root, `pasta` or shared netns. |
+| E12 | Shared host netns vs host **abstract** Unix socket; Landlock scope | Shared netns: sandbox connected and received data from a host abstract socket. Shared netns + `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` (ABI 7 here): `EPERM`. Private netns: `ECONNREFUSED`. | Full Network under Workspace scope is only acceptable with the Landlock scope (ABI ≥ 6); host loopback TCP stays reachable by construction. |
 
 **Not tested (and why it is listed as an engineering stage, not assumed):** nested mounts below the project root (needs a privileged-looking setup —
-test via a userns mount in the harness), `--block-fd`/`--userns-block-fd` pre-exec verification, `nsenter -U -n` port forwarding, ext4/xfs/tmpfs
-fallback paths, file capabilities/xattrs, macOS and Windows (no such host here), cgroup interplay with a bound real directory (unchanged code
-path), aarch64 (seccomp program is x86_64 only, `sandbox.rs:291,337`).
+test via a userns mount in the harness), `--block-fd`/`--userns-block-fd` pre-exec verification, a Rust forwarder/bridge/egress service (E10–E12
+used Python/`socat`/`nsenter` stand-ins), TLS SNI peeking, tool-by-tool proxy compatibility (npm, pip, cargo, go, git, Node `fetch`, JVM, .NET),
+ext4/xfs/tmpfs fallback paths, file capabilities/xattrs, macOS and Windows (no such host here), cgroup interplay with a bound real directory
+(unchanged code path), aarch64 (seccomp program is x86_64 only, `sandbox.rs:291,337`).
 
 **Feasibility verdict (Linux True In-Place): FEASIBLE — GO**, conditional on: (a) `bwrap ≥ 0.13` (for `--bind-fd/--ro-bind-fd`; verify at preflight),
 (b) unprivileged user namespaces, (c) Landlock ABI ≥ 1 present or the mode refuses, (d) x86_64 until the seccomp program is ported,
-(e) the guarantees in §6 being accepted as stated. The mechanism is *simpler* than today's (no staging copy); the difficulty is entirely in
+(e) the guarantees in §6 being accepted as stated, (f) for Controlled Internet, the exfiltration statement in §7A.3 being accepted. The mechanism is *simpler* than today's (no staging copy); the difficulty is entirely in
 authority, masks, evidence and recovery.
 
 ---
@@ -248,21 +259,17 @@ authority, masks, evidence and recovery.
 6. Landlock shim (`nexus-sandbox-init`, a ~200-line static Rust binary run as the sandbox's program before `exec`): rulesets allow `rw` on
    `/work/src`, `/work/env`, `/tmp`, `/work/out`; `rx` on `/usr`; scope abstract sockets + signals when ABI ≥ 6. Failure to apply = refuse (no degrade).
 
-### 5.2 Network, localhost servers, caches
+### 5.2 Caches, dependencies, and the sandbox side of networking
 
-* Default `none`: private network namespace with its own `lo`; servers started and tested *within one command* work (existing behaviour,
-  `process.rs` writes a minimal `/etc/hosts`).
-* **Rule R-NET: the network is never combined with the full project view.** Dependency installation becomes the `install` class with a
-  **narrow view**: `/work/src` is a tmpfs onto which only manifests, lock files and the dependency directory are bound (descriptor-relative):
-  `package.json`, lock files, workspace manifests (bounded scan), `node_modules` (created in the project through the project fd if absent). Sources,
-  `.git`, secrets and sibling files are not visible while the network is up; `.npmrc`/`.pypirc` are `Sensitive` and not mapped (private registries
-  will fail — stated, not hidden). This replaces `harvest_node_modules` for in-place.
-* Reaching a dev server from the host browser needs a forwarder (`nsenter -U -n` into the exec's namespaces, or `pasta`). Not available on this host;
-  **[unproven] — separate stage (S7)**; do **not** solve it by sharing the host netns (that exposes host loopback services and, with a shared netns,
-  the host's abstract Unix sockets such as X11's).
-* Per-project writable caches stay in the env store (`/work/env`: npm/pip/cargo/go/nuget caches, `CARGO_TARGET_DIR`), so builds do not litter the
+* **Offline** (default for new grants): private network namespace with its own `lo`; servers started and tested *within one command* work.
+* **Controlled / Full Network** plumbing is specified in §7A; this subsection only fixes the mount-side facts that do not depend on policy:
+  per-project writable caches stay in the env store (`/work/env`: npm/pip/cargo/go/nuget caches, `CARGO_TARGET_DIR`), so builds do not litter the
   project unless the project itself directs output there. Dependency directories that tools write *inside* the project (`node_modules`, `.venv`)
   are real project changes (that is what in-place means) and are summarized, not enumerated, in evidence (§9).
+* **Optional hardening profile "isolated install"** (off by default; owner decision D17): dependency installation runs with a *narrow view*
+  (`/work/src` is a tmpfs onto which only manifests, lock files and the dependency directory are bound descriptor-relatively) so postinstall scripts
+  never see sources while online. It is a project-level hardening choice, not a prerequisite for network access. `.npmrc`/`.pypirc` are `Sensitive`
+  and not mapped in this profile (private registries then fail — stated). It supersedes `harvest_node_modules` only when enabled.
 
 ### 5.3 Inherited state
 
@@ -326,60 +333,248 @@ checkpoint gaps are unacceptable in practice.
 
 ---
 
-## 7. Permission architecture
+## 7. Permission architecture (revision 2: three dimensions)
 
-### 7.1 Two independent concepts
+### 7.1 The dimensions
 
 ```
-                       Exec access (what a COMMAND may do)
-                       Sandboxed scratch      Workspace Access        Full Access
-Workspace   Isolated   today's behaviour      in-place over the       (not offered)
-(where                 (default, unchanged)   disposable task clone
-Nexus's                                       (S1: safe first target)
-edits go)   Direct     today's behaviour      in-place over the real  host exec under the
-                       (what ships now)       folder, confined        user's OS privileges
+ Workspace (where Nexus's EDITS go):      Isolated copy | Direct (real folder)        — registry workspaceMode, unchanged
+ Execution grant (what a COMMAND may do), three independent axes, sealed together:
+   Filesystem scope   Scratch*  | Workspace | Full
+   Network scope      Offline   | Controlled Internet | Full Network
+   Approval behaviour Ask       | Auto
+   (* Scratch = today's throw-away-copy behaviour; legacy default for every existing project, Isolated only after S3)
 ```
 
-* **Workspace** remains `ProjectRecord.workspaceMode` (`registry.rs:74`). **Exec access** is a new durable per-project field `execAccess ∈
-  {scratch, workspace, full}`, default `scratch` for every existing project. A new project's default is an owner decision (D1).
-* Both are read by the daemon from the trusted registry at `direct-open`/task open and written into the task identity record (like `kind: direct`).
-  `ProcessArgs` stays `{program, args, cwd}`. There is **no model-reachable way** to select, raise or negotiate the class; the only writers are
-  the Desktop native dialog and the CLI `nexus project exec-access`, both behind peer-credential-gated broker verbs (as `project_set_workspace` is).
-* A started task never changes class; a resume with a different class is refused like `workspace-mode-changed` (`broker/server.rs:631`).
-* `Full Access` with `Isolated` is refused (Isolated promises containment; a host process in a "copy" would silently make that false).
+| Axis | Value | Meaning |
+|---|---|---|
+| Filesystem | **Scratch** | Today: staged filtered copy, effects discarded. |
+| | **Workspace** | Real project (or, for Isolated tasks, the task clone) bound read-write into the sandbox; host filesystem otherwise invisible (§5). |
+| | **Full** | Host backend (§7.4): the user's filesystem under their OS permissions. No path confinement. |
+| Network | **Offline** | Private netns, loopback only. |
+| | **Controlled Internet** | Private netns; the only exits are the host-side egress proxy (domain/address/port policy, §7A) and explicit TCP bridges. Includes localhost-port permissions. A policy of `*` means "any *public* address", still behind the address-class and port rules. |
+| | **Full Network** | The host network namespace. Everything the user's machine can reach, including host loopback services, LAN, UDP, raw protocols. Under Workspace scope this is allowed only with the Landlock abstract-socket scope (§7A.5). |
+| Approval | **Auto** | A command is run without a human decision iff it falls inside the standing grant. Anything outside is **refused**, not escalated by the model. |
+| | **Ask** | Every command (or every command outside a user-chosen "always-allowed" subset) needs the existing single-use human approval (`consume_approval`, A4.2). |
 
-### 7.2 Workspace Access (confined in-place)
+Valid combinations (backend capability permitting): filesystem × network is a full matrix for `Scratch`/`Workspace`; `Full` implies `Full Network`
+in v1 (a host process is not network-confined; confining only the network of a host process is possible later — Claude Code offers it —
+but is not needed for parity and would add a backend). `Full` + Isolated workspace is refused (Isolated promises containment).
+`Scratch` supports `Offline` and the existing `install` network only.
 
-* Automated policy `autonomous-workspace/v2` (digest includes class, view rules, mask rules, backend id): approves `proc.run` iff the Kernel-sealed
-  class is `workspace`, the daemon-derived mount spec digest equals the one in the grant, network ∈ {none, install-with-narrow-view}, per-task
-  command budget not exhausted, the project is claimed by this task, and the backend's capabilities ⊇ the required set. It never compares a string the
-  caller supplied (§1.1 finding 1).
-* No per-tool prompts. Dependency installation keeps its separate per-project `installs` switch.
-* Git: §10.2. Network: §5.2. Package managers: §5.2. Credentials: nothing is mapped (no `$HOME`, no agent, no credential helper); `HOME=/work/out/home`.
+### 7.2 Standing grant (the user's authorization)
 
-### 7.3 Explicit Full Access
+One durable record per project, created and changed only through user-gated broker verbs (Desktop native dialog; CLI `nexus project grant …`),
+never writable by the model, a task, or a renderer claim:
 
-* A distinct Kernel-sealed class (`full`), minted only from a **user-native grant**: a Desktop/CLI confirmation that names the project folder and states
-  the consequences ("commands run as you: they can read your SSH keys and cloud credentials, change any file you can, and use your network; Nexus's
-  protections for this project do not apply"). Recorded as `approver_id = user-dialog`, `independent = true`, per project, revocable, with an expiry
-  (D5). It requires a daemon started with a separate flag (`--enable-host-exec`), which is **not** implied by `--enable-process` and is refused together with
-  nothing else — i.e., sandbox-only deployments cannot be talked into it.
-* Execution is a different backend (`host`): it does **not** go through bwrap, and the daemon's rule "no unsandboxed fallback anywhere"
-  (A3.4 §Verdicts) is preserved by construction — Full Access is chosen *by the user in advance*, never selected by the daemon on failure.
-* Still kept (they do not confine, they supervise): systemd scope limits and `cgroup.kill`, wall clock, output caps and redaction, journal rows with
-  the exact argv, cwd, env digest and exit, pre/post manifest of the project directory, cancel/revoke kill. No per-tool prompts.
-* Stated residuals: stdout goes to the model provider (redaction is heuristic); the command can touch anything the user can; evidence outside the
-  project is not collected; there is no rollback outside the project.
+```
+StandingGrant { project, fs_scope, net_scope, approval,
+  net_policy { allow:[{host|*.suffix|*, ports?}], deny:[…], local_ports:[port…], bridges:[{listen_port, host, port}],
+               max_egress_bytes_per_exec, sni_check:bool, ipv6:bool },
+  git_write:bool, install_isolation:bool, expires_at?, text_sha256 (consent text shown), granted_by:"user-dialog", created_at }
+grant_digest = sha256(canonical_json(StandingGrant minus timestamps))
+```
 
-### 7.4 No model-controlled escalation — enforcement points
+* The digest is sealed in every execution's Kernel process scope (§8.3). The daemon derives the execution's effective scopes from the registry,
+  writes them into the task identity record at task open (like `kind: direct`), and refuses a task whose grant changed mid-task (new tasks only).
+* Defaults: new project = `Scratch + Offline + Auto` (today). A "Trusted Workspace" preset = `Workspace + Controlled(preset registries + git host
+  over HTTPS, `*`-free) + Auto`; the dialog states the exfiltration consequence (§7A.3) in plain words and records the text digest, as provider
+  consent does (`consent.rs`).
+* Approval behaviour today is a *daemon-wide* switch and the two modes are mutually exclusive (`nexus-daemon/src/main.rs:695-717`: the autonomous
+  policy "cannot be combined with human approval"). The `approval` axis requires the daemon to support both concurrently and pick per task from the
+  identity record. That is an authority-chain change (B1) and is called out in §8.3.
 
-1. Schema: `ProcessArgs` has no class field; `deny_unknown_fields` (T16).
-2. The class lives in the Kernel HMAC-sealed process scope (domain bump, §8.3); `prepare_process` compares it with the daemon-derived class.
-3. The approval operation description is *derived from the sealed class and the prepared mount spec*, not a free-form JSON the policy trusts.
-4. `Full` additionally requires the host-exec daemon flag and a user-dialog grant row; absence refuses with no execution.
-5. A project's `execAccess` changes only through the user-gated verb and only affects *new* tasks.
+### 7.3 Workspace scope under Auto
 
----
+* Policy `autonomous-workspace/v2` approves `proc.run` iff **requested ⊆ granted**: the sealed filesystem and network scopes equal the
+  daemon-derived ones for this task, the egress policy digest equals the grant's, the mount spec digest equals the prepared plan's, the project is
+  claimed by this task, budgets remain, and the backend's capabilities ⊇ required. It never reads a caller-supplied description string (§1.1 finding 1).
+* No per-tool prompts. A command that needs more than the grant (an unlisted host, a non-granted port) **fails closed at the enforcement point**
+  (proxy 403, no route) and produces a structured *scope request* the user can approve (§7A.4). The model cannot approve it.
+* Dependency installation: covered by the network grant; the former per-project `installs` switch becomes a convenience preset of it.
+* Git: §10.3. Credentials: nothing is mapped (no `$HOME`, no agent, no credential helper); `HOME=/work/out/home`.
+
+### 7.4 Full Access (explicitly owner-authorized)
+
+What it is: the `host` backend. Commands run as the user, on the real filesystem, with the real network, real cwd, and persistent process effects,
+for broad CLI compatibility (docker, ssh with the user's agent, browsers, GUI tools, system package managers the user can run).
+
+What the owner gets, per the requirement:
+
+| Requirement | Design |
+|---|---|
+| Host filesystem under OS permissions | no mount namespace, no Landlock, no seccomp filter (a filter would break the compatibility that is the point) |
+| Host network | no netns, no proxy |
+| Real cwd, persistent effects | `cwd` = project (or a path under it); background children may outlive the call only if the `service` class is granted (S7); otherwise the cgroup is killed at exit like today |
+| No per-tool prompts | `approval = Auto` within the grant; the grant is the authorization |
+| Audit | Kernel `prepared` row: exact argv, cwd, env digest, grant digest, backend id; `exited` row: exit, signal, resource use, output digest; pre/post manifest of the **project** directory (best-effort); **no** evidence is collected outside the project |
+| Cancellation & resource supervision | the existing transient systemd user scope (`MemoryMax/MemorySwapMax/TasksMax`) wraps the host command; `cgroup.kill` on cancel/revoke/daemon crash; wall clock; output caps and redaction; `PR_SET_PDEATHSIG`; `stdin=/dev/null`, no TTY. `no_new_privs` stays on by default (blocks setuid escalation such as `sudo`; D18) |
+| Environment | allow-list by default (`PATH`, `LANG`, …); credential-bearing variables (`SSH_AUTH_SOCK`, `AWS_*`, `GITHUB_TOKEN`, …) are **not** inherited unless the grant lists them by name (D5) |
+
+Authorization: a user-native grant (Desktop dialog / CLI with explicit confirmation text) naming the project and stating the consequences ("commands
+run as you: they can read your keys, change any file you can, and use your network; Nexus's protections for this project do not apply"). Recorded
+`approver_id = user-dialog`, `independent = true`, revocable, with an expiry (D5). The daemon needs a separate start flag (`--enable-host-exec`,
+not implied by `--enable-process`).
+
+Stated residuals: stdout reaches the model provider (redaction is heuristic); anything the user can do, the command can do; no rollback outside the
+project; platform limits in §8.4.
+
+### 7.5 No model-controlled escalation and no automatic Full Access — enforcement points
+
+1. Schema: `ProcessArgs` has no field for any axis; `deny_unknown_fields` (T16).
+2. All axes and the grant digest live in the Kernel HMAC-sealed process scope; `prepare_process` compares them with the daemon-derived values.
+3. The approval operation description is *derived from the sealed values and the prepared plan*; the policy trusts no free-form JSON.
+4. **Claude Code's escape hatch is deliberately not copied.** There, a sandboxed command that fails can be retried by the model with
+   `dangerouslyDisableSandbox: true` (approved, per mode, by the user, a classifier, or nobody under `bypassPermissions`) and `excludedCommands`
+   run fully unsandboxed [doc, §7B]. Nexus has neither: a model cannot ask for an unsandboxed retry; non-HTTP needs are met by explicit bridges
+   (§7A.6) or by the user's own change of grant.
+5. **Full Access is never selected as a consequence of a failure.** `ExecBackend::prepare` returning `BackendInsufficient`/any sandbox error
+   terminates the call with a refusal; the code path from the Linux backend to the `host` backend does not exist; the `host` backend is reachable
+   only when the sealed filesystem scope is `Full`, which only a user-dialog grant can mint. T17 kills `bwrap` and asserts nothing ran on the host.
+6. A grant changes only through the user-gated verb and only affects *new* tasks; resume with a different grant is refused
+   (`workspace-mode-changed` pattern, `broker/server.rs:631`).
+
+## 7A. Network architecture
+
+### 7A.1 Options considered for Controlled Internet
+
+| Option | Domain policy | Non-HTTP | Fail mode | Complexity | Verdict |
+|---|---|---|---|---|---|
+| (i) Shared host netns + Landlock TCP port rules | **no** (ports only; Landlock net ABI ≥ 4) | yes | open to whole internet and host loopback | low | Only as hardening for *Full Network* (§7A.5) |
+| (ii) Userspace netstack (pasta/slirp) + IP firewall | IP only; domain→IP drift, CDN churn | yes (TCP/UDP) | needs `pasta`, not installed here | medium, external dependency | Possible later for transparent mode; no domain policy |
+| (iii) **Private netns + host-side HTTP(S) CONNECT proxy reached over a Unix socket** (measured, E10) | **yes**, name checked before resolution, address class checked after | only CONNECT-able TCP to `host:port`; rest via bridges | **closed**: tools that ignore the proxy get `Network is unreachable` (E10-P5) | medium (one small service) | **Chosen** |
+| (iv) (iii) + TLS termination with a Nexus CA | adds method/path/host-header policy and credential injection | no | CA in the sandbox trust store; breaks pinning; key custody | high | Deferred (S10); not needed for parity |
+
+This is the same shape Claude Code uses (proxy outside the sandbox, `HTTP(S)_PROXY`/`ALL_PROXY` inside, bwrap + `socat` over Unix sockets on
+Linux, Seatbelt on macOS) [doc, §7B]; the differences are in who can widen it and what is audited.
+
+### 7A.2 Components
+
+```
+ sandbox (private netns, lo only)                          host (daemon identity, outside the sandbox)
+┌───────────────────────────────────┐   unix socket    ┌─────────────────────────────────────────────┐
+│ command ──HTTP(S)_PROXY──► 127.0.0.1:3128 (bridge) ───►│ nexus-egress (separate process, same uid)   │
+│ command ──TCP bridge ports──► 127.0.0.1:<p> (bridge)  ─►│  1 policy := sealed grant.net_policy        │
+│ (in-sandbox servers stay on 127.0.0.1, direct)          │  2 name check (allow/deny, wildcard rules)  │
+│ host.nexus.internal → host loopback ports (allowed only)│  3 resolve ONCE; address-class check on the │
+└───────────────────────────────────┘                    │    resolved IP; connect to THAT IP          │
+   no resolver, no route, no raw sockets out             │  4 per-exec accounting + log (bytes, hosts) │
+                                                         └───────────────┬─────────────────────────────┘
+                                                                         ▼ internet / explicit local ports
+```
+
+* **`nexus-egress`** is an unprivileged helper (not inside `nexusd`, to keep network parsing out of the Kernel-adjacent TCB). It is started by the
+  daemon with a per-execution socket in the private run dir and the policy bytes whose digest equals the grant's; it refuses to start on a mismatch.
+  It has no access to the Kernel store, no secrets, and only egress. One socket per execution gives exact attribution in its log.
+* **In-sandbox bridge**: a small listener in `nexus-sandbox-init` (the Landlock shim from §5.1; `socat` was used in the PoC) listens on
+  `127.0.0.1:3128` and relays to the bound Unix socket. Environment: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY=localhost,127.0.0.1,::1`
+  (so a server the command starts itself is reached directly, inside the sandbox). No DNS resolver is provided: name resolution happens only in the
+  proxy, only for names that passed the name check.
+* **Host services** are not `127.0.0.1` (that is the sandbox's own loopback). They are addressed as `host.nexus.internal:<port>` (an `/etc/hosts`
+  entry the sandbox gets), and reach the host's loopback **only** for ports listed in `local_ports`. This removes the ambiguity that the PoC had.
+* **Counters and evidence**: per execution `{host, port, connections, bytesOut, bytesIn, denies[reason]}`; aggregated into the `exited` record
+  (digest in the Kernel journal, full log in a daemon-private audit file). Optional hard cap `max_egress_bytes_per_exec`.
+
+### 7A.3 Threat model: what the proxy does and does not stop
+
+**The root statement.** A command that can read project source and has *any* outbound path can send that source to *any destination that path
+reaches*. Controlled Internet narrows the set of destinations; it does not make the sandbox a data-loss-prevention system. This must be in the grant
+dialog text (D13) and the product documentation. Claude Code's documentation makes the same admission about broad allowlists and domain fronting [doc, §7B].
+
+| Attack / concern | Controlled Internet behaviour | Level |
+|---|---|---|
+| Send source/secrets to an arbitrary attacker host | refused: name not in allowlist (E10-P2: `github.com` denied) | ENFORCED |
+| Reach cloud metadata, LAN, host loopback via proxy | refused by the post-resolution address-class check even if the *name* is allowed (E10-P2b/P2c); host loopback only for `local_ports` (E10-P3b) | ENFORCED |
+| DNS rebinding / TOCTOU between check and connect | the proxy resolves once and connects to the **checked IP** (E10 implementation) | ENFORCED |
+| DNS-tunnel exfiltration | the sandbox has no resolver and no route; queries exist only for allowed names inside the proxy | ENFORCED for the sandbox; but a label sent to an allowed name whose authoritative DNS the attacker controls (wildcards on attacker-registrable domains) is a channel |
+| Exfiltration to an **allowed** destination that accepts anonymous or attacker-controlled writes | **not prevented.** E10-P4: a project file was POSTed through an allowed destination. Typical offenders: wildcard storage/CDN/hosting domains (`*.amazonaws.com`, `*.github.io`, `*.cloudfront.net`), paste/transfer services, any API that accepts unauthenticated uploads, an attacker-registered package scope on a registry | **NOT STOPPED — residual R9** |
+| Same via an allowed destination that needs credentials | the sandbox has no credentials (no `$HOME`, no agent, env allow-list, secret-shaped files masked), so authenticated writes (git push, npm publish, cloud APIs) fail | ENFORCED as long as secrets are not placed in readable, arbitrarily-named project files (R2) |
+| Domain fronting (CONNECT allowed host, inner Host/SNI different) | v1 checks SNI against the CONNECT host by peeking the ClientHello (no interception). A front that is genuinely served by the allowed CDN and routes on the inner Host header is **not** visible without TLS termination | PARTIAL; full defence needs (iv) |
+| Bulk exfiltration | per-exec `bytesOut` accounting and cap; large uploads show in evidence | DETECTED / bounded |
+| Small secrets (keys, tokens) | a few hundred bytes are under any sane cap | **NOT STOPPED** |
+| Prompt-injected model plans the exfiltration | policy cannot read intent; the defence is the destination set, credentials absence, and review of evidence | R9 |
+| Tool that ignores proxy variables | no route → fails, never bypasses | ENFORCED (E10-P5) |
+| Allowlist widening by the model | impossible: grant is user-only (§7.5); a denied connection yields a scope request for the user | ENFORCED |
+
+**Allowlist hygiene rules (policy, enforced by the grant editor):** exact hostnames preferred; wildcard suffixes only for names the project owner
+controls or that are not attacker-registrable; `*` is allowed but shown with a warning ("any public address") and is the *Full-Internet* preset;
+presets ship as **exact** hosts: npm (`registry.npmjs.org`), PyPI (`pypi.org`, `files.pythonhosted.org`), crates (`index.crates.io`, `static.crates.io`,
+`crates.io`), Go (`proxy.golang.org`, `sum.golang.org`), NuGet (`api.nuget.org`), git over HTTPS to hosts the owner names.
+
+**Network-enabled and source-visible, in one sentence for the owner:** the project's source can leave through whatever you allow; Nexus makes that
+visible and bounded but cannot make it impossible.
+
+### 7A.4 Prompt-free operation, and what happens beyond the grant
+
+* Inside the grant: no prompt, ever (the Claude Code "sandbox substitutes for the per-command prompt" principle, `autoAllowBashIfSandboxed`).
+* Beyond the grant: the connection is refused at the proxy and logged as `pendingEgress{host, port, executionId}`. The broker surfaces it as a user
+  card ("api.stripe.com:443 was blocked for this command — Allow for this project / this task / never"). Only the user's choice edits the grant.
+  With `approval = Ask` the proxy may **hold** the connection up to a short timeout while the card is shown (Claude Code's first-connection prompt);
+  with `Auto` it denies immediately so a command cannot hang on a prompt nobody is watching.
+* Persisting "allow for this project" creates a new grant version (new digest) effective for new tasks; "allow for this task" needs a Kernel-visible
+  amendment bound to the task identity (design item for S5, B10).
+
+### 7A.5 Localhost, dev servers, browser tests
+
+| Need | Mechanism | Evidence |
+|---|---|---|
+| Server and client in one command (`npm test` that boots a server; Playwright against its own server) | private loopback inside the sandbox, direct (`NO_PROXY`) | works today |
+| Command → a service on the **host** (local database, API mock, a host dev server) | `local_ports` + `host.nexus.internal:<port>` through the proxy; any other host port refused (E10-P3/P3b) | measured |
+| **Host** browser/tool → a dev server started in the sandbox | forwarder: host listens on `127.0.0.1:P`, hands each connection to a helper that `setns`es into the execution's user+net namespaces and connects to `127.0.0.1:<port>` (`nsenter -t <pid> -U -n` reached a sandbox-only server with HTTP 200 while the host's own loopback did not, E11) | measured with `nsenter`; Rust helper to be built (S7) |
+| Command A starts a server, **later** command B (a different execution) talks to it | impossible with one netns per execution. Needs a **task sandbox**: one long-lived sandbox per task (its init process spawns each command with its own cgroup sub-scope, Landlock domain and journal row). Larger change to lifecycle/recovery; separate ADR addendum | design only |
+| Headless browser inside the sandbox | works if the browser is launched with its internal sandbox off (`--no-sandbox`), because user namespaces are disabled inside ours (`--disable-userns`); Nexus's sandbox is the boundary [knowledge, compat test T15g] | to test |
+
+**Full Network under Workspace scope (shared host netns).** Measured (E12): in a shared netns the sandbox connected to a *host abstract Unix
+socket* (the class X11 and some D-Bus/desktop services use) and got data; with a Landlock scope rule (ABI ≥ 6, `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET`)
+the same connect fails with `EPERM`; in a private netns it fails with `ECONNREFUSED`. Host loopback TCP services (databases, Docker's TCP port if
+enabled, Nexus-unrelated daemons), the LAN and cloud metadata are reachable by construction. Therefore: `Full Network` + `Workspace` requires
+(a) a user-dialog grant naming these consequences, (b) Landlock ABI ≥ 6 (else refuse), (c) optionally Landlock TCP port rules (ABI ≥ 4) to cut
+inbound/lateral ports, and is documented as *not* protecting host services. It exists for UDP, mDNS, raw/LAN development and tools that cannot be
+made proxy-aware; everything else belongs to Controlled.
+
+### 7A.6 Non-HTTP protocols (explicit, not excluded)
+
+Tools that cannot use an HTTP proxy get **no route** (E10-P5) — the correct fail-closed behaviour — and the user has three explicit choices:
+
+1. **CONNECT-capable clients** (ssh via `ProxyCommand`, git over HTTPS, most package managers, curl, Go, cargo, pip): work through the proxy;
+   `host:port` allow entries cover arbitrary TCP ports for them.
+2. **TCP bridges** (`bridges: [{listen_port: 5432, host: db.dev.example.com, port: 5432}]`): the in-sandbox bridge listens on that loopback port and
+   the proxy connects to the one allowed `host:port`. `psql -h 127.0.0.1` works; policy and accounting are identical to HTTP; nothing else opens.
+3. **Full Network** (UDP, ICMP, mDNS, arbitrary protocols) or **Full Access**, by an explicit grant.
+
+Claude Code's answer for these is `excludedCommands` (run **unsandboxed with full access**) [doc, §7B]; Nexus does not have that: it would be a
+per-command escape to Full Access chosen by configuration text rather than by an explicit scope.
+
+*Tool compatibility is a test matrix, not an assumption (T15g):* env-proxy support differs per tool (Node's built-in `fetch` needs
+`NODE_USE_ENV_PROXY`/`--use-env-proxy` on recent Node versions, the JVM needs `-Dhttps.proxyHost`, Go/Python/cargo/pip/npm/git/curl honour the
+variables) [knowledge — verify per tool]. The harness sets the variables and per-tool options (`GIT_SSH_COMMAND`, `JAVA_TOOL_OPTIONS`,
+`NODE_OPTIONS`) from the resolved command class.
+
+### 7A.7 Egress service implementation notes
+
+CONNECT parser with strict limits (header size, line count, no pipelining); IPv4/IPv6 literal handling (literals are checked as addresses *and*
+must satisfy the name rule: an IP literal is allowed only by an explicit entry); IPv4-mapped IPv6, `0.0.0.0`, link-local, ULA, CGNAT and multicast
+classes denied unless a `local_ports` entry; concurrency, byte and wall caps per execution; no redirect logic (clients do that); plain HTTP
+(non-CONNECT) requests are not proxied (the PoC returns 405) — clients are pointed at CONNECT-only operation via `https_proxy`/`http_proxy`, with
+`curl -p`-style tunnelling for plain `http://` where a tool requires it (compat item).
+
+## 7B. Reference products (fetched 2026-10-24; paraphrased)
+
+| Aspect | Claude Code (sandboxing + permissions docs) | OpenCode (permissions docs) | Nexus (this ADR) |
+|---|---|---|---|
+| Layers | Permission rules (allow/ask/deny, modes) and an **OS sandbox** are "complementary"; sandbox enforcement holds "even if a prompt injection bypasses" the model's decision | permission gates only: `allow`/`ask`/`deny` per tool (`bash`, `edit`, `webfetch`, `external_directory`, …); most default to **allow**; **no OS sandbox or network isolation is documented** | permission *grant* sealed in the Kernel + OS enforcement; model has no input into either |
+| Filesystem isolation | bwrap (Linux/WSL2), Seatbelt (macOS); default write = working dir + `$TMPDIR`; **read = whole machine** except denied paths; `.git`/`.claude` protected | none documented | Workspace: project + env store only; **host not visible** (stricter than Claude Code's read-everything default) |
+| Network isolation | independent layer, **always on** with the sandbox; netns with no route (Linux); all traffic through a proxy outside the sandbox; `allowedDomains` empty by default; unlisted host → prompt; `127.0.0.1:port` entries for localhost; macOS blocks non-proxy connections | none | Offline / Controlled / Full as a first-class axis; proxy + bridges + `local_ports` |
+| Non-HTTP | **`excludedCommands`: run unsandboxed with full access** | n/a | bridges, Full Network, or Full Access — explicit grants |
+| Escape hatch | `dangerouslyDisableSandbox` retry, approved per mode (user prompt, classifier, nobody under `bypassPermissions`); `allowUnsandboxedCommands:false` disables it | n/a | none; failure ⇒ refusal ⇒ user changes the grant |
+| Auto-approval | `autoAllowBashIfSandboxed` (sandboxed commands run without prompts; a few critical commands still prompt) | per-tool `allow` | `Auto` = requested ⊆ granted |
+| "No checks" mode | `bypassPermissions`: skips prompts, **including writes to protected paths**; docs say use only in containers/VMs | `allow` everywhere | **Full Access**: user-dialog grant, host backend, supervision kept, no model-reachable path |
+| Credentials | `sandbox.credentials` deny/mask; Linux can expose sentinel copies that the proxy substitutes (needs TLS termination) | `.env` requires approval by default | none mapped; masks; proxy-side injection is a possible S10 |
+| Stated limits | domain fronting; broad allowlist = exfil path; writable `.git/hooks`/shell rc = escalation; Unix-socket allowances = escape; nested userns weakens protected paths | n/a | same classes, §7A.3 and §10 |
+
+**Parity statement.** Against Claude Code, the target is: Workspace + Controlled Internet + Auto ≈ "sandbox enabled with auto-allow and a domain
+allowlist", with a stronger filesystem default and without the unsandboxed retry; Full Access ≈ `bypassPermissions` plus, deliberately, the
+supervision Claude Code does not provide for it. Against OpenCode, the target is Full Access (no OS isolation, gates only), with Nexus's journal.
 
 ## 8. Execution backend contract (Rust)
 
@@ -393,27 +588,30 @@ pub struct BackendCaps {
     pub subpath_readonly: bool,             // .git/hooks inside a writable root (E3)
     pub hide_existing_entries: bool,        // secrets / sockets masks (E3, E4)
     pub fs_allowlist_layer: Option<u32>,    // Landlock ABI; None = absent
-    pub network: NetCaps,                   // None | PrivateLoopback | Egress(allowlist?) | Host
+    pub network: NetCaps,                   // Offline | Proxy{sni_check, bridges, host_alias} | HostShared{abstract_scope} | Host
     pub resources: Enforcement,             // KernelCgroup | RlimitPolling | JobObject | None
     pub kill_tree: KillGuarantee,           // Cgroup | ProcessGroupBestEffort | JobObject
     pub checkpoint: CheckpointKinds,        // Reflink | BoundedCopy
     pub arch: &'static [&'static str],
 }
 
-pub enum ExecClass { Scratch, WorkspaceAccess, FullAccess }
+pub enum FsScope { Scratch, Workspace, Full }
+pub enum NetScope { Offline, Controlled, FullNetwork }
+pub enum Approval { Ask, Auto }
+pub struct ExecGrant { pub fs: FsScope, pub net: NetScope, pub approval: Approval, pub grant_digest: String }
 
 pub struct ExecPlan {
     pub id: ExecutionId,
-    pub class: ExecClass,                   // sealed in the Kernel scope; backend re-checks
+    pub grant: ExecGrant,                   // sealed in the Kernel scope; backend re-checks
     pub command: ResolvedCommand,           // existing policy output
     pub root: PinnedRoot,                   // OwnedFd + {dev, ino, mnt_id, owner, canonical path (display only)}
     pub view: View,                         // Full | Narrow{ allow: Vec<RelPath> }
     pub protect: Vec<ProtectedPath>,        // {rel, Hide | ReadOnly}, only existing entries
-    pub net: NetClass,                      // None | Install   (Host only for FullAccess)
+    pub net: NetPolicy,                     // Offline | Proxy{allow,deny,local_ports,bridges,caps} | HostShared | Host (Host only with fs=Full)
     pub env_store: Option<PathBuf>,         // /work/env
     pub limits: SandboxLimits,
     pub checkpoint: CheckpointPolicy,       // Require | Prefer | Off (Off only if the owner allows)
-    pub required: RequiredCaps,             // derived from class+view+net; compared with BackendCaps
+    pub required: RequiredCaps,             // derived from grant+view+net; compared with BackendCaps
 }
 
 pub trait ExecBackend: Send + Sync {
@@ -435,8 +633,8 @@ pub trait Checkpointer { fn create(&self, root: &PinnedRoot, p: &CheckpointPolic
 ```
 
 Rule: `required ⊆ caps` or `ExecRefusal::BackendInsufficient{missing}`. The refusal is surfaced to the user with the *different* permission mode as an
-explicit choice (e.g. "Workspace Access is unavailable on this machine because X; Sandboxed scratch is still available; Full Access is a separate
-decision"). It never auto-selects either.
+explicit choice (e.g. "Workspace scope is unavailable on this machine because X; Scratch is still available; Full Access is a separate
+decision you can grant"). It never auto-selects either.
 
 ### 8.2 What is reused unchanged
 
@@ -446,14 +644,26 @@ phases, `observe_process_for_recovery`, `Workspace` descriptor-relative primitiv
 
 ### 8.3 What must change in the authority chain
 
-1. `ProcessScopeBinding` + `process_scope_canonical` + `PROCESS_SCOPE_DOMAIN` (`nexus-kernel/src/tools.rs:87,202-230`): add `exec_class`, `view_digest`,
-   `net_class`; domain `…/v2`. v1 rows read as `scratch` (compat), never as `workspace`.
+1. `ProcessScopeBinding` + `process_scope_canonical` + `PROCESS_SCOPE_DOMAIN` (`nexus-kernel/src/tools.rs:87,202-230`): add the three axes (item 8), `view_digest`; domain `…/v2`. v1 rows read as `Scratch + Offline`, never as `Workspace`.
 2. `bind_process_scope_inner` (`:1318`) takes them from the approver (the automated policy or the user-dialog).
 3. `prepare_process` (`authorization.rs:104`) refuses if the sealed class ≠ the daemon-derived class.
 4. `evaluate_autonomous_policy` → `autonomous-workspace/v2` (`server.rs:1288-1400`): replace the `writeBack == "none"` string test; operation description built from the prepared plan.
 5. Remove the three `"writeBack": "none"` literals (`server.rs:1621`, `process.rs:1202`, `process.rs:1329`); compute from class.
 6. New journal phases `checkpointed`, `observed` (`process.rs:32-36`, Kernel state machine `record_process_phase`); `interrupted` payload gains the observed diff.
 7. `direct::Store` gains the `observed` ledger and attribution `command:<executionId>`; `diff` and `external_changes` (`direct.rs:457,501`) consume it (§9).
+8. (rev. 2) The scope schema carries the three axes and the grant: `fs_scope`, `net_scope`, `approval`, `grant_digest`, `net_policy_digest` (instead of
+   the narrower `net_class`). `process_scope_canonical` covers all of them; `prepare_process` compares each with the daemon-derived value.
+9. (rev. 2) **Standing grant** record in `nexus-tools::registry` (`ProjectRecord.grant`, §7.2) with user-only setters; `project_set_grant` verb in the
+   broker (peer-credential gated like `project_set_workspace`), CLI `nexus project grant`, Desktop dialog. Task identity record gets the effective axes.
+10. (rev. 2) **Approval-mode coexistence**: lift the daemon-wide mutual exclusion (`nexus-daemon/src/main.rs:695-717`) so `Ask` and `Auto` tasks can
+    run in one daemon; the mode comes from the identity record and is sealed. This is the riskiest change in the list (B1).
+11. (rev. 2) **`nexus-egress`** (new binary/crate, no Kernel access): started per execution by the daemon with a policy whose digest must equal the
+    sealed `net_policy_digest`; writes an audit file; the daemon folds a summary + digest of the audit file into the `exited` row (a connection is
+    never a Kernel journal row — flood control).
+12. (rev. 2) `pendingEgress` events: daemon → broker → Desktop/CLI card; verbs `egress_allow {project|task, host, port}` / `egress_deny`; only they
+    edit the grant (new digest, new tasks) or amend a task (S5, B10).
+13. (rev. 2) Full Access: `host` backend registered only when started with `--enable-host-exec`; the Kernel scope with `fs_scope=Full` is mintable only by the
+    user-dialog approver; `prepare` has no path from `BackendInsufficient` to this backend.
 
 ### 8.4 Cross-platform paths (what is realistic)
 
@@ -467,6 +677,33 @@ phases, `observe_process_for_recovery`, `Workspace` descriptor-relative primitiv
 The existing sandbox is already Linux/x86_64-only (`sandbox.rs:337`), so today non-Linux hosts have *no* process execution; this ADR does not
 regress that, and says so rather than implying parity.
 
+### 8.5 Capability matrix (rev. 2)
+
+`✔` enforced · `◐` partial/best-effort · `✘` unavailable (fail closed or other mode) · `?` unverified here. Linux column = measured on this host unless marked.
+
+| Capability | Linux Workspace (bwrap+Landlock+seccomp+cgroup) | Linux Full Access (`host`) | macOS Workspace (Seatbelt) | Windows Workspace |
+|---|---|---|---|---|
+| Real project, in place | ✔ (E1) | ✔ | ✔ | ✘ initially (§8.4) |
+| Pinned root identity | ✔ `--bind-fd` | n/a | ✘ path rules | ✘ |
+| Host filesystem hidden | ✔ | ✘ by design | ◐ deny-rules, reads wide by default | ? |
+| `.git`/secret/socket masks | ✔ (E3, E4) | ✘ | ◐ deny rules | ? |
+| Offline | ✔ netns | ✘ | ✔ | ◐ AppContainer without network capability [knowledge] |
+| Controlled Internet (domain/address policy) | ✔ proxy over Unix socket (E10) | ✘ | ◐ same design; Seatbelt allows only the proxy socket [doc: Claude Code uses it] | ? loopback exemption + firewall rules per AppContainer [knowledge] |
+| Localhost ports to host services | ✔ `host.nexus.internal` allow-list (E10) | ✔ (native) | ◐ | ? |
+| Host → sandbox dev server | ✔ `nsenter` forwarder (E11) | ✔ (native) | ✔ (shared loopback) | ? |
+| Full Network (shared netns) | ◐ with Landlock abstract scope (E12) | ✔ | ✔ | ✔ |
+| Non-HTTP via bridges | ✔ (design; stand-in measured) | ✔ native | ◐ | ? |
+| Kill process tree | ✔ cgroup | ✔ cgroup scope around the host process | ◐ process group; double-fork escapes | ✔ Job Object [knowledge] |
+| Memory/task limits | ✔ kernel scope | ✔ kernel scope | ◐ rlimit + polling | ✔ Job limits [knowledge] |
+| Per-command prompts avoided inside grant | ✔ Auto | ✔ Auto | ✔ | ✔ |
+| Egress evidence (bytes per destination) | ✔ | ✘ (no proxy) | ✔ | ? |
+| Rollback checkpoint | ◐ reflink/copy | ◐ | ◐ APFS clone | ◐ |
+
+Network on macOS/Windows is the same *architecture* (policy lives in a host-side proxy; the OS sandbox only permits the path to it), which is the
+reason the contract expresses network as `NetCaps` rather than as a Linux namespace. Where the OS cannot restrict a process to "proxy only", the
+backend reports `Offline`/`Proxy` unavailable and the product refuses that scope — or offers `Full Network`/`Full Access` as a separate, explicit grant.
+
+
 ---
 
 ## 9. Evidence model
@@ -475,7 +712,7 @@ regress that, and says so rather than implying parity.
 
 | Layer | Question | Source | When | Strength |
 |---|---|---|---|---|
-| **E1 Authority** | what was the command *allowed* to do | Kernel-sealed scope + prepared plan digest (class, root identity, view digest, mask-set digest, net class, limits, sandbox/filter digest, backend id/caps, policy id/digest, approver) | durable **before** spawn (`prepared`) | cryptographic (HMAC seal + journal) |
+| **E1 Authority** | what was the command *allowed* to do | Kernel-sealed scope + prepared plan digest (three axes + grant digest, root identity, view digest, mask-set digest, net policy digest, limits, sandbox/filter digest, backend id/caps, policy id/digest, approver) | durable **before** spawn (`prepared`) | cryptographic (HMAC seal + journal) |
 | **E2 Observation** | what *changed* in the project | pre/post manifest over the pinned fd; checkpoint ref; run window; cgroup-empty settle | durable at `observed`/`interrupted` | observed fact; complete only as far as `observation.complete` says |
 | **E3 Verified completion** | is the task's claim true | exit status + `settled` + effects reconcile + an independent check run (existing `verified-passed` semantics) | end of run | the only layer that may say "verified" |
 
@@ -483,7 +720,7 @@ regress that, and says so rather than implying parity.
 
 `{window{t0,t1}, preManifestDigest, postManifestDigest, checkpoint{kind, ref, complete, excluded[]}, effects{created[], modified[], deleted[],
 modeChanged[], symlinksCreated[{path,target,escapesRoot}], specialsCreated[], hardlinked[], protectedTouched[{path,rule}], bulkDirs[{path,
-changed,count?}]}, overlapWith{nexusWrites[]}, attribution:"temporal", settled:bool, complete:bool, truncated:bool}`.
+changed,count?}]}, overlapWith{nexusWrites[]}, egress{byDestination[{host,port,conns,bytesOut,bytesIn}], denied[{host,port,reason}], truncated}, attribution:"temporal", settled:bool, complete:bool, truncated:bool}`.
 
 * Manifest tier 1 (source tree): path, type, size, mode, uid/gid, nlink, ino, mtime_ns, ctime_ns, symlink target; content sha256 computed **only for
   regular files whose (size, mtime, ctime, ino) changed** and ≤ cap. Tier 2 (existing `ignored_dirs`: `node_modules target dist build vendor
@@ -508,7 +745,7 @@ formatter run misreports every reformatted file as a user edit). User edits afte
 
 Assets: host files outside the project (A1); secrets in the project (A2); project integrity and history (A3); the user's **future host-side
 execution** of what the sandbox wrote (A4); network reachability (A5); Nexus state/Kernel/daemon (A6); data sent to the provider (A7).
-Adversaries: prompt-injected model (T1); malicious dependency/postinstall scripts (T2); buggy/destructive toolchains (T3); the user's concurrent
+Adversaries: prompt-injected model (T1); hostile content reached over the network — sites, registries, package scripts (T6, rev. 2); malicious dependency/postinstall scripts (T2); buggy/destructive toolchains (T3); the user's concurrent
 edits (T4, accident); kernel/bwrap bug (T5); same-uid host process (out of scope, as in A3.3).
 
 ### 10.2 Matrix
@@ -517,7 +754,7 @@ edits (T4, accident); kernel/bwrap bug (T5); same-uid host process (out of scope
 |---|---|---|
 | T1/T2 read host files | mount namespace has no `$HOME`/`/etc`/`/run`; symlinks outside do not resolve (E1b) | ENFORCED |
 | T1/T2 write host files | root `--remount-ro`, only `/work/src`, `/work/env`, tmpfs writable; Landlock allowlist | ENFORCED (two layers) |
-| T2 exfiltrate project secrets | R-NET (no network with full view); masks for existing secret-shaped entries; stdout redaction | ENFORCED for network; **name-based and partial** for secrets in arbitrarily named files (R2) |
+| T2 exfiltrate project secrets/source | **Offline:** no route. **Controlled:** destination policy (§7A.3) — stops arbitrary hosts, does **not** stop allowed destinations that accept writes (R9); masks for existing secret-shaped entries; no credentials mapped; stdout redaction; egress accounting | ENFORCED for Offline and for arbitrary destinations; **R9 NOT STOPPED** for allowed ones; **name-based and partial** for secrets in arbitrarily named files (R2) |
 | T1 reach host services via project-local Unix socket | mask existing sockets; netns isolates abstract sockets (E4) | ENFORCED for existing; residual for sockets created by host processes mid-run (R6) |
 | T1 plant host-executed code (`.git/hooks`, `.git/config` aliases/fsmonitor/sshCommand) | ro mounts (E3/E5); `.git` ro by default | ENFORCED for `.git` internals |
 | T1 plant host-executed code elsewhere (`package.json` scripts, `Makefile`, `.vscode/tasks.json`, `.envrc`, any source file, git-tracked build scripts) | **cannot be prevented**: it is the work product. Flagged protected-path touches, full diff, checkpoint | **R1 — accepted, same as any coding agent; review is the control** |
@@ -526,8 +763,12 @@ edits (T4, accident); kernel/bwrap bug (T5); same-uid host process (out of scope
 | Pre-existing hard link to outside file | cannot be distinguished (documented); report `nlink>1` | R3 — accepted, residual stated in `workspace.rs:22` |
 | Nested mounts under the project | refuse | ENFORCED [unproven; T7] |
 | Fork bomb/memory/CPU/output | unchanged cgroup + rlimits + caps | ENFORCED (kernel scope) |
-| Model raises its own privilege | §7.4 | ENFORCED |
-| Fallback to host exec when the sandbox fails | no code path; refusal text offers the user a mode choice | ENFORCED |
+| Model raises its own privilege (any axis) | §7.5; no model-reachable grant verb | ENFORCED |
+| Fallback to host exec when the sandbox fails | no code path from any sandbox backend to `host`; refusal text names the user's options (§7.5.5) | ENFORCED |
+| T6 malicious site/registry content reaches the command | the command is already untrusted-code-equivalent; blast radius = Workspace filesystem + granted destinations | bounded, not prevented |
+| Proxy as attack surface (parsing, SSRF to LAN/metadata) | separate unprivileged process, strict CONNECT parser, post-resolution address-class checks, connect-to-checked-IP, per-exec caps | ENFORCED by design; [unproven until S5 tests] |
+| Full Network under Workspace: host loopback/LAN/metadata reachable | user-dialog grant; Landlock abstract-socket scope (E12); optional TCP port rules | **R10 — accepted by grant**, host services are not protected |
+| Full Access: everything the user can do | none by design; supervision, audit, kill; user-dialog grant with expiry | **R11 — accepted by grant** |
 | T4 concurrent user edit overwritten by a command | none during the run | **R4 — NONE** |
 | Crash mid-command | cgroup killed; effects uncertain; no auto rollback | R5 |
 | T5 bwrap/kernel/seccomp bypass | deny-list seccomp (allows newly added syscalls by default), userns kernel surface, Landlock second layer | **R7 — residual; larger blast radius than today because the real project is now writable** |
@@ -536,7 +777,7 @@ edits (T4, accident); kernel/bwrap bug (T5); same-uid host process (out of scope
 ### 10.3 Git handling
 
 * Default: `.git` visible **read-only**; `git status/diff/log` work and `add/commit` fail cleanly with `EROFS` (E5b, measured; `show`/`blame` not run); the binary is
-  provided read-only from the host `/usr`. No credentials, no `~/.gitconfig`, no network ⇒ `push/fetch/clone` cannot succeed.
+  provided read-only from the host `/usr`. No credentials and no `~/.gitconfig` ⇒ `push` cannot authenticate; under Controlled Internet `fetch`/`clone` over HTTPS from allowed hosts work (read-only `.git` still blocks `fetch` from updating refs — `git_write` is the switch).
 * Opt-in `git-write` per project (D6): `.git` rw except `hooks` and `config` (E5: `commit` works; `config` writes fail `EBUSY` and should be translated).
   `git` is added to the workbench program list **only** in this mode.
 * Argv-level git policy (blocking `reset --hard`, `clean`) is **not** relied on (`sh -c` bypasses it). The protections are: ro `.git`, checkpoint of the working
@@ -547,7 +788,7 @@ edits (T4, accident); kernel/bwrap bug (T5); same-uid host process (out of scope
 
 The `service` class (S7): separate Kernel scope kind with TTL, an explicit stop verb, at most N per task, output ring buffer, same sandbox and masks,
 killed on task end/revocation/daemon restart (reconcile). Dev servers also write (HMR caches); with an `fs_write` in flight their writes are
-observed, not attributed (R4-like). Host-browser reachability requires the forwarder decision (§5.2). Until S7, long-lived processes are bounded by
+observed, not attributed (R4-like). Host-browser reachability uses the forwarder measured in E11 (§7A.5). Until S7, long-lived processes are bounded by
 the existing wall clock (`BUILD_WALL_MS` 15 min).
 
 ---
@@ -556,36 +797,39 @@ the existing wall clock (`BUILD_WALL_MS` 15 min).
 
 1. Isolated + `scratch` stays byte-identical: same `sandboxDigest`, same staging, same `writeBack: none` semantics (now *computed* from class `Scratch`).
    A regression test pins the digest (T18).
-2. New class is introduced behind `execAccess` default `scratch`; nothing changes for any existing project or run until a user moves a project.
+2. New class is introduced behind the standing grant (default `Scratch + Offline + Auto`); nothing changes for any existing project or run until a user moves a project.
 3. **S1 enables `workspace` over the Isolated task clone first** (`worktrees/<task>`): daemon-owned, disposable, no external-modification or
    secret-in-folder concerns, patch/Apply flow unchanged. It exercises mount, masks, observation, journal and Kernel scope change with zero host risk
    and immediately fixes `mkdir`/`npm install`/formatters/generators in Isolated tasks.
 4. Direct + `workspace` follows (S5) after the Direct-specific parts (observed ledger, attribution, resume, lease) are proven.
 5. `Full` is last (S8), independent of 3–4.
-6. Old journal rows, registries and consents remain valid. A consent given for the current text is **not** accepted for a `workspace`/`full` run
+6. Existing projects keep `Scratch + Offline + Auto` until the user creates a standing grant (§7.2). Old journal rows, registries and consents remain valid. A consent given for the current text is **not** accepted for a `workspace`/`full` run
    (same mechanism as the direct-consent bump).
 
 ---
 
-## 12. Required engineering stages
+## 12. Required engineering stages (revision 2)
 
 | Stage | Content | Exit criterion |
 |---|---|---|
-| **S0** | Decisions D1–D10; this ADR accepted; PoC harness from Appendix A promoted to `nexus-tools` offline tests | owner sign-off |
-| **S1** | `ExecBackend`/`BackendCaps`/`ExecPlan` extracted from `sandbox.rs`/`process.rs` with **no behaviour change**; `Scratch` class only | T18 green (digest identical), full gate green |
-| **S2** | Kernel scope v2 (`exec_class`, `view_digest`, `net_class`); daemon policy v2; derive literals; compat reading of v1 | T16 green; old rows load |
-| **S3** | Mount construction: `PinnedRoot`, `--bind-fd`, nested-mount refusal, masks (existing-only), `.git` ro, Landlock shim, fd hygiene; `workspace` over the **Isolated clone** | T1–T8, T14 green on Linux with `NEXUS_REQUIRE_SANDBOX=1` |
-| **S4** | Observation (tiered manifest), `settled`, effects schema, journal phases; checkpoint (reflink + bounded copy); guarded rollback | T9–T13 green |
-| **S5** | Direct + `workspace`: `observed` ledger in `direct::Store`, attribution, `external_changes`, exec lease, resume, UI/CLI `execAccess`, consent text, guidance text | T12, T19 green; Desktop tests; Owner try-it |
-| **S6** | Narrow-view `install` class replacing `harvest_node_modules` for in-place | T15 green |
-| **S7** | `service` class + host reachability (forwarder PoC first) | separate ADR addendum |
-| **S8** | `Full Access`: host backend, user-dialog grant, daemon flag, journal | T17 green; negative tests |
-| **S9** | macOS Seatbelt backend / Windows decision | per-platform addendum with measured caps |
+| **S0** | Owner decisions D1–D19; ADR accepted; PoC harnesses (Appendix A, A2) promoted to offline tests | owner sign-off |
+| **S1** | `ExecBackend`/`BackendCaps`/`ExecPlan` extracted from `sandbox.rs`/`process.rs`, **no behaviour change**; `Scratch + Offline/install` only | T18 green (digest identical), full gate green |
+| **S2** | **Authority chain:** Kernel scope v2 (three axes, `grant_digest`, `net_policy_digest`); `StandingGrant` in the registry with user-only verbs; policy `autonomous-workspace/v2` ("requested ⊆ granted"); derive the `writeBack` literals; approval-mode coexistence; v1 rows read as `Scratch` | T16, T21 green; old rows load |
+| **S3** | Mount construction (`PinnedRoot`, `--bind-fd`, nested-mount refusal, existing-only masks, `.git` ro, Landlock shim, fd hygiene); **Workspace + Offline over the Isolated clone** | T1–T8, T14, T20 green with `NEXUS_REQUIRE_SANDBOX=1` |
+| **S4** | Observation (tiered manifest), `settled`, effects schema, journal phases; checkpoint; guarded rollback | T9–T13 green |
+| **S5** | **Controlled Internet** on the Isolated clone: `nexus-egress`, in-sandbox bridge, env/hosts plumbing, `local_ports`, TCP bridges, SNI check, accounting, `pendingEgress` cards, tool-compatibility matrix, presets | T15a–T15i green; compat matrix published |
+| **S6** | **Direct + Workspace (+ Controlled):** `observed` ledger, attribution, `external_changes`, exec lease, resume; `nexus project grant` + Desktop grant dialog (three axes, exfiltration text), consent and guidance text | T12, T19, T22 green; Desktop tests; owner try-it |
+| **S7** | Local servers: host→sandbox forwarder (Rust, from E11), `service` class, then the task-sandbox addendum for cross-command servers | T15j green; addendum accepted |
+| **S8** | **Full Network** under Workspace (shared netns + Landlock abstract scope + optional port rules) | T15k green |
+| **S9** | **Full Access:** `host` backend, user-dialog grant, `--enable-host-exec`, supervision parity, audit | T17 green; negative tests |
+| **S10** | Optional: TLS termination + credential injection; macOS Seatbelt PoC (measured caps); Windows decision | per-platform addenda |
 
-Each stage ends with the full battery (`NEXUS_REQUIRE_SANDBOX=1`), strict clippy, and the release gate with `--bodies`, as for A-series work.
+Order rationale: authority first (S2), then prove filesystem in-place with no network (S3–S4), then add network on the *disposable* clone (S5) so that
+the first time source and network meet, the host is not at stake; Direct (S6) is the first time the user's real folder meets a network-enabled
+command, and by then the egress service, evidence and grant UI have been exercised. Each stage ends with the full battery, strict clippy, and the
+release gate with `--bodies`.
 
 ---
-
 ## 13. Deterministic proof-of-concept test plan
 
 All offline (real bwrap/cgroup/Kernel/daemon, mock model), assertion-driven, using the existing offline harness style
@@ -607,12 +851,24 @@ All offline (real bwrap/cgroup/Kernel/daemon, mock model), assertion-driven, usi
 | T12 | Attribution limit | concurrent `fs_write` subtracted via journal; simulated user edit in the window reported as "changed in window", `attribution:"temporal"` (asserts the *limit* is stated) |
 | T13 | Checkpoint & rollback | reflink where supported (skip elsewhere), bounded-copy fallback, `none` flagged; guarded restore never overwrites a path whose content ≠ post-run |
 | T14 | Resource limits | the A3.4 suite (fork bomb, memory, CPU, output flood, daemonized grandchildren) re-run against the in-place spec |
-| T15 | R-NET | `install` class: no source/secret/`.git` visible with network up; policy test that `network≠none ∧ view=Full` is unconstructible |
-| T16 | No escalation | `ProcessArgs` rejects extra fields; forged `operation.sandbox` ignored; sealed class mismatch refused; Kernel row tamper detected |
-| T17 | Full Access | refused without user-dialog grant row and daemon flag; recorded argv/cwd/env digest; revocation kills; never selected on sandbox failure |
+| T15a | Offline | no route, no resolver; tools ignoring the proxy fail with `Network is unreachable` |
+| T15b | Proxy policy | allowed/denied names, wildcard rules, IP literals only by explicit entry, IPv6, IPv4-mapped, `169.254.169.254`, RFC1918, CGNAT, multicast denied; **resolve-once + connect to checked IP** (rebinding fixture) |
+| T15c | SNI check | CONNECT to an allowed host with a ClientHello naming another host → refused |
+| T15d | Accounting & cap | `bytesOut/bytesIn` per destination in `exited`; `max_egress_bytes_per_exec` enforced; **exfil evidence test:** a command posting a project file to an allowed fixture shows the bytes (asserts the limit is *reported*, not that it is prevented) |
+| T15e | Host services | only `local_ports` reachable via `host.nexus.internal`; the sandbox's own `127.0.0.1` is never the host's |
+| T15f | TCP bridge | `127.0.0.1:<p>` reaches exactly the one allowed `host:port`; anything else refused |
+| T15g | Tool matrix | npm, pnpm, yarn, pip, cargo, go, git (https), curl, Node `fetch` (with env proxy option), Python `requests`, JVM (`JAVA_TOOL_OPTIONS`), dotnet, headless Chromium (`--no-sandbox`); each: works through the proxy against a fixture registry or fails closed |
+| T15h | Pending egress | blocked host yields one `pendingEgress`; only the user verb changes the grant (new digest); the model cannot; `Ask` holds then times out; `Auto` denies at once |
+| T15i | Egress service integrity | refuses to start on a policy/digest mismatch; unable to read Kernel store or project; killed with the execution |
+| T15j | Forwarder | host `127.0.0.1:P` reaches the sandbox-only server; closing the execution closes the forwarder; no host-loopback exposure |
+| T15k | Full Network | host abstract socket unreachable with Landlock scope, reachable without it (pins E12); refuses on ABI < 6; documented host-loopback reachability asserted as a known exposure |
+| T16 | No escalation | `ProcessArgs` rejects extra fields; forged `operation.sandbox` ignored; sealed axis/grant mismatch refused; Kernel row tamper detected |
+| T17 | Full Access | refused without user-dialog grant row and daemon flag; recorded argv/cwd/env digest; supervision kills on cancel/revoke/daemon crash; **never selected on sandbox failure** (remove `bwrap`, break userns, fail the egress service → refusal, nothing runs on the host); credential env vars absent unless named |
 | T18 | Isolated regression | `scratch` `sandboxDigest` identical to baseline; `writeBack: none` computed; existing 1271-test battery unchanged |
 | T19 | Resume/ledger | after an in-place formatter run, `external_changes` is empty; a later user edit is reported; diff includes observed-only files |
 | T20 | fd hygiene | only 0/1/2 inside; project fd not inherited by the command |
+| T21 | Three axes sealed | tampering with any axis, `grant_digest` or `net_policy_digest` in the scope row is detected; a task cannot start with a grant digest different from the registry's; `Ask` and `Auto` tasks coexist in one daemon |
+| T22 | Grant authority | no broker verb, tool argument, model output or renderer message can create or widen a grant; user-gated verb works; consent-text digest mismatch refused |
 
 ---
 
@@ -620,47 +876,64 @@ All offline (real bwrap/cgroup/Kernel/daemon, mock model), assertion-driven, usi
 
 ### 14.1 Concrete blockers / unknowns (none prevent Linux feasibility; each gates a stage)
 
-* **B1** Kernel scope schema bump (domain v2) and journal-phase additions touch the Kernel state machine — highest-risk code path; needs its own review (S2).
+* **B1** Kernel scope schema bump (domain v2), journal-phase additions **and approval-mode coexistence** (`main.rs:695-717`) touch the Kernel/daemon authority chain — highest-risk code; needs its own review (S2).
 * **B2** seccomp is x86_64-only (`sandbox.rs:291,337`) → Linux/ARM unsupported.
 * **B3** Nested-mount refusal, `--block-fd`, and `--bind-fd` recursion semantics are **unproven** (T1, T7).
-* **B4** Host reachability of dev servers (no `pasta`/`slirp4netns` here; `nsenter` path unproven) (S7).
+* **B4** ~~Host reachability of dev servers~~ — resolved for host→sandbox by E11 (forwarder). **Still open:** cross-command servers need the task-sandbox design (S7 addendum).
 * **B5** Checkpoint is absent on non-reflink filesystems for large trees; bounded copy has caps → "rollback unavailable" must be an accepted state (D4).
 * **B6** Attribution is temporal only (E8). Exact attribution requires Option D.
-* **B7** macOS/Windows cannot be validated from this environment; caps tables above are knowledge, not measurements.
-* **B8** The seccomp filter is a deny-list; writable real project raises the cost of a bypass (R7). An allow-list conversion is a large, separate effort.
-* **B9** Consent/guidance/UX text and `execAccess` surfaces (CLI + Desktop) do not exist.
+* **B7** macOS/Windows cannot be validated from this environment; caps tables are knowledge, not measurements.
+* **B8** The seccomp filter is a deny-list; writable real project plus network raises the cost of a bypass (R7). An allow-list conversion is a large, separate effort.
+* **B9** Consent/guidance/UX text and the grant surfaces (CLI + Desktop) do not exist.
+* **B10** (rev. 2) Per-task egress amendments ("allow for this task") need a Kernel-visible binding or must be limited to project-level grants.
+* **B11** (rev. 2) Exfiltration to allowed destinations (R9) and small-secret leakage are **not solvable** by the proxy; only TLS termination (S10) improves domain fronting, not R9.
+* **B12** (rev. 2) Proxy-awareness differs per tool; the compatibility matrix (T15g) decides which workflows work in Controlled mode. A transparent netstack (`pasta`/slirp) is the fallback and is not installed here.
+* **B13** (rev. 2) Reaching `Full Access` requires `--enable-host-exec`; the daemon today refuses combinations "failing closed" (`main.rs:708-760`), so flag interactions need a matrix test.
 
 ### 14.2 Owner decisions needed before implementation
 
 | # | Decision | Recommendation |
 |---|---|---|
-| D1 | Default `execAccess` for **newly** authorized projects (existing stay `scratch`) | `scratch` until S5 proves out; then `workspace` for new Direct projects |
-| D2 | Approve S1 first: in-place over the **Isolated clone** before any Direct change | Yes |
-| D3 | Landlock mandatory for `workspace` class (refuse if kernel lacks it) | Yes (ABI ≥ 1 required, ABI ≥ 6 reported/preferred) |
-| D4 | Is a run with **no checkpoint** (non-reflink FS, tree over caps) allowed? options: refuse / allow with prominent "no rollback" / require per-project opt-in | Allow, evidence-flagged, project opt-out `requireCheckpoint` |
-| D5 | Full Access: per-project vs per-session consent; expiry; whether env passthrough exists | Per project, expiring (e.g., 7 days), minimal env allow-list, no passthrough |
-| D6 | `.git` policy: read-only default; separate opt-in `git-write` | Yes; `git` program only under `git-write` |
-| D7 | Should commands be allowed to modify `PROTECTED_NAMES` (lock files, `package.json`, `Makefile`…)? | Allowed under `workspace`, flagged; `install` class may rewrite lock files |
-| D8 | Network classes beyond `none`/`install`: allow-listed egress for tests/APIs? | Not in v1; `install` narrow view only |
-| D9 | Accept R1 (host-executed project content) and R4 (no protection against concurrent user edits during a command) as stated product limits | Accept, with the §6.3 text |
-| D10 | Investment in Option D (FUSE) now, later, or never | Later, only if evidence shows gaps matter |
-| D11 | Windows: ship Workspace Access never / after ACL-journaled design; macOS: accept downgraded caps explicitly | Windows: fail closed for now. macOS: decide after a measured Seatbelt PoC |
-| D12 | Single-project exec lease semantics vs `service` processes writing while `fs_write` runs | Exclusive lease for commands; `service` exempt, observed-only |
+| D1 | Default grant for **newly** authorized projects (existing stay `Scratch + Offline + Auto`) | Until S6 proves out: unchanged. Then offer the **Trusted Workspace** preset (Workspace + Controlled(exact-host presets) + Auto) as the one-click option in the dialog |
+| D2 | Start with the **Isolated clone** (S3–S5) before any Direct change | Yes |
+| D3 | Landlock mandatory for Workspace scope | Yes (ABI ≥ 1; ABI ≥ 6 reported; **required** for Full Network) |
+| D4 | Run with **no checkpoint** allowed? | Allow, evidence-flagged; per-project `requireCheckpoint` opt-in |
+| D5 | Full Access: consent scope, expiry, env passthrough | Per project, expiring (7 days), allow-listed env, credential variables only by explicit name |
+| D6 | `.git` policy | Read-only default; `git_write` opt-in in the grant; hooks/config always read-only |
+| D7 | Commands may modify `PROTECTED_NAMES`? | Allowed under Workspace, flagged |
+| D8 | Controlled Internet defaults | Empty allowlist + **exact-host presets**; `*` (any public address) allowed but shown with the R9 warning; no wildcard storage/CDN suffix presets |
+| D9 | Accept R1, R4, **R9** as stated product limits | Accept, with §6.3 and §7A.3 text in the grant dialog |
+| D10 | Option D (FUSE) | Later, only if evidence shows gaps matter |
+| D11 | Windows/macOS | Windows: fail closed for Workspace; Full Access allowed. macOS: Seatbelt PoC first |
+| D12 | Exec lease vs `service` processes | Exclusive for commands; `service` observed-only |
+| D13 | Grant dialog wording for exfiltration | Mandatory sentence from §7A.3, digest recorded |
+| D14 | Approval axis: confirm `Ask` remains available per project, and the daemon must run both modes | Yes (B1 cost accepted) |
+| D15 | Allow **Full Network** under Workspace scope at all | Yes, S8, user-dialog grant, Landlock ABI ≥ 6 required |
+| D16 | `max_egress_bytes_per_exec` default | 16 MiB upload cap for Controlled; `unlimited` selectable |
+| D17 | "Isolated install" narrow-view hardening profile | Offer as opt-in; not default |
+| D18 | `no_new_privs` in Full Access | On (no setuid escalation); off only by explicit grant flag |
+| D19 | TLS termination / credential injection (S10) | Defer; revisit when private-registry or API-key workflows demand it |
 
 ---
 
-## 15. Recommendation
+## 15. Recommendation (revision 2)
 
-Build **Confined In-Place (Option C)** for Linux, sequenced S1→S6, starting with the Isolated clone; ship **Full Access** (Option B) as a separate,
-user-granted class; keep **scratch** as the default and as Isolated's behaviour. Do not market the result as equivalent to `fs_write`'s guarantees:
-authority is per command and view, files are observed (not pre-authorized), rollback is best-effort from a checkpoint, and attribution is temporal.
-Two rules are non-negotiable because the experiments showed concrete failure modes: **never combine the network with the full project view**, and
-**mask only what exists** (a mask on an absent name writes into the user's project). The mechanism is smaller than the staging path it replaces; the work
-is in the Kernel-sealed class, the observed ledger, and the product text. The earlier "do not recommend" conclusion rested on assumptions that §1.6 and §4
-show are mostly preventable by mount-level controls; what it correctly identified — loss of per-file authorization and cheap rollback — remains true and
-is stated, not engineered around.
+Build **Confined In-Place (Option C)** on Linux with **network as a first-class, user-granted axis**, sequenced S1→S6, starting on the Isolated clone;
+make **Trusted Workspace = Workspace + Controlled Internet + Auto** the parity configuration; ship **Full Access** (host backend) as a separate,
+user-granted scope with supervision and audit but no confinement, and never select it after a failure. Keep `Scratch + Offline` as the default and as
+Isolated's behaviour.
 
----
+What the new rule is, and is not: the revision-1 rule "never combine network with the full project view" is replaced by "never combine them
+*without a user-created, sealed, auditable grant that states the consequence*". The network is policed by a host-side proxy with name and address-class
+checks, explicit local-port and TCP-bridge permissions, accounting, and fail-closed behaviour for tools that ignore it (all measured, E10–E12). It
+does **not** prevent exfiltration of readable source to any allowed destination, and Nexus must say that to the owner in the dialog, in the evidence
+and in the documentation. The honest defence is layered and partial: a small, exact destination set; no credentials in the sandbox; masks; byte
+accounting; review of evidence.
+
+The authority-chain change stays small and mechanical: one scope-schema bump, one standing-grant record, one unprivileged egress process, one
+policy rule ("requested ⊆ granted"), and approval-mode coexistence. Nothing the model sends can raise any axis. Unchanged from revision 1:
+honest guarantees (§6), mask only what exists, mount the pinned file descriptor never a path, no per-file authorization or crash-atomic rollback
+claimed for arbitrary commands.
 
 ## Appendix A — PoC harness (reproduces E1–E6)
 
@@ -688,7 +961,18 @@ print("exit",subprocess.run(argv,pass_fds=fds).returncode)
 Landlock check (E6) ran this inside the sandbox: `landlock_create_ruleset(fs rights)`, `landlock_add_rule(READ|EXEC on /usr, READ on /work/src,
 ALL on /tmp)`, `prctl(NO_NEW_PRIVS)`, `landlock_restrict_self`; then a write to `/work/src` → `EACCES`, `/tmp` → ok.
 
+## Appendix A2 — Egress PoC (reproduces E10–E12; scratch use only)
+
+Host proxy (`proxy.py <unix-socket> '<json allowlist>' <seconds>`): accepts `CONNECT host:port`; denies names not in the list (a `host:port` entry is
+an explicit allowance, including host loopback); resolves **once**; denies loopback/private/link-local/reserved/multicast/unspecified addresses unless
+the entry was explicit; connects to the **checked IP**; logs every decision. Sandbox side: `bwrap … --unshare-net … --ro-bind <proxy.sock>
+/work/proxy.sock --bind-fd <project> /work/src …`, then `socat TCP-LISTEN:3128,bind=127.0.0.1,fork UNIX-CONNECT:/work/proxy.sock &` and
+`HTTPS_PROXY=http://127.0.0.1:3128`; tools use `curl -p` for plain-HTTP tunnelling. Forwarder test: `nsenter -t <bwrap-child-pid> -U -n curl http://127.0.0.1:3000/`
+(`--info-fd` gives the child pid). Abstract-socket test: a host listener on `\0name`, a sandbox client with and without
+`landlock_create_ruleset({scoped = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET})` + `landlock_restrict_self`. The Python/`socat` stand-ins prove the
+*mechanism*; the Rust implementations are S5/S7 deliverables and must pass T15a–T15k, not the PoC.
+
 ## Appendix B — Evidence not gathered
 
-No macOS/Windows host; no ext4/xfs run; no ARM; no multi-UID deployment (A3.4 §Verdicts: still NOT RUN); no real-provider run. Everything marked
+No macOS/Windows host; no TLS interception, no Rust egress service, no per-tool proxy-compatibility run; no ext4/xfs run; no ARM; no multi-UID deployment (A3.4 §Verdicts: still NOT RUN); no real-provider run. Everything marked
 [unproven] is a design claim to be turned into a test (T1, T7, T-forwarder) before the dependent stage starts.
