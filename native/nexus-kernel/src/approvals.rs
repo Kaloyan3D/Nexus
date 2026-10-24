@@ -452,6 +452,7 @@ impl Kernel {
                             d.independent,
                             &Self::request_field(&row, "workspaceRootDigest"),
                             d.scope_cap,
+                            &Self::exec_fs_scope_of(&row),
                         )?;
                     }
                     _ => {
@@ -556,6 +557,7 @@ impl Kernel {
                         false,
                         &Self::request_field(&row, "workspaceRootDigest"),
                         d.scope_cap,
+                        &Self::exec_fs_scope_of(&row),
                     )?;
                 }
                 _ => return Err(refuse(KernelErrorCode::ScopeRefused, "unsupported scope")),
@@ -578,6 +580,20 @@ impl Kernel {
                 .approval_fetch(id)?
                 .ok_or_else(|| refuse(KernelErrorCode::StoreError, "approval vanished"))
         })
+    }
+
+    /// The filesystem scope the reviewed operation declares (`operation.execFsScope`, sealed in the request
+    /// digest the approver or the automated policy decided on). Absent = `scratch`, so every operation
+    /// that does not state a scope is exactly what it was before.
+    fn exec_fs_scope_of(row: &ApprovalRow) -> String {
+        serde_json::from_str::<serde_json::Value>(&row.request_json)
+            .ok()
+            .and_then(|v| {
+                v.pointer("/operation/execFsScope")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| crate::tools::FS_SCOPE_SCRATCH.to_owned())
     }
 
     fn request_field(row: &ApprovalRow, key: &str) -> String {

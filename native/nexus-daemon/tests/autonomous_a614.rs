@@ -197,3 +197,31 @@ fn a_store_latched_automated_never_starts_weaker_and_a_human_store_never_starts_
     let e = start(&r2, &[]).expect_err("weaker restart refused");
     assert!(e.contains("approval-downgrade-refused"), "{e}");
 }
+
+#[test]
+fn m1_the_in_place_scope_is_an_explicit_operator_setting_that_fails_closed() {
+    let r = root();
+    // 'full' does not exist; unknown names never degrade to anything
+    for bad in ["full", "host", "Workspace", ""] {
+        let e = start(&r, &["--isolated-exec-scope".into(), bad.into()]).expect_err(bad);
+        assert!(e.contains("--isolated-exec-scope must be"), "{bad}: {e}");
+    }
+    // it needs the workbench command set (the automated workspace policy)
+    let e = start(&r, &["--isolated-exec-scope".into(), "workspace".into()])
+        .expect_err("needs the automated policy");
+    assert!(
+        e.contains("requires --enable-process and --autonomous-workspace-policy"),
+        "{e}"
+    );
+    // with it, the daemon starts and the default stays scratch when the flag is absent
+    let mut a = start(
+        &r,
+        &[
+            "--autonomous-workspace-policy".into(),
+            "--isolated-exec-scope".into(),
+            "workspace".into(),
+        ],
+    )
+    .expect("starts");
+    terminate(&mut a);
+}

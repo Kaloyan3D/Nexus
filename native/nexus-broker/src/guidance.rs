@@ -20,6 +20,18 @@ pub fn code_preamble_body(kind_ids: &[String], interactive: bool) -> String {
 /// Direct Workspace: the same harness context, truthful about where the edits happen. The isolated text
 /// (`direct == false`) is byte-for-byte the historical one.
 pub fn code_preamble_body_for(kind_ids: &[String], interactive: bool, direct: bool) -> String {
+    code_preamble_body_with(kind_ids, interactive, direct, false)
+}
+
+/// As [`code_preamble_body_for`], additionally truthful when the task's commands run IN PLACE in its
+/// isolated working copy (`in_place_commands`): what a command creates or changes there persists and is
+/// part of the patch. With `false` the text is byte-for-byte the historical one.
+pub fn code_preamble_body_with(
+    kind_ids: &[String],
+    interactive: bool,
+    direct: bool,
+    in_place_commands: bool,
+) -> String {
     let mut s = String::from(
         "You are Nexus, an autonomous software engineer. You work in an ISOLATED COPY of the user's project; the original is never modified until the user reviews and adopts your patch.\n\
          Tools: fs_list, fs_search, fs_read, fs_edit (exact-text replacement), fs_write (create or replace a whole file), proc_run (development commands in a sandbox).\n\n\
@@ -48,6 +60,12 @@ pub fn code_preamble_body_for(kind_ids: &[String], interactive: bool, direct: bo
                 "proc_run runs in a sandbox over a throw-away copy:",
                 "proc_run runs in a sandbox over a throw-away snapshot of the project's current files (including your edits so far). Whatever a command creates, changes or deletes there (mkdir, echo > file, formatters, generators) is DISCARDED when it ends and the result lists it: put files into the project with fs_write (it also creates missing folders), then run the check over what is really there. Also:",
             );
+    }
+    if in_place_commands && !direct {
+        s = s.replace(
+            "proc_run runs in a sandbox over a throw-away copy: no network except installing dependencies, no files outside the project. Dependencies you install stay available to later commands. Files a command writes (build output) are discarded; make real changes with fs_edit/fs_write.",
+            "proc_run runs in a sandbox directly ON YOUR WORKING COPY: no network except installing dependencies, no files outside the project. What a command creates, changes or deletes there (mkdir, formatters, code generators, dependency installs) PERSISTS in your copy and becomes part of the patch the user reviews, so run formatters and generators deliberately and leave no stray files. `.git` is read-only; dependency and cache folders (node_modules, .venv, ...) are not part of the patch.",
+        );
     }
     if interactive {
         s.push_str("- Edits and commands run immediately under the project's policy; there is no approval step to wait for. A refused operation comes back as a tool error: adapt, do not repeat it.\n");

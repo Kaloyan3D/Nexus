@@ -545,6 +545,12 @@ impl Workspace {
         self.root_identity.ino
     }
     /// Digest input for sealing: the canonical root path.
+    /// The pinned root descriptor (for in-place execution: the same object, never re-opened by path).
+    pub fn root_raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.root.as_raw_fd()
+    }
+
     pub fn root_path(&self) -> &str {
         &self.root_path
     }
