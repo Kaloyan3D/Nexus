@@ -236,7 +236,15 @@ pub(crate) fn client_message(code: &str, message: &str) -> String {
     }
 }
 
-pub fn execute(b: Arc<Broker>, run_id: String, intent: NexusIntentV1, flag: Arc<AtomicBool>) {
+pub(crate) fn execute(
+    b: Arc<Broker>,
+    run_id: String,
+    intent: NexusIntentV1,
+    flag: Arc<AtomicBool>,
+    // Direct Workspace: held for the whole run so no second task edits the same folder meanwhile;
+    // dropped (released) the moment the run has ended, whatever way it ended.
+    claim: Option<crate::server::DirectClaim>,
+) {
     // A panic in any step must end the run (nothing sent), never strand it
     // in a non-terminal state or take the worker's cleanup with it.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -259,6 +267,7 @@ pub fn execute(b: Arc<Broker>, run_id: String, intent: NexusIntentV1, flag: Arc<
     if let Ok(mut g) = b.cancel_flags.lock() {
         g.remove(&run_id);
     }
+    drop(claim);
     crate::threads::sync_run(&b, &run_id, None);
     auto_adopt(&b, &run_id);
     auto_continue(&b, &run_id);
@@ -323,6 +332,10 @@ fn auto_adopt(b: &Arc<Broker>, run_id: &str) {
     let Some(rec) = b.store.load(run_id) else {
         return;
     };
+    // a direct run already edited the folder: there is no patch to apply
+    if rec.run.workspace_kind.as_deref() == Some("direct") {
+        return;
+    }
     // a read-only request never writes to the user's folder, whatever its copy contains
     if rec.run.read_only
         || rec.run.state != "completed"

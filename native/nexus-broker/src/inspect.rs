@@ -929,7 +929,56 @@ pub(crate) fn run(
     //     this path; the Controller commits to its digest.
     let mut root = ws.root.to_string_lossy().into_owned();
     let mut created_worktree = false;
-    if mode == Mode::Code {
+    // Direct Workspace: the kind was fixed on the run at submission (the project's durable choice then).
+    let run_direct = mode == Mode::Code
+        && b.store
+            .load(run_id)
+            .is_some_and(|r| r.run.workspace_kind.as_deref() == Some("direct"));
+    if run_direct {
+        // The task edits the project's REAL folder. The daemon names it from the trusted registry (we
+        // pass a project id, never a path), re-validates it, records the task's identity outside the
+        // folder and prepares the store that keeps every original before it is changed.
+        let from_task = b
+            .store
+            .load(run_id)
+            .and_then(|r| r.run.continuation_of)
+            .and_then(|old| b.store.load(&old))
+            .and_then(|o| o.run.task_instance_id);
+        let mut params = serde_json::json!({ "taskInstanceId": task_instance, "projectId": ws.id });
+        if let Some(f) = &from_task {
+            params["fromTaskInstanceId"] = serde_json::json!(f);
+        }
+        let d = daemon(b, "direct-open", params)?;
+        root = d
+            .pointer("/direct/path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| se("daemon-shape", "direct-open returned no path"))?
+            .to_owned();
+        created_worktree = true;
+        let external: Vec<String> = d
+            .pointer("/direct/externalChanges")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let note = if external.is_empty() {
+            "Edits go directly to your project folder; they are on disk as soon as each one is made."
+                .to_owned()
+        } else {
+            format!(
+                "Edits go directly to your project folder. {} file(s) the earlier run wrote were changed outside Nexus since ({}); this run reads their current content.",
+                external.len(),
+                external.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+            )
+        };
+        b.update(run_id, |r| {
+            r.workspace_relation = Some("direct".into());
+            r.workspace_note = Some(note);
+        });
+    } else if mode == Mode::Code {
         let registry_managed = b.cfg.project_registry.is_some();
         let wt = daemon(
             b,
@@ -1335,6 +1384,7 @@ pub(crate) fn run(
             incarnation: &incarnation,
             ws_digest: &ws_digest,
             root: &root,
+            direct: run_direct,
             expected: expected.clone(),
             ctx_budget,
             signals: signals_run,
@@ -1386,6 +1436,8 @@ struct Shared<'a> {
     incarnation: &'a str,
     ws_digest: &'a str,
     root: &'a str,
+    /// Direct Workspace: `root` is the project's real folder (the bind names the direct task).
+    direct: bool,
     #[allow(dead_code)]
     expected: Option<nexus_client::ExpectedTarget>,
     ctx_budget: usize,
@@ -2073,7 +2125,11 @@ fn turn_loop(
             })
             .unwrap_or_default();
         let ro = b.store.load(ctx.run_id).is_some_and(|r| r.run.read_only);
-        let pre = crate::guidance::code_preamble_body(&kinds, true);
+        let direct_run = b
+            .store
+            .load(ctx.run_id)
+            .is_some_and(|r| r.run.workspace_kind.as_deref() == Some("direct"));
+        let pre = crate::guidance::code_preamble_body_for(&kinds, true, direct_run);
         let ro_note = if ro {
             "[READ-ONLY REQUEST] The user asked for no changes. fs_edit and fs_write are refused by the runtime for this request; use fs_list, fs_search and fs_read (and proc_run only to inspect or verify) and answer in text.\n\n"
         } else {
@@ -2384,7 +2440,11 @@ fn turn_loop(
         daemon(
             b,
             "workspace-bind",
-            serde_json::json!({ "commandId": command_id, "root": sh.root }),
+            if sh.direct {
+                serde_json::json!({ "commandId": command_id, "root": sh.root, "directTask": sh.task_instance })
+            } else {
+                serde_json::json!({ "commandId": command_id, "root": sh.root })
+            },
         )?;
         if ctx.stop() {
             return Ok(LoopEnd::Cancelled);

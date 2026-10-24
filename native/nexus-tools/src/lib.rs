@@ -19,6 +19,7 @@ pub mod authorization;
 pub mod contract;
 pub mod depcache;
 pub mod detect;
+pub mod direct;
 pub mod events;
 pub mod exec;
 pub mod gitwt;

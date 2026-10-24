@@ -14,6 +14,12 @@ pub fn code_preamble(kind_ids: &[String], interactive: bool) -> String {
 /// The harness context without the closing "Task from the user" label (a follow-up inserts
 /// the conversation context between the two).
 pub fn code_preamble_body(kind_ids: &[String], interactive: bool) -> String {
+    code_preamble_body_for(kind_ids, interactive, false)
+}
+
+/// Direct Workspace: the same harness context, truthful about where the edits happen. The isolated text
+/// (`direct == false`) is byte-for-byte the historical one.
+pub fn code_preamble_body_for(kind_ids: &[String], interactive: bool, direct: bool) -> String {
     let mut s = String::from(
         "You are Nexus, an autonomous software engineer. You work in an ISOLATED COPY of the user's project; the original is never modified until the user reviews and adopts your patch.\n\
          Tools: fs_list, fs_search, fs_read, fs_edit (exact-text replacement), fs_write (create or replace a whole file), proc_run (development commands in a sandbox).\n\n\
@@ -28,6 +34,21 @@ pub fn code_preamble_body(kind_ids: &[String], interactive: bool) -> String {
          - Your copy deliberately leaves out secrets and credential stores (`.env`, key files, `credentials.json`, ...), symlinks, very large files and build outputs. If code imports a file that is absent from your copy, it may still exist in the original: report it as \"not present in the copy\", never as missing from the project.\n\
          - CI definitions, git hooks, credentials and generated directories (node_modules, target, dist) cannot be edited. Leave no temporary files (no `.new`, `.bak`). Never run or ask for pushes, deploys or anything that leaves the sandbox.\n",
     );
+    if direct {
+        s = s
+            .replace(
+                "You work in an ISOLATED COPY of the user's project; the original is never modified until the user reviews and adopts your patch.",
+                "You work directly in the user's REAL project folder: every fs_edit/fs_write is saved to the actual files immediately and the user's editor and tools see it at once. There is no copy and no patch to apply, so be deliberate: read a file before changing it, make focused edits, never delete or overwrite a file you were not asked to touch, and leave unrelated changes the user may have in progress alone (an edit to a file that changed since you read it is refused: read it again).",
+            )
+            .replace(
+                "- Your copy deliberately leaves out secrets and credential stores (`.env`, key files, `credentials.json`, ...), symlinks, very large files and build outputs. If code imports a file that is absent from your copy, it may still exist in the original: report it as \"not present in the copy\", never as missing from the project.\n",
+                "- Secrets and credential stores (`.env`, key files, `credentials.json`, ...), symlinks and the `.git` folder cannot be read or changed by your tools. If code imports such a file, report it as \"not readable by Nexus\", never as missing from the project.\n",
+            )
+            .replace(
+                "proc_run runs in a sandbox over a throw-away copy:",
+                "proc_run runs in a sandbox over a throw-away snapshot of the project's current files (including your edits so far):",
+            );
+    }
     if interactive {
         s.push_str("- Edits and commands run immediately under the project's policy; there is no approval step to wait for. A refused operation comes back as a tool error: adapt, do not repeat it.\n");
     } else {

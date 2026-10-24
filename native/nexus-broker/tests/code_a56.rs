@@ -15507,3 +15507,586 @@ fn r3_an_adaptive_task_selecting_an_unverified_route_is_refused_before_any_reque
     assert_eq!(fx.provider.accepted.load(Ordering::SeqCst), before);
     b.shutdown();
 }
+
+// ================================================================================================
+// Direct Workspace: the agent edits the project's REAL folder in place (real daemon, Kernel,
+// approvals-by-policy, sandbox and write tool; the provider simulates the model only)
+// ================================================================================================
+
+type FolderCell = Arc<Mutex<Option<PathBuf>>>;
+
+struct DirectEnv {
+    fx: Fx,
+    b: BrokerHandle,
+    sock: PathBuf,
+    folder: PathBuf,
+    pid: String,
+}
+
+fn direct_env_with(
+    name: &str,
+    mode: Option<&str>,
+    make: impl Fn(FolderCell) -> Responder,
+) -> DirectEnv {
+    let cell: FolderCell = Arc::new(Mutex::new(None));
+    let fx = fixture_autonomous(make(cell.clone()));
+    let b = managed_broker(&fx, name);
+    let sock = b.socket_path().to_owned();
+    let folder = fx.work.join("managed");
+    let pid = open_managed_project(&fx, &sock, &folder);
+    *cell.lock().unwrap() = Some(std::fs::canonicalize(&folder).unwrap());
+    if let Some(m) = mode {
+        let v = ic::project_set_workspace(&sock, &pid, m).expect("workspace mode");
+        assert_eq!(v["project"]["workspaceMode"], m, "{v}");
+    }
+    DirectEnv {
+        fx,
+        b,
+        sock,
+        folder,
+        pid,
+    }
+}
+
+fn direct_env(name: &str, make: impl Fn(FolderCell) -> Responder) -> DirectEnv {
+    direct_env_with(name, Some("direct"), make)
+}
+
+fn tool_calls_done(body: &Value) -> usize {
+    body["input"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|i| i["type"] == "function_call_output")
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn folder_of(c: &FolderCell) -> PathBuf {
+    c.lock().unwrap().clone().expect("folder")
+}
+
+fn direct_intent(env: &DirectEnv, task: &str, key: &str) -> NexusIntentV1 {
+    code_intent_for(&env.pid, task, key, |_| {})
+}
+
+fn pre_store(env: &DirectEnv, run: &ic::IntentRun) -> PathBuf {
+    env.fx
+        .worktrees
+        .join(".direct")
+        .join(run.task_instance_id.clone().unwrap())
+}
+
+/// 1, 2, 3, 8(no apply), 10: a new file, an edit and a command all happen in the real folder; the run
+/// has no copy and nothing to apply; the project can be snapshotted afterwards, revision-consistent.
+#[test]
+fn direct_new_files_edits_and_commands_happen_in_the_real_folder_with_no_apply_step() {
+    if !sandbox_ready() {
+        return;
+    }
+    let seen = Arc::new(AtomicUsize::new(0));
+    let s2 = seen.clone();
+    let env = direct_env("direct-basic", move |cell| {
+        let s = s2.clone();
+        Arc::new(move |n, body| {
+            let resp = format!("resp_{n}");
+            let f = folder_of(&cell);
+            let call = |id: &str, name: &str, args: &str| {
+                Answer::Frames(call_frames(&resp, n, id, name, args))
+            };
+            match tool_calls_done(body) {
+                0 => call(
+                    "c0",
+                    "fs_write",
+                    r#"{"path":"docs/NEW.md","mode":"create","content":"hello from nexus\n"}"#,
+                ),
+                1 => {
+                    // the very next request: the file is ALREADY in the user's folder
+                    if std::fs::read_to_string(f.join("docs/NEW.md"))
+                        .ok()
+                        .as_deref()
+                        == Some("hello from nexus\n")
+                    {
+                        s.fetch_or(1, Ordering::SeqCst);
+                    }
+                    call("c1", "fs_read", r#"{"path":"src/lib.rs"}"#)
+                }
+                2 => call("c2", "fs_edit", &lib_edit()),
+                3 => {
+                    if std::fs::read_to_string(f.join("src/lib.rs"))
+                        .map(|t| t.contains("a + b"))
+                        .unwrap_or(false)
+                    {
+                        s.fetch_or(2, Ordering::SeqCst);
+                    }
+                    call(
+                        "c3",
+                        "proc_run",
+                        r#"{"program":"cargo","args":["test","--offline"]}"#,
+                    )
+                }
+                _ => Answer::Frames(text_frames(
+                    &resp,
+                    "Added docs/NEW.md and fixed add; tests pass.",
+                )),
+            }
+        })
+    });
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(
+            &env,
+            "Fix the failing add test and add a notes file.",
+            "direct-basic-0001",
+        ),
+        300,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.workspace_kind.as_deref(), Some("direct"), "{run:?}");
+    assert_eq!(run.workspace_relation.as_deref(), Some("direct"), "{run:?}");
+    // 1 + 2: immediately on disk, in the right real files
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        3,
+        "the edits were not visible right after each tool call"
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.folder.join("docs/NEW.md")).unwrap(),
+        "hello from nexus\n"
+    );
+    assert!(std::fs::read_to_string(env.folder.join("src/lib.rs"))
+        .unwrap()
+        .contains("a + b"));
+    // 3: the command ran over those same edits and passed
+    let cmd = run
+        .tool_activity
+        .iter()
+        .find(|a| a.tool == "proc_run")
+        .expect("command");
+    assert_eq!(
+        (cmd.exit_code, cmd.verification.as_deref()),
+        (Some(0), Some("pass")),
+        "{cmd:?}"
+    );
+    // no copy exists; there is nothing to apply; the evidence names exactly the touched files
+    assert!(
+        !env.fx
+            .worktrees
+            .join(run.task_instance_id.clone().unwrap())
+            .exists(),
+        "a direct run has no working copy"
+    );
+    let paths: Vec<(String, String)> = run
+        .changed_files
+        .iter()
+        .map(|f| (f.path.clone(), f.status.clone()))
+        .collect();
+    assert!(
+        paths.contains(&("docs/NEW.md".into(), "added".into())),
+        "{paths:?}"
+    );
+    assert!(
+        paths.contains(&("src/lib.rs".into(), "modified".into())),
+        "{paths:?}"
+    );
+    assert_eq!(paths.len(), 2, "only what Nexus touched: {paths:?}");
+    let d = ic::diff(&env.sock, &run.run_id).expect("diff");
+    assert!(
+        d.diff.contains("+hello from nexus") && d.diff.contains("-    a - b"),
+        "{}",
+        d.diff
+    );
+    let e = ic::project_adopt(&env.sock, &run.run_id).expect_err("nothing to apply");
+    assert!(format!("{e:?}").contains("directly"), "{e:?}");
+    assert!(run.auto_adopt.is_none(), "{run:?}");
+    // the originals Nexus kept (outside the folder) are exactly what was there before
+    let store = pre_store(&env, &run);
+    assert!(store.join("manifest.json").is_file());
+    assert!(!store.starts_with(&env.folder));
+    // 10: the project can still be snapshotted: independent, immutable, revision-consistent
+    let before = ic::project_list(&env.sock, true).unwrap();
+    let p = before["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["projectId"] == env.pid.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(p["changedSinceSnapshot"], true, "{p}");
+    let old_dir = {
+        let f = nexus_tools::registry::load(
+            env.fx.reg_dir.as_ref().unwrap(),
+            &nexus_tools::registry::Trust::default(),
+        )
+        .unwrap();
+        PathBuf::from(f.get(&env.pid).unwrap().source_path.clone())
+    };
+    ic::project_refresh(&env.sock, &env.pid).expect("refresh");
+    let f = nexus_tools::registry::load(
+        env.fx.reg_dir.as_ref().unwrap(),
+        &nexus_tools::registry::Trust::default(),
+    )
+    .unwrap();
+    let rec = f.get(&env.pid).unwrap();
+    assert_eq!(
+        rec.workspace_mode,
+        nexus_tools::registry::WorkspaceMode::Direct,
+        "a refresh keeps the choice"
+    );
+    let new_dir = PathBuf::from(rec.source_path.clone());
+    assert_ne!(new_dir, old_dir);
+    assert!(git_out(&new_dir, &["show", "HEAD:docs/NEW.md"]).contains("hello from nexus"));
+    assert!(git_out(&new_dir, &["show", "HEAD:src/lib.rs"]).contains("a + b"));
+    assert!(
+        git_out(&old_dir, &["show", "HEAD:src/lib.rs"]).contains("a - b"),
+        "the earlier snapshot is immutable"
+    );
+    let after = ic::project_list(&env.sock, true).unwrap();
+    let p = after["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["projectId"] == env.pid.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(p["changedSinceSnapshot"], false, "{p}");
+    env.b.shutdown();
+}
+
+/// 4: paths outside the folder, absolute paths, hidden names and symlinks inside the folder are all
+/// refused by the same descriptor-relative boundary; nothing outside is touched or disclosed.
+#[test]
+fn direct_refuses_escapes_symlinks_and_protected_names() {
+    if !sandbox_ready() {
+        return;
+    }
+    let env = direct_env("direct-escape", |_| {
+        script(
+            vec![
+                (
+                    "fs_write",
+                    r#"{"path":"../escaped.txt","mode":"create","content":"x"}"#.into(),
+                ),
+                (
+                    "fs_write",
+                    r#"{"path":"/tmp/nexus-direct-abs.txt","mode":"create","content":"x"}"#.into(),
+                ),
+                (
+                    "fs_write",
+                    r#"{"path":"link/planted.txt","mode":"create","content":"x"}"#.into(),
+                ),
+                ("fs_read", r#"{"path":"link/secret.txt"}"#.into()),
+                (
+                    "fs_write",
+                    r#"{"path":".git/config","mode":"create","content":"x"}"#.into(),
+                ),
+                (
+                    "fs_write",
+                    r#"{"path":".env","mode":"create","content":"KEY=1"}"#.into(),
+                ),
+            ],
+            "Could not write outside the project.",
+        )
+    });
+    let outside = env.fx.work.join("outside-direct");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), "TOP-SECRET-OUTSIDE").unwrap();
+    std::os::unix::fs::symlink(&outside, env.folder.join("link")).unwrap();
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(&env, "Write a few files.", "direct-escape-0001"),
+        240,
+    );
+    assert!(run.terminal, "{run:?}");
+    let executed: Vec<_> = run
+        .tool_activity
+        .iter()
+        .filter(|a| a.status == "executed")
+        .collect();
+    assert!(executed.is_empty(), "no escape may execute: {executed:?}");
+    assert!(!outside.join("planted.txt").exists());
+    assert!(!env.folder.parent().unwrap().join("escaped.txt").exists());
+    assert!(!Path::new("/tmp/nexus-direct-abs.txt").exists());
+    assert!(!env.folder.join(".env").exists());
+    assert_eq!(
+        std::fs::read_dir(&outside).unwrap().count(),
+        1,
+        "nothing was added outside"
+    );
+    let all = serde_json::to_string(&*env.fx.provider.bodies.lock().unwrap()).unwrap();
+    assert!(
+        !all.contains("TOP-SECRET-OUTSIDE"),
+        "an outside file reached the model"
+    );
+    env.b.shutdown();
+}
+
+/// 5: a file the user changed (before or during the run) is never silently overwritten; what is NOT the
+/// agent's work stays out of its evidence.
+#[test]
+fn direct_never_overwrites_user_changes_and_does_not_claim_them() {
+    if !sandbox_ready() {
+        return;
+    }
+    let env = direct_env("direct-dirty", |cell| {
+        Arc::new(move |n, body| {
+            let resp = format!("resp_{n}");
+            let f = folder_of(&cell);
+            let call = |id: &str, name: &str, args: String| {
+                Answer::Frames(call_frames(&resp, n, id, name, &args))
+            };
+            match tool_calls_done(body) {
+                0 => call("c0", "fs_read", r#"{"path":"docs/NOTES.md"}"#.into()),
+                1 => {
+                    // the user edits the file AFTER the model read it, before it writes (the broker fills the
+                    // expected pre-image from that read, exactly as it does for every model)
+                    std::fs::write(f.join("docs/NOTES.md"), "# Notes\n\nUSER IN-PROGRESS LINE\nUSER SECOND EDIT\n").unwrap();
+                    call(
+                        "c1",
+                        "fs_write",
+                        json!({"path":"docs/NOTES.md","mode":"replace","content":"model overwrite\n"}).to_string(),
+                    )
+                }
+                2 => call("c2", "fs_read", r#"{"path":"docs/NOTES.md"}"#.into()),
+                3 => call(
+                    "c3",
+                    "fs_edit",
+                    json!({"path":"docs/NOTES.md","edits":[{"oldText":"USER SECOND EDIT","newText":"USER SECOND EDIT (annotated by nexus)"}]}).to_string(),
+                ),
+                _ => Answer::Frames(text_frames(&resp, "Annotated the notes without touching your edits.")),
+            }
+        })
+    });
+    // dirty BEFORE the run as well: not in the project's snapshot
+    std::fs::write(
+        env.folder.join("docs/NOTES.md"),
+        "# Notes\n\nUSER IN-PROGRESS LINE\n",
+    )
+    .unwrap();
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(&env, "Annotate docs/NOTES.md.", "direct-dirty-0001"),
+        240,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let t = std::fs::read_to_string(env.folder.join("docs/NOTES.md")).unwrap();
+    assert!(
+        t.contains("USER IN-PROGRESS LINE") && t.contains("USER SECOND EDIT (annotated by nexus)"),
+        "{t}"
+    );
+    assert!(
+        !t.contains("model overwrite"),
+        "the user's file was overwritten: {t}"
+    );
+    let w = run
+        .tool_activity
+        .iter()
+        .find(|a| a.tool == "fs_write")
+        .expect("the overwrite attempt");
+    assert_ne!(w.status, "executed", "{w:?}");
+    // evidence: only the agent's own change is attributed to it
+    let d = ic::diff(&env.sock, &run.run_id).unwrap();
+    assert_eq!(d.files.len(), 1, "{:?}", d.files);
+    assert!(
+        d.diff.contains("+USER SECOND EDIT (annotated by nexus)"),
+        "{}",
+        d.diff
+    );
+    assert!(
+        !d.diff
+            .lines()
+            .any(|l| l.starts_with("+USER IN-PROGRESS") || l.starts_with("-USER IN-PROGRESS")),
+        "the user's own line was credited to the agent: {}",
+        d.diff
+    );
+    env.b.shutdown();
+}
+
+fn hold_after_edit(cell: FolderCell) -> Responder {
+    Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let _ = folder_of(&cell);
+        let call = |id: &str, name: &str, args: String| {
+            Answer::Frames(call_frames(&resp, n, id, name, &args))
+        };
+        if body.to_string().contains("One more look") {
+            return Answer::Frames(text_frames(&resp, "Nothing more to do."));
+        }
+        if body.to_string().contains("CONTINUED") {
+            return match tool_calls_done(body) {
+                0 => call("r0", "fs_read", r#"{"path":"src/lib.rs"}"#.into()),
+                _ => Answer::Frames(text_frames(&resp, "Checked; the task is done.")),
+            };
+        }
+        match tool_calls_done(body) {
+            0 => call("c0", "fs_read", r#"{"path":"src/lib.rs"}"#.into()),
+            1 => call("c1", "fs_edit", lib_edit()),
+            _ => Answer::Slow {
+                frames: text_frames(&resp, "thinking"),
+                gap_ms: 100,
+                hold_ms: 120_000,
+            },
+        }
+    })
+}
+
+fn wait_until(secs: u64, what: &str, f: impl Fn() -> bool) {
+    let end = Instant::now() + Duration::from_secs(secs);
+    while !f() {
+        assert!(Instant::now() < end, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(80));
+    }
+}
+
+/// 6 + 7: cancel keeps the applied edit; someone else changes that file; native resume continues in the same
+/// folder, tells the truth about it, never overwrites it; and while a run edits a folder a second writer is refused.
+#[test]
+fn direct_cancel_resume_and_concurrent_writers() {
+    if !sandbox_ready() {
+        return;
+    }
+    let env = direct_env("direct-resume", hold_after_edit);
+    let first = ic::submit(
+        &env.sock,
+        &direct_intent(&env, "Fix the failing add test.", "direct-resume-0001"),
+    )
+    .expect("submit")
+    .run;
+    assert_eq!(first.workspace_kind.as_deref(), Some("direct"));
+    wait_until(120, "the edit to reach the folder", || {
+        std::fs::read_to_string(env.folder.join("src/lib.rs"))
+            .map(|t| t.contains("a + b"))
+            .unwrap_or(false)
+    });
+    // 7: a second writer on the same folder is refused up front, with nothing created
+    let before = ic::list(&env.sock, 500).map(|v| v.len()).unwrap_or(0);
+    let busy = ic::submit(
+        &env.sock,
+        &direct_intent(&env, "Also change things.", "direct-resume-0002"),
+    )
+    .expect_err("a second writer");
+    assert!(
+        format!("{busy:?}").contains("editing this project's folder"),
+        "{busy:?}"
+    );
+    assert_eq!(
+        ic::list(&env.sock, 500).map(|v| v.len()).unwrap_or(0),
+        before,
+        "no run was created"
+    );
+    // ... a read-only conversation on the same project is fine (it writes nothing)
+    let ro = tsend(
+        &env.sock,
+        None,
+        &env.pid,
+        "EXPLAIN: explain the project, change nothing",
+        "review",
+        "continue",
+        "direct-resume-ro-01",
+    );
+    assert!(ro.is_ok(), "{ro:?}");
+    // 6: cancel; the applied edit stays
+    ic::cancel(&env.sock, &first.run_id).unwrap();
+    let first = wait_terminal(&env.sock, &first.run_id, 120);
+    assert_eq!(first.state, "cancelled", "{first:?}");
+    assert!(std::fs::read_to_string(env.folder.join("src/lib.rs"))
+        .unwrap()
+        .contains("a + b"));
+    let d1 = ic::diff(&env.sock, &first.run_id).unwrap();
+    assert!(
+        d1.files.iter().any(|f| f.path == "src/lib.rs"),
+        "{:?}",
+        d1.files
+    );
+    // the user edits the same file while the run is stopped
+    let mut t = std::fs::read_to_string(env.folder.join("src/lib.rs")).unwrap();
+    t.push_str("// my own note\n");
+    std::fs::write(env.folder.join("src/lib.rs"), &t).unwrap();
+    // the claim was released with the run: native resume is accepted and stays direct
+    let v = ic::resume(&env.sock, &first.run_id).expect("resume");
+    let second_id = v["run"]["runId"].as_str().unwrap().to_owned();
+    let second = wait_terminal(&env.sock, &second_id, 180);
+    assert_eq!(second.state, "completed", "{second:?}");
+    assert_eq!(second.workspace_kind.as_deref(), Some("direct"));
+    let note = second.workspace_note.clone().unwrap_or_default();
+    assert!(
+        note.contains("changed outside Nexus") && note.contains("src/lib.rs"),
+        "{note}"
+    );
+    assert!(
+        std::fs::read_to_string(env.folder.join("src/lib.rs"))
+            .unwrap()
+            .contains("// my own note"),
+        "the user's edit must survive the resume"
+    );
+    // the writer slot is free again
+    let third = submit_wait(
+        &env.sock,
+        &direct_intent(&env, "One more look.", "direct-resume-0003"),
+        180,
+    );
+    assert!(
+        third.terminal && third.error_code.as_deref() != Some("project-busy"),
+        "{third:?}"
+    );
+    env.b.shutdown();
+}
+
+/// 8: the isolated workspace still works exactly as before, and a conversation never silently crosses
+/// from one workspace kind to the other.
+#[test]
+fn isolated_mode_is_unchanged_and_mode_changes_never_migrate_a_task() {
+    if !sandbox_ready() {
+        return;
+    }
+    let env = direct_env_with("direct-iso", None, hold_after_edit);
+    // default for a project opened without a choice: isolated
+    let run = ic::submit(
+        &env.sock,
+        &direct_intent(&env, "Fix the failing add test.", "direct-iso-00001"),
+    )
+    .expect("submit")
+    .run;
+    assert_eq!(run.workspace_kind, None);
+    let task_copy = |r: &ic::IntentRun| env.fx.worktrees.join(r.task_instance_id.clone().unwrap());
+    wait_until(120, "the edit in the copy", || {
+        let r = ic::status(&env.sock, &run.run_id).unwrap();
+        r.task_instance_id.is_some()
+            && std::fs::read_to_string(task_copy(&r).join("src/lib.rs"))
+                .map(|t| t.contains("a + b"))
+                .unwrap_or(false)
+    });
+    assert!(
+        std::fs::read_to_string(env.folder.join("src/lib.rs"))
+            .unwrap()
+            .contains("a - b"),
+        "the isolated run left the user's folder untouched"
+    );
+    ic::cancel(&env.sock, &run.run_id).unwrap();
+    let run = wait_terminal(&env.sock, &run.run_id, 120);
+    assert!(
+        task_copy(&run).is_dir(),
+        "the isolated copy is retained for review"
+    );
+    // the choice changes: NEW tasks follow it, this stopped isolated task cannot be resumed across kinds
+    ic::project_set_workspace(&env.sock, &env.pid, "direct").unwrap();
+    let e = ic::resume(&env.sock, &run.run_id).expect_err("must not cross workspace kinds");
+    assert!(
+        format!("{e:?}").contains("workspace setting changed"),
+        "{e:?}"
+    );
+    // and the patch of the isolated run can still be applied (Apply is an isolated-mode feature)
+    let applied = ic::project_adopt(&env.sock, &run.run_id).expect("adopt");
+    assert!(
+        applied["applied"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "{applied}"
+    );
+    assert!(std::fs::read_to_string(env.folder.join("src/lib.rs"))
+        .unwrap()
+        .contains("a + b"));
+    env.b.shutdown();
+}

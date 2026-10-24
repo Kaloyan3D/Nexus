@@ -65,6 +65,37 @@ fn err(code: &'static str, m: impl Into<String>) -> RegError {
     }
 }
 
+/// Where a task's edits happen. `Isolated` (the default and the only mode before Direct Workspace): a
+/// throw-away clone of the project's snapshot, reviewed and applied afterwards. `Direct`: the project's real
+/// folder, edited in place under the same Kernel, approval and write-scope rules. A durable, project-level
+/// choice: changing it never alters a task that already started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceMode {
+    #[default]
+    Isolated,
+    Direct,
+}
+
+impl WorkspaceMode {
+    pub fn is_isolated(&self) -> bool {
+        matches!(self, WorkspaceMode::Isolated)
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkspaceMode::Isolated => "isolated",
+            WorkspaceMode::Direct => "direct",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "isolated" => Some(WorkspaceMode::Isolated),
+            "direct" => Some(WorkspaceMode::Direct),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProjectRecord {
@@ -104,6 +135,10 @@ pub struct ProjectRecord {
     /// folder by itself (still all-or-nothing, still refused if the folder changed meanwhile).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub trusted: bool,
+    /// Direct Workspace: where a NEW task's edits happen (see [`WorkspaceMode`]). Only a managed project
+    /// (one opened from the Desktop/CLI, with a known origin folder) can be `Direct`.
+    #[serde(default, skip_serializing_if = "WorkspaceMode::is_isolated")]
+    pub workspace_mode: WorkspaceMode,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -203,6 +238,21 @@ pub fn validate_record(p: &ProjectRecord) -> Result<(), RegError> {
             "bad-commit",
             "pinned commit must be 40 lowercase hex characters",
         ));
+    }
+    if p.workspace_mode == WorkspaceMode::Direct {
+        let origin_ok = p.managed
+            && p.origin.as_deref().is_some_and(|o| {
+                o.starts_with('/')
+                    && o != "/"
+                    && !o.contains('\0')
+                    && !o.split('/').any(|c| c == ".." || c == ".")
+            });
+        if !origin_ok {
+            return Err(err(
+                "bad-workspace-mode",
+                "only a project opened with a canonical origin folder can use the direct workspace",
+            ));
+        }
     }
     validate_write_allow(&p.write_allow)
 }
@@ -536,6 +586,7 @@ pub fn add_with(
         snapshot_origin_dirty: false,
         installs: false,
         trusted: false,
+        workspace_mode: WorkspaceMode::Isolated,
         created_at_ms: now_ms(),
         updated_at_ms: now_ms(),
     };
@@ -693,6 +744,8 @@ pub struct ManagedMeta {
     pub kinds: Vec<String>,
     pub fingerprint: String,
     pub origin_dirty: bool,
+    /// Where a NEW project's tasks edit. An existing project keeps its durable choice.
+    pub new_mode: WorkspaceMode,
 }
 
 /// Register (or re-register) a managed project whose source is a Nexus-owned snapshot
@@ -767,6 +820,7 @@ pub fn upsert_managed(
                 snapshot_origin_dirty: meta.origin_dirty,
                 installs: true,
                 trusted: false,
+                workspace_mode: meta.new_mode,
                 created_at_ms: now,
                 updated_at_ms: now,
             };
@@ -797,6 +851,30 @@ pub fn set_installs(
                     p.trusted = t;
                 }
                 p.updated_at_ms = now_ms();
+                out = Some(p.clone());
+                Ok(())
+            }
+            None => Err(err("not-found", format!("no opened project {id}"))),
+        }
+    })?;
+    out.ok_or_else(|| err("internal", "no record"))
+}
+
+/// Choose where NEW tasks of a managed project edit (the durable, project-level workspace choice). A task
+/// that already started keeps the workspace it started in.
+pub fn set_workspace_mode(
+    dir: &Path,
+    trust: &Trust,
+    id: &str,
+    mode: WorkspaceMode,
+) -> Result<ProjectRecord, RegError> {
+    let mut out: Option<ProjectRecord> = None;
+    mutate(dir, trust, |f| {
+        match f.projects.iter_mut().find(|p| p.id == id && p.managed) {
+            Some(p) => {
+                p.workspace_mode = mode;
+                p.updated_at_ms = now_ms();
+                // validated by `mutate` (a Direct project needs its origin folder)
                 out = Some(p.clone());
                 Ok(())
             }

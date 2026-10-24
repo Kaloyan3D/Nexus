@@ -406,3 +406,37 @@ fn deferred_verification_needs_an_explicit_commit_and_the_file_follows_the_direc
     let (o, n) = reg::repin_with(&rd, &t(), "a", &"1".repeat(40), true).unwrap();
     assert_eq!((o, n), (head, "1".repeat(40)));
 }
+
+#[test]
+fn workspace_mode_is_a_durable_project_choice_only_for_opened_projects() {
+    use nexus_tools::registry::WorkspaceMode;
+    let d = tempfile::tempdir().unwrap();
+    let (r, _) = repo(d.path(), "p1");
+    let rd = d.path().join("reg");
+    // an operator-registered (non-managed) project is isolated and cannot be switched
+    reg::add(&rd, &t(), "op", &r, None, vec![]).unwrap();
+    let f = reg::load(&rd, &t()).unwrap();
+    assert_eq!(f.get("op").unwrap().workspace_mode, WorkspaceMode::Isolated);
+    assert_eq!(
+        reg::set_workspace_mode(&rd, &t(), "op", WorkspaceMode::Direct)
+            .unwrap_err()
+            .code,
+        "not-found"
+    );
+    // a record written before the field existed loads as isolated, and an isolated record does not even write the field
+    let raw = std::fs::read_to_string(rd.join("projects.json")).unwrap();
+    assert!(!raw.contains("workspaceMode"), "{raw}");
+    // a direct record without an origin folder is refused when it is written
+    let mut bad = reg::load(&rd, &t()).unwrap().get("op").unwrap().clone();
+    bad.workspace_mode = WorkspaceMode::Direct;
+    assert_eq!(reg::validate_record(&bad).unwrap_err().code, "bad-workspace-mode");
+    bad.managed = true;
+    bad.origin = Some("/home/user/../x".into());
+    assert_eq!(reg::validate_record(&bad).unwrap_err().code, "bad-workspace-mode");
+    bad.origin = Some("/home/user/proj".into());
+    assert!(reg::validate_record(&bad).is_ok());
+    // the strings round-trip
+    assert_eq!(WorkspaceMode::parse("direct"), Some(WorkspaceMode::Direct));
+    assert_eq!(WorkspaceMode::parse("Direct"), None);
+    assert_eq!(WorkspaceMode::Isolated.as_str(), "isolated");
+}

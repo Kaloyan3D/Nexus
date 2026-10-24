@@ -50,6 +50,9 @@ pub struct Broker {
     /// EM-04C2 S1: the Governor worker allowance, derived from `cfg.max_active` (<= 16).
     pub(crate) worker_slots: Arc<crate::engine::worker_bridge::WorkerSlots>,
     pub(crate) cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Direct Workspace: project id -> the run that is editing that project's real folder right now.
+    /// One writer per folder; claimed under the store lock at submission, released when the run ends.
+    pub(crate) direct_claims: Mutex<HashMap<String, String>>,
     pub(crate) bridge_lock: Mutex<()>,
     pub shutdown: AtomicBool,
     conns: AtomicUsize,
@@ -63,6 +66,27 @@ pub struct Broker {
 }
 
 type CmdResult = Result<Value, (&'static str, String)>;
+
+/// Direct Workspace: the exclusive right to edit one project's real folder. Dropped (and so released)
+/// whenever the run ends, however it ends.
+pub(crate) struct DirectClaim {
+    b: Arc<Broker>,
+    project: String,
+    run: String,
+}
+
+impl Drop for DirectClaim {
+    fn drop(&mut self) {
+        let mut g = self
+            .b
+            .direct_claims
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if g.get(&self.project) == Some(&self.run) {
+            g.remove(&self.project);
+        }
+    }
+}
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -559,6 +583,7 @@ impl Broker {
             ));
         }
         let run_id;
+        let mut direct_claim: Option<DirectClaim> = None;
         let flag = Arc::new(AtomicBool::new(false));
         {
             let _g = self.store.lock();
@@ -590,6 +615,43 @@ impl Broker {
                 return Err(("busy", "the broker is at its concurrent-run limit".into()));
             }
             run_id = format!("run_{}", rand_hex(16));
+            // Direct Workspace: where this run's edits will happen is decided NOW, from the project's
+            // durable choice, and recorded on the run; a later change of the choice never moves a run.
+            let direct_project = self.direct_project_for(&intent);
+            let read_only = link.as_ref().is_some_and(|l| l.read_only);
+            // a conversation (or a continuation) keeps the workspace kind it started with
+            for prior in [
+                continuation,
+                link.as_ref().and_then(|l| l.seed_from.as_deref()),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if let Some(p) = self.store.load(prior) {
+                    let was_direct = p.run.workspace_kind.as_deref() == Some("direct");
+                    if was_direct != direct_project.is_some() {
+                        return Err((
+                            "workspace-mode-changed",
+                            "this project's workspace setting changed after this conversation started (direct vs isolated). Start a new conversation to use the new setting; nothing was changed.".into(),
+                        ));
+                    }
+                }
+            }
+            if let Some(pid) = direct_project.as_ref().filter(|_| !read_only) {
+                let mut g = self.direct_claims.lock().unwrap_or_else(|p| p.into_inner());
+                if g.contains_key(pid) {
+                    return Err((
+                        "project-busy",
+                        "another task is editing this project's folder right now. Wait for it to finish or stop it, then send again; nothing was changed.".into(),
+                    ));
+                }
+                g.insert(pid.clone(), run_id.clone());
+                direct_claim = Some(DirectClaim {
+                    b: Arc::clone(self),
+                    project: pid.clone(),
+                    run: run_id.clone(),
+                });
+            }
             let run = IntentRun {
                 run_id: run_id.clone(),
                 request_id: intent.request_id.clone(),
@@ -606,6 +668,7 @@ impl Broker {
                 continuation_of: continuation.map(str::to_owned),
                 thread_id: link.as_ref().map(|l| l.thread_id.clone()),
                 read_only: link.as_ref().is_some_and(|l| l.read_only),
+                workspace_kind: direct_project.as_ref().map(|_| "direct".to_owned()),
                 seed_from: link.as_ref().and_then(|l| l.seed_from.clone()),
                 workspace_relation: link.as_ref().and_then(|l| l.relation_hint.clone()),
                 provider_id: Some(resolved.provider_id.clone()),
@@ -653,7 +716,7 @@ impl Broker {
             .insert(run_id.clone(), flag.clone());
         let b = Arc::clone(self);
         let rid = run_id.clone();
-        let h = std::thread::spawn(move || pipeline::execute(b, rid, intent, flag));
+        let h = std::thread::spawn(move || pipeline::execute(b, rid, intent, flag, direct_claim));
         self.workers
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -664,6 +727,21 @@ impl Broker {
             .ok_or(("internal", "run vanished".to_owned()))?;
         let (run, _) = self.view(&rec);
         Ok(json!({ "run": run, "replay": false }))
+    }
+
+    /// Direct Workspace: the project id when this intent's edits go to the project's real folder
+    /// (an interactive coding run on a project whose durable choice is `direct`).
+    fn direct_project_for(&self, intent: &NexusIntentV1) -> Option<String> {
+        if !self.cfg.interactive || intent.intent_type != nexus_contracts::intent::INTENT_REPO_CODE
+        {
+            return None;
+        }
+        let ws = intent.workspace_id.as_deref()?;
+        let (dir, trust) = self.cfg.project_registry.as_ref()?;
+        let f = nexus_tools::registry::load(dir, trust).ok()?;
+        let p = f.get(ws)?;
+        (p.managed && p.workspace_mode == nexus_tools::registry::WorkspaceMode::Direct)
+            .then(|| p.id.clone())
     }
 
     /// Why a run cannot be continued (`None` = it can). The ONE rule set behind both `intent-resume`
@@ -1009,6 +1087,12 @@ impl Broker {
             "this broker cannot adopt patches".to_owned(),
         ))?;
         let rec = self.owned(client, run_id)?;
+        if rec.run.workspace_kind.as_deref() == Some("direct") {
+            return Err((
+                "not-adoptable",
+                "this run edited your project folder directly; there is no patch to apply".into(),
+            ));
+        }
         if rec.run.intent_type != nexus_contracts::intent::INTENT_REPO_CODE || !rec.run.terminal {
             return Err(("not-ready", "only a finished coding run has a patch".into()));
         }
@@ -1079,7 +1163,31 @@ impl Broker {
         ))?;
         let s = |k: &str| params.get(k).and_then(|v| v.as_str()).unwrap_or("");
         match cmd {
-            "project-open" => crate::projects::open(&env, s("path")),
+            "project-open" => {
+                let mode = match params.get("workspace") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(m)) => {
+                        Some(nexus_tools::registry::WorkspaceMode::parse(m).ok_or((
+                            "bad-request",
+                            "workspace must be \"direct\" or \"isolated\"".to_owned(),
+                        ))?)
+                    }
+                    Some(_) => {
+                        return Err((
+                            "bad-request",
+                            "workspace must be \"direct\" or \"isolated\"".to_owned(),
+                        ))
+                    }
+                };
+                crate::projects::open_with(&env, s("path"), mode)
+            }
+            "project-workspace" => {
+                let mode = nexus_tools::registry::WorkspaceMode::parse(s("workspace")).ok_or((
+                    "bad-request",
+                    "workspace must be \"direct\" or \"isolated\"".to_owned(),
+                ))?;
+                crate::projects::set_workspace(&env, s("projectId"), mode)
+            }
             "project-list" => crate::projects::list(
                 &env,
                 params
@@ -1320,7 +1428,7 @@ impl Broker {
             "intent-engine" => self.engine_summary(client, run_id),
             "intent-resumable" => self.resumable(client, run_id),
             "project-open" | "project-list" | "project-forget" | "project-refresh"
-            | "project-policy" => self.project_verb(cmd, params),
+            | "project-workspace" | "project-policy" => self.project_verb(cmd, params),
             "project-adopt" => self.project_adopt(client, run_id),
             "provider-consent-status" => self.consent_status(),
             "provider-consent-grant" => self.consent_grant(client, params),
@@ -1735,6 +1843,7 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
             cfg_max_active,
         )),
         cancel_flags: Mutex::new(HashMap::new()),
+        direct_claims: Mutex::new(HashMap::new()),
         bridge_lock: Mutex::new(()),
         shutdown: AtomicBool::new(false),
         conns: AtomicUsize::new(0),

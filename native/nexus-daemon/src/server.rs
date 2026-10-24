@@ -1298,13 +1298,19 @@ fn evaluate_autonomous_policy(
     if !nexus_tools::gitwt::valid_task_id(task) {
         return Err("invalid task instance".into());
     }
-    let copy = root.join(task);
+    let direct = direct_meta(daemon, task).is_some();
+    let copy = task_workspace_dir(daemon, task).unwrap_or_else(|| root.join(task));
     match std::fs::symlink_metadata(&copy) {
         Ok(m) if m.file_type().is_dir() => {}
+        _ if direct => return Err("the task's project folder is not available".into()),
         _ => return Err("the task has no isolated working copy".into()),
     }
     if sha256_hex_str(&copy.to_string_lossy()) != sub.workspace_root_digest {
-        return Err("the operation's workspace is not this task's isolated copy".into());
+        return Err(if direct {
+            "the operation's workspace is not this task's project folder".into()
+        } else {
+            "the operation's workspace is not this task's isolated copy".into()
+        });
     }
     let meta: serde_json::Value = std::fs::read_to_string(wt_meta_path(root, task))
         .ok()
@@ -1976,6 +1982,8 @@ struct DaemonWriteHooks<'a> {
     daemon: &'a Daemon,
     verified: &'a nexus_kernel::VerifiedToolGrant,
     last_seq: i64,
+    /// Direct Workspace: the task's pre-image store (None = an isolated copy).
+    direct: Option<nexus_tools::direct::Store>,
 }
 
 impl nexus_tools::WriteHooks for DaemonWriteHooks<'_> {
@@ -1984,6 +1992,20 @@ impl nexus_tools::WriteHooks for DaemonWriteHooks<'_> {
         phase: &str,
         payload: serde_json::Value,
     ) -> Result<(), nexus_tools::ToolError> {
+        let verified_post = (self.direct.is_some() && phase == nexus_tools::write::PH_VERIFIED)
+            .then(|| {
+                (
+                    payload
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                    payload
+                        .get("postSha256")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                )
+            })
+            .and_then(|(p, post)| p.map(|p| (p, post)));
         let mut k = self.daemon.kernel.lock().map_err(|_| {
             nexus_tools::ToolError::new(
                 nexus_tools::ToolErrorCode::IoError,
@@ -1999,6 +2021,12 @@ impl nexus_tools::WriteHooks for DaemonWriteHooks<'_> {
                 )
             })?;
         self.last_seq = e.seq;
+        drop(k);
+        // Direct Workspace: remember what Nexus last verified for this path, so a later change made by
+        // someone else is recognised as theirs. (Best effort: a stale record only over-reports.)
+        if let (Some(store), Some((path, post))) = (&self.direct, verified_post) {
+            let _ = store.record_post(&path, post.as_deref());
+        }
         Ok(())
     }
     fn fence(&mut self) -> Result<(), nexus_tools::ToolError> {
@@ -2014,6 +2042,26 @@ impl nexus_tools::WriteHooks for DaemonWriteHooks<'_> {
                 format!("authority revoked ({})", e.code.as_str()),
             )
         })
+    }
+    fn preimage(
+        &mut self,
+        path: &str,
+        pre: Option<&[u8]>,
+        mode: Option<u32>,
+    ) -> Result<(), nexus_tools::ToolError> {
+        match &self.direct {
+            None => Ok(()),
+            // no edit or deletion in the user's folder happens without its original being kept
+            Some(store) => store.record_pre(path, pre, mode).map_err(|e| {
+                nexus_tools::ToolError::new(
+                    nexus_tools::ToolErrorCode::IoError,
+                    format!(
+                        "the original could not be kept ({}); nothing was changed",
+                        e.message
+                    ),
+                )
+            }),
+        }
     }
 }
 
@@ -2126,7 +2174,7 @@ fn get_u64(
 }
 
 fn do_workspace_bind(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
-    if let Err(r) = only_keys(&req.params, &["commandId", "root"], &req.id) {
+    if let Err(r) = only_keys(&req.params, &["commandId", "root", "directTask"], &req.id) {
         return r;
     }
     let command_id = match get_string(&req.params, "commandId") {
@@ -2137,24 +2185,71 @@ fn do_workspace_bind(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         Ok(v) => v,
         Err(r) => return with_id(r, &req.id),
     };
+    // Direct Workspace: the folder of a task the daemon itself opened as direct (from its identity
+    // record, which came from the trusted registry) is an allowed base for exactly that binding.
+    // The caller names the task, never an allowed path; the root it asks for must be that folder.
+    let mut bases = daemon.workspace_bases.clone();
+    let mut direct_task: Option<String> = None;
+    if let Some(v) = req.params.get("directTask") {
+        let Some(task) = v.as_str() else {
+            return fail(
+                &req.id,
+                codes::BAD_REQUEST,
+                "bad-request: 'directTask' must be a string",
+            );
+        };
+        let ok_root = direct_meta(daemon, task)
+            .and_then(|m| m.get("root").and_then(|r| r.as_str()).map(str::to_owned))
+            .filter(|r| {
+                std::fs::canonicalize(&root).ok().as_deref() == Some(std::path::Path::new(r))
+            });
+        match ok_root {
+            Some(r) => {
+                bases.push(std::path::PathBuf::from(r));
+                direct_task = Some(task.to_owned());
+            }
+            None => {
+                daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                return fail(
+                    &req.id,
+                    "scope-refused",
+                    "that is not the folder of an open direct workspace",
+                );
+            }
+        }
+    }
     let mut kernel = match lock_kernel(daemon, &req.id) {
         Ok(k) => k,
         Err(r) => return r,
     };
-    match kernel.bind_workspace(&command_id, &root, &daemon.workspace_bases) {
-        // The root path itself is deliberately not echoed back.
-        Ok(b) => ok(
-            &req.id,
-            serde_json::json!({
-                "binding": {
-                    "commandId": b.command_id,
-                    "taskInstanceId": b.task_instance_id,
-                    "attemptId": b.attempt_id,
-                    "leaseEpoch": b.lease_epoch,
-                    "rootDigest": b.root_digest,
+    match kernel.bind_workspace(&command_id, &root, &bases) {
+        Ok(b) => {
+            if let Some(t) = &direct_task {
+                if &b.task_instance_id != t {
+                    // a direct folder bound to another task's command: undo the authority
+                    let _ = kernel.revoke_tools(&command_id, "direct-workspace-task-mismatch");
+                    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                    return fail(
+                        &req.id,
+                        "scope-refused",
+                        "the direct workspace belongs to another task",
+                    );
                 }
-            }),
-        ),
+            }
+            // The root path itself is deliberately not echoed back.
+            ok(
+                &req.id,
+                serde_json::json!({
+                    "binding": {
+                        "commandId": b.command_id,
+                        "taskInstanceId": b.task_instance_id,
+                        "attemptId": b.attempt_id,
+                        "leaseEpoch": b.lease_epoch,
+                        "rootDigest": b.root_digest,
+                    }
+                }),
+            )
+        }
         Err(e) => kernel_fail(daemon, &req.id, &e),
     }
 }
@@ -2220,6 +2315,35 @@ fn project_env_for(daemon: &Daemon, task: &str) -> Option<nexus_tools::process::
 
 fn wt_meta_path(root: &std::path::Path, task: &str) -> std::path::PathBuf {
     root.join(".meta").join(format!("{task}.json"))
+}
+
+/// Direct Workspace: the identity record of a task that edits the project's REAL folder
+/// (`kind == "direct"`), written by `direct-open` from the trusted registry and never by a caller.
+fn direct_meta(daemon: &Daemon, task: &str) -> Option<serde_json::Value> {
+    let root = daemon.worktree_root.as_ref()?;
+    if !nexus_tools::gitwt::valid_task_id(task) {
+        return None;
+    }
+    let meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(wt_meta_path(root, task)).ok()?).ok()?;
+    (meta.get("kind").and_then(|v| v.as_str()) == Some("direct")).then_some(meta)
+}
+
+/// The pre-image store and root folder of a direct task.
+fn direct_store(daemon: &Daemon, task: &str) -> Option<(nexus_tools::direct::Store, String)> {
+    let meta = direct_meta(daemon, task)?;
+    let root = meta.get("root")?.as_str()?.to_owned();
+    let base = daemon.worktree_root.as_ref()?;
+    Some((nexus_tools::direct::Store::at(base, task), root))
+}
+
+/// The directory a task's tools edit: its isolated copy, or the real folder of a direct task.
+fn task_workspace_dir(daemon: &Daemon, task: &str) -> Option<std::path::PathBuf> {
+    if let Some(m) = direct_meta(daemon, task) {
+        return m.get("root")?.as_str().map(std::path::PathBuf::from);
+    }
+    let root = daemon.worktree_root.as_ref()?;
+    nexus_tools::gitwt::valid_task_id(task).then(|| root.join(task))
 }
 
 fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
@@ -2418,6 +2542,147 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     )
 }
 
+/// Direct Workspace: open a task whose edits go to the project's REAL folder.
+///
+/// The caller names a project id (never a path); the folder, the write scope and the install
+/// policy come from the trusted registry record, and only for a project whose durable workspace
+/// choice is `direct`. The daemon re-validates the folder itself, writes the task's identity
+/// record (`kind: direct`) outside the folder and creates its pre-image store. Nothing in the
+/// folder is created, changed or removed here.
+fn do_direct_open(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    if let Err(r) = only_keys(
+        &req.params,
+        &["taskInstanceId", "projectId", "fromTaskInstanceId"],
+        &req.id,
+    ) {
+        return r;
+    }
+    let root = match wt_root(daemon, &req.id) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let task = match get_string(&req.params, "taskInstanceId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    if !nexus_tools::gitwt::valid_task_id(&task) {
+        return fail(
+            &req.id,
+            "bad-request",
+            "bad-request: invalid task instance id",
+        );
+    }
+    let Some((dir, trust)) = &daemon.project_registry else {
+        return fail(
+            &req.id,
+            "scope-refused",
+            "this daemon has no project registry; a direct workspace needs one",
+        );
+    };
+    let pid = match get_string(&req.params, "projectId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let rec = match nexus_tools::registry::resolve(dir, trust, &pid) {
+        Ok(r) => r,
+        Err(e) => {
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            return fail(&req.id, "scope-refused", format!("project refused: {e}"));
+        }
+    };
+    if rec.workspace_mode != nexus_tools::registry::WorkspaceMode::Direct || !rec.managed {
+        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+        return fail(
+            &req.id,
+            "scope-refused",
+            "this project is not set to edit its folder directly",
+        );
+    }
+    let Some(origin) = rec.origin.clone() else {
+        return fail(&req.id, "scope-refused", "the project has no folder");
+    };
+    let mut forbidden = vec![root.clone(), daemon.run_root.clone(), dir.clone()];
+    if let Some(e) = &daemon.project_envs {
+        forbidden.push(e.clone());
+    }
+    let canon = match nexus_tools::direct::validate_root(&origin, &forbidden) {
+        Ok(c) => c,
+        Err(e) => {
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            return fail(&req.id, e.code, e.message);
+        }
+    };
+    let canon_s = canon.to_string_lossy().into_owned();
+    // an earlier task of the same conversation/continuation: what Nexus wrote there and someone
+    // else changed since is reported (never blocked: every write is pre-image guarded anyway)
+    let mut external: Vec<String> = Vec::new();
+    let mut from_known = false;
+    if let Some(from) = req
+        .params
+        .get("fromTaskInstanceId")
+        .and_then(|v| v.as_str())
+    {
+        if nexus_tools::gitwt::valid_task_id(from) {
+            if let Some((fs, froot)) = direct_store(daemon, from) {
+                from_known = true;
+                if froot == canon_s {
+                    external =
+                        nexus_tools::direct::external_changes(&fs, &canon_s).unwrap_or_default();
+                    external.truncate(50);
+                }
+            }
+        }
+    }
+    let meta = serde_json::json!({
+        "taskInstanceId": task,
+        "kind": "direct",
+        "root": canon_s,
+        "projectId": pid,
+        // Frozen at creation: a later registry change never alters a started task.
+        "writeAllow": rec.write_allow,
+        "installs": rec.installs,
+        "createdAtMs": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    });
+    let wrote = (|| -> std::io::Result<()> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(root.join(".meta"))?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(wt_meta_path(root, &task))?;
+        std::io::Write::write_all(&mut f, meta.to_string().as_bytes())?;
+        f.sync_all()
+    })();
+    if wrote.is_err() {
+        return fail(
+            &req.id,
+            "internal",
+            "cannot record the direct workspace identity",
+        );
+    }
+    if let Err(e) = nexus_tools::direct::Store::create(root, &task, &canon_s) {
+        let _ = std::fs::remove_file(wt_meta_path(root, &task));
+        return fail(&req.id, e.code, e.message);
+    }
+    ok(
+        &req.id,
+        serde_json::json!({
+            "direct": {
+                "path": canon_s,
+                "externalChanges": external,
+                "fromRecorded": from_known,
+            }
+        }),
+    )
+}
+
 fn wt_read_meta(root: &std::path::Path, task: &str) -> Option<(String, String)> {
     let raw = std::fs::read_to_string(wt_meta_path(root, task)).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -2469,6 +2734,17 @@ fn do_worktree_seed(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     let (Some(m_to), Some(m_from)) = (meta(&to), meta(&from)) else {
         return fail(&req.id, "not-found", "both working copies must exist");
     };
+    if [&m_to, &m_from]
+        .iter()
+        .any(|m| m.get("kind").and_then(|v| v.as_str()) == Some("direct"))
+    {
+        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+        return fail(
+            &req.id,
+            "scope-refused",
+            "a direct workspace has no copy to seed: it edits the folder itself",
+        );
+    }
     // same project: otherwise the carried files would not belong here
     if m_to.get("projectId") != m_from.get("projectId")
         || m_to.get("projectId").is_none_or(|v| v.is_null())
@@ -2553,6 +2829,26 @@ fn do_worktree_diff(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "bad-request",
             "bad-request: invalid task instance id",
         );
+    }
+    if let Some((store, droot)) = direct_store(daemon, &task) {
+        return match nexus_tools::direct::diff(&store, &droot) {
+            Ok(d) => ok(
+                &req.id,
+                serde_json::json!({
+                    "diff": {
+                        // the baseline is "the files as Nexus first found them", not a commit
+                        "baseCommit": "direct",
+                        "files": d.files,
+                        "filesTruncated": d.files_truncated,
+                        "diff": d.diff,
+                        "diffDigest": d.diff_digest,
+                        "diffTruncated": d.diff_truncated,
+                    },
+                    "direct": true,
+                }),
+            ),
+            Err(e) => fail(&req.id, e.code, e.message),
+        };
     }
     let Some((commit, repo_id)) = wt_read_meta(root, &task) else {
         return fail(
@@ -2646,6 +2942,13 @@ fn do_worktree_stat(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "bad-request: invalid task instance id",
         );
     }
+    if direct_meta(daemon, &task).is_some() {
+        // there is no copy to retain, review-and-apply or remove: the folder IS the workspace
+        return ok(
+            &req.id,
+            serde_json::json!({ "retained": false, "direct": true }),
+        );
+    }
     match std::fs::symlink_metadata(root.join(&task)) {
         Ok(m) if m.file_type().is_dir() => ok(
             &req.id,
@@ -2709,6 +3012,16 @@ fn do_worktree_remove(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             }
             Err(r) => return r,
         }
+    }
+    if let Some((store, _)) = direct_store(daemon, &task) {
+        // a direct task has no copy: only its record and its kept originals go. The project's folder is
+        // never a removal target (this branch never builds a path from the task id into the project).
+        let _ = store.remove();
+        let _ = std::fs::remove_file(wt_meta_path(root, &task));
+        return ok(
+            &req.id,
+            serde_json::json!({ "removed": true, "direct": true }),
+        );
     }
     match nexus_tools::gitwt::remove(root, &task) {
         Ok(()) => {
@@ -3104,6 +3417,7 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             daemon,
             verified: started.verified(),
             last_seq: 0,
+            direct: direct_store(daemon, &call.prepared().request().task_instance_id).map(|d| d.0),
         };
         return match nexus_tools::run_write_call(&call, &cancel, &mut hooks) {
             Ok(result) => ok(
@@ -3513,6 +3827,7 @@ pub fn dispatch(
             "approval-request" => do_approval_request(daemon, req),
             "approval-revoke" => do_approval_revoke(daemon, req),
             "worktree-create" => do_worktree_create(daemon, req),
+            "direct-open" => do_direct_open(daemon, req),
             "worktree-diff" => do_worktree_diff(daemon, req),
             "worktree-seed" => do_worktree_seed(daemon, req),
             "worktree-remove" => do_worktree_remove(daemon, req),

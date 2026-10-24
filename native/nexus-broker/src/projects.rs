@@ -5,7 +5,7 @@
 //! is only read, and what the model sees is a Nexus-owned snapshot repository whose
 //! commit the registry pins. Projects are restored from the registry on restart.
 
-use nexus_tools::registry::{self, ManagedMeta, ProjectRecord};
+use nexus_tools::registry::{self, ManagedMeta, ProjectRecord, WorkspaceMode};
 use nexus_tools::snapshot::{self, SnapshotLimits};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -143,6 +143,7 @@ pub fn view(rec: &ProjectRecord, changed: Option<bool>) -> Value {
         "writeAllow": rec.write_allow,
         "installs": rec.installs,
         "trusted": rec.trusted,
+        "workspaceMode": rec.workspace_mode.as_str(),
         "snapshotAtMs": rec.updated_at_ms,
         "originDirty": rec.snapshot_origin_dirty,
         "changedSinceSnapshot": changed,
@@ -164,6 +165,17 @@ fn kind_view(id: &str) -> Value {
 
 /// Open (or re-open / refresh) the folder as a managed project.
 pub fn open(env: &Env<'_>, raw: &str) -> Result<Value, (&'static str, String)> {
+    open_with(env, raw, None)
+}
+
+/// `workspace`: where a NEW project's tasks edit (`None` = isolated, the long-standing default). An
+/// existing project keeps its durable choice whatever is passed here: re-opening or refreshing never
+/// changes what the agent may do to the folder.
+pub fn open_with(
+    env: &Env<'_>,
+    raw: &str,
+    workspace: Option<WorkspaceMode>,
+) -> Result<Value, (&'static str, String)> {
     let origin = validate_origin(env, raw)?;
     let id = project_id(&origin);
     let kinds = nexus_tools::detect::detect(&origin);
@@ -191,6 +203,7 @@ pub fn open(env: &Env<'_>, raw: &str) -> Result<Value, (&'static str, String)> {
         kinds: kinds.iter().map(|k| k.id.to_owned()).collect(),
         fingerprint: info.fingerprint.clone(),
         origin_dirty: info.origin_dirty.unwrap_or(false),
+        new_mode: workspace.unwrap_or_default(),
     };
     let rec = match registry::upsert_managed(
         env.registry_dir,
@@ -273,6 +286,17 @@ pub fn set_policy(
     trusted: Option<bool>,
 ) -> Result<Value, (&'static str, String)> {
     let rec = registry::set_installs(env.registry_dir, env.trust, id, installs, trusted)
+        .map_err(|e| ("not-found", e.to_string()))?;
+    Ok(json!({ "project": view(&rec, None) }))
+}
+
+/// Change where NEW tasks of an opened project edit. A task that already started keeps its workspace.
+pub fn set_workspace(
+    env: &Env<'_>,
+    id: &str,
+    mode: WorkspaceMode,
+) -> Result<Value, (&'static str, String)> {
+    let rec = registry::set_workspace_mode(env.registry_dir, env.trust, id, mode)
         .map_err(|e| ("not-found", e.to_string()))?;
     Ok(json!({ "project": view(&rec, None) }))
 }

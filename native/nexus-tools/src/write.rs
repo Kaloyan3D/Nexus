@@ -43,6 +43,18 @@ pub trait WriteHooks {
     /// Deterministic synchronization point (tests inject external
     /// activity here). Production hooks leave the default no-op.
     fn at(&mut self, _point: &str) {}
+    /// Direct Workspace: called with the EXACT pre-image this operation is planned over (`None` = the file does
+    /// not exist) after every refusal check passed and before the intent is journaled. A hook that keeps the
+    /// pre-image durably (the daemon does, for direct tasks) makes the change reviewable and recoverable; an
+    /// `Err` refuses the operation with nothing mutated. The default keeps nothing (isolated copies).
+    fn preimage(
+        &mut self,
+        _path: &str,
+        _pre: Option<&[u8]>,
+        _mode: Option<u32>,
+    ) -> Result<(), ToolError> {
+        Ok(())
+    }
 }
 
 pub fn sha256_bytes_hex(b: &[u8]) -> String {
@@ -222,6 +234,11 @@ pub fn run_write(
 
     if let Op::Write(a) = &op {
         if a.mode == "delete" {
+            if pre_sha.is_some() && pre_sha == a.expected_sha256 {
+                if let Err(e) = hooks.preimage(path_s, pre_bytes.as_deref(), pre_mode) {
+                    refuse_none!(e.code, e.message);
+                }
+            }
             return run_delete(
                 ws,
                 &dir,
@@ -327,6 +344,9 @@ pub fn run_write(
         refuse_none!(ToolErrorCode::Cancelled, "cancelled before any mutation");
     }
     if let Err(e) = hooks.fence() {
+        refuse_none!(e.code, e.message);
+    }
+    if let Err(e) = hooks.preimage(path_s, pre_bytes.as_deref(), pre_mode) {
         refuse_none!(e.code, e.message);
     }
     hooks.journal(

@@ -192,6 +192,10 @@ pub struct IntentRun {
     /// A7.1: plain-language detail of that relation (files carried, already applied, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_note: Option<String>,
+    /// Direct Workspace: `"direct"` when this run edits the project's real folder in place (absent =
+    /// an isolated working copy, as before). Fixed at submission; never changes during a run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_kind: Option<String>,
     /// A7.1: the earlier run whose working copy this run started from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed_from: Option<String>,
@@ -1000,6 +1004,35 @@ pub fn project_open(socket: &Path, path: &str) -> Result<serde_json::Value, Clie
         "project-open",
         serde_json::json!({ "path": path }),
         180_000,
+    )
+}
+
+/// Open a folder as a project, choosing where its tasks edit: `"direct"` (the real folder) or
+/// `"isolated"` (a throw-away copy). `None` keeps the broker's default (isolated for a new project).
+pub fn project_open_with(
+    socket: &Path,
+    path: &str,
+    workspace: Option<&str>,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "project-open",
+        serde_json::json!({ "path": path, "workspace": workspace }),
+        180_000,
+    )
+}
+
+/// The durable, project-level workspace choice for NEW tasks (`"direct"` | `"isolated"`).
+pub fn project_set_workspace(
+    socket: &Path,
+    project_id: &str,
+    workspace: &str,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "project-workspace",
+        serde_json::json!({ "projectId": project_id, "workspace": workspace }),
+        30_000,
     )
 }
 

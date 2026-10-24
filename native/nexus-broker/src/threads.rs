@@ -1104,6 +1104,7 @@ fn render(
                 s.push_str(&format!("Files that differ from the project's original: {}.\n", shown.join(", ")));
             }
         }
+        "direct" => s.push_str("This run edits the user's project folder directly. Changes made by earlier runs of this conversation are already in those files (unless the user changed them since); read a file again before editing it.\n"),
         "fresh-by-choice" => s.push_str("The user chose to start from the project's CURRENT files: changes from earlier runs are NOT in this copy.\n"),
         _ => s.push_str("It is a fresh copy of the project's current files (no earlier changes are in it).\n"),
     }

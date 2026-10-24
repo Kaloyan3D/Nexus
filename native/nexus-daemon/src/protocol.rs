@@ -272,6 +272,7 @@ pub fn is_privileged(cmd: &str) -> bool {
             | "approval-request"
             | "approval-revoke"
             | "worktree-create"
+            | "direct-open"
             | "worktree-diff"
             | "worktree-seed"
             | "worktree-remove"
