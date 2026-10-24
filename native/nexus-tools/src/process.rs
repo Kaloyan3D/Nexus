@@ -881,10 +881,17 @@ pub fn scratch_effects(src: &Path, staged: &crate::stage::StageReport) -> Scratc
     let mut entries = 0usize;
     let mut truncated = false;
     let mut stack: Vec<(PathBuf, String, u32)> = vec![(src.to_path_buf(), String::new(), 0)];
-    let skip_name = |n: &str| {
-        n.starts_with('.')
-            || policy.classify_name(n) != crate::workspace::NameClass::Allowed
+    // Hidden names the project itself had (`.gitignore`, `.eslintrc`) are compared like any file; hidden
+    // things that only appeared (`.pytest_cache`, `.cargo`, `.npm`) are toolchain artifacts and not reported.
+    let skip_name = |n: &str, rel: &str, is_dir: bool| {
+        policy.classify_name(n) != crate::workspace::NameClass::Allowed
             || policy.is_ignored_dir(n)
+            || (n.starts_with('.')
+                && !(if is_dir {
+                    before_dirs.contains(rel)
+                } else {
+                    before.contains_key(rel)
+                }))
     };
     while let Some((dir, rel, depth)) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else {
@@ -901,9 +908,6 @@ pub fn scratch_effects(src: &Path, staged: &crate::stage::StageReport) -> Scratc
             let Ok(name) = e.file_name().into_string() else {
                 continue;
             };
-            if skip_name(&name) {
-                continue;
-            }
             let Ok(md) = std::fs::symlink_metadata(e.path()) else {
                 continue;
             };
@@ -913,6 +917,9 @@ pub fn scratch_effects(src: &Path, staged: &crate::stage::StageReport) -> Scratc
                 format!("{rel}/{name}")
             };
             let ft = md.file_type();
+            if skip_name(&name, &rel_path, ft.is_dir()) {
+                continue;
+            }
             if ft.is_dir() {
                 if depth >= 32 {
                     truncated = true;
@@ -1406,6 +1413,77 @@ pub fn observe_process_for_recovery(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn staged(
+        files: &[(&str, &str)],
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        crate::stage::StageReport,
+    ) {
+        let proj = tempfile::tempdir().unwrap();
+        for (p, c) in files {
+            let f = proj.path().join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, c).unwrap();
+        }
+        let root = std::fs::canonicalize(proj.path()).unwrap();
+        let ws = crate::workspace::Workspace::open_root(
+            root.to_str().unwrap(),
+            crate::workspace::WorkspacePolicy::default(),
+        )
+        .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let dest = out.path().join("src");
+        let rep = crate::stage::stage_workspace(
+            &ws,
+            &dest,
+            &crate::stage::StageLimits::default(),
+            &mut || Ok(()),
+            &mut |_| {},
+        )
+        .unwrap();
+        (proj, out, rep)
+    }
+
+    #[test]
+    fn scratch_effects_report_exactly_what_a_command_changed_and_nothing_it_did_not() {
+        let (_p, out, rep) = staged(&[
+            (".gitignore", "target\n"),
+            ("a.txt", "one\n"),
+            ("sub/b.txt", "two\n"),
+            ("Cargo.lock", "v1\n"),
+        ]);
+        let src = out.path().join("src");
+        // a command that changes nothing reports nothing (a staged hidden file is not "deleted")
+        assert!(
+            scratch_effects(&src, &rep).is_empty(),
+            "{:?}",
+            scratch_effects(&src, &rep)
+        );
+        // artifacts of toolchains are not project files
+        std::fs::create_dir_all(src.join("target/debug")).unwrap();
+        std::fs::write(src.join("target/debug/x"), "x").unwrap();
+        std::fs::create_dir_all(src.join(".pytest_cache")).unwrap();
+        std::fs::write(src.join(".pytest_cache/y"), "y").unwrap();
+        std::fs::create_dir_all(src.join("node_modules/p")).unwrap();
+        std::fs::write(src.join("node_modules/p/i.js"), "i").unwrap();
+        assert!(scratch_effects(&src, &rep).is_empty());
+        // real effects
+        std::fs::create_dir_all(src.join("tests")).unwrap();
+        std::fs::write(src.join("tests/add.test.js"), "t").unwrap();
+        std::fs::write(src.join("a.txt"), "ONE\n").unwrap();
+        std::fs::remove_file(src.join("sub/b.txt")).unwrap();
+        std::fs::write(src.join("Cargo.lock"), "v2\n").unwrap(); // regenerated: listed, but not "unsaved"
+        std::os::unix::fs::symlink("/etc", src.join("evil")).unwrap(); // never followed, never reported
+        let e = scratch_effects(&src, &rep);
+        assert_eq!(e.created, ["tests/add.test.js"]);
+        assert_eq!(e.modified, ["Cargo.lock", "a.txt"]);
+        assert_eq!(e.deleted, ["sub/b.txt"]);
+        assert_eq!(e.created_dirs, ["tests"]);
+        assert_eq!(e.unsaved_files, 3, "the lock file does not count");
+        assert!(!e.truncated);
+    }
 
     #[test]
     fn truncated_capture_never_persists_a_cut_secret_prefix() {
