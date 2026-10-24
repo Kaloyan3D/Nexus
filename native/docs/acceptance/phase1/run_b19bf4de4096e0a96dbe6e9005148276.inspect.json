@@ -1,0 +1,157 @@
+{
+  "run": {
+    "runId": "run_b19bf4de4096e0a96dbe6e9005148276",
+    "state": "completed",
+    "errorCode": null,
+    "turns": 17,
+    "toolCalls": 16,
+    "edits": 2,
+    "tests": 2,
+    "recoveries": 0,
+    "compactions": 0,
+    "tokensIn": 93458,
+    "tokensOut": 1798,
+    "continuationOf": null,
+    "continuedAs": null,
+    "provider": "opencode-go-native",
+    "remoteModel": "muse-spark-1.3-contributor",
+    "route": "opencode-go-native/muse-adaptive"
+  },
+  "bound": {
+    "engineId": "nexus-adaptive-v1",
+    "modeId": "engineering-v2-adaptive",
+    "toolCatalogDigest": "5f7d19e2e0cce856e0f1dd1cf245a7906dfdcabdf64b9f02413d6f039f424510",
+    "engineStateStarted": true
+  },
+  "coding": null,
+  "engineState": {
+    "engineId": "nexus-adaptive-v1",
+    "modeId": "engineering-v2-adaptive",
+    "defaultEffort": "low",
+    "revision": 39,
+    "lineage": null,
+    "attempts": [
+      {
+        "ordinal": 1,
+        "effort": "medium",
+        "state": "answered"
+      },
+      {
+        "ordinal": 2,
+        "effort": "medium",
+        "state": "answered"
+      },
+      {
+        "ordinal": 3,
+        "effort": "medium",
+        "state": "answered"
+      },
+      {
+        "ordinal": 4,
+        "effort": "medium",
+        "state": "answered"
+      },
+      {
+        "ordinal": 5,
+        "effort": "medium",
+        "state": "answered"
+      },
+      {
+        "ordinal": 6,
+        "effort": "medium",
+        "state": "answered"
+      },
+      {
+        "ordinal": 7,
+        "effort": "medium",
+        "state": "answered"
+      },
+      {
+        "ordinal": 8,
+        "effort": "medium",
+        "state": "answered"
+      },
+      {
+        "ordinal": 9,
+        "effort": "medium",
+        "state": "answered"
+      },
+      {
+        "ordinal": 10,
+        "effort": "high",
+        "state": "answered"
+      },
+      {
+        "ordinal": 11,
+        "effort": "high",
+        "state": "answered"
+      },
+      {
+        "ordinal": 12,
+        "effort": "high",
+        "state": "answered"
+      },
+      {
+        "ordinal": 13,
+        "effort": "high",
+        "state": "answered"
+      },
+      {
+        "ordinal": 14,
+        "effort": "medium",
+        "state": "answered"
+      },
+      {
+        "ordinal": 15,
+        "effort": "medium",
+        "state": "answered"
+      },
+      {
+        "ordinal": 16,
+        "effort": "medium",
+        "state": "answered"
+      },
+      {
+        "ordinal": 17,
+        "effort": "medium",
+        "state": "answered"
+      }
+    ],
+    "distinctEfforts": [
+      "medium",
+      "high"
+    ],
+    "transitions": [
+      {
+        "kind": "effort-selected",
+        "attempt": 1,
+        "effort": "medium",
+        "detail": "limiter:up"
+      },
+      {
+        "kind": "effort-selected",
+        "attempt": 10,
+        "effort": "high",
+        "detail": "limiter:up"
+      },
+      {
+        "kind": "effort-selected",
+        "attempt": 14,
+        "effort": "medium",
+        "detail": "limiter:down-confirmed"
+      }
+    ],
+    "ended": [
+      "completed"
+    ],
+    "limiter": {
+      "droppedBefore": true,
+      "lastAttempt": 17,
+      "lastDownAttempt": 14,
+      "pendingDown": null,
+      "rearmTokensUsed": 0,
+      "trustedSinceDown": false
+    },
+    "history": 8
+  }
+}
