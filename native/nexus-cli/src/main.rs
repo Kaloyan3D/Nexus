@@ -953,7 +953,7 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
                     // Phase 2: a NEW conversation with no explicit selection uses the operator's engine
                     // choice (default Nexus Adaptive); an existing conversation keeps its own engine
                     if thread.is_none() && model.is_none() && route.is_none() && mode_flag.is_none() {
-                        if let Some(sel) = engine_selection(args, &sock).map_err(|e| nexus_client::ClientError::usage(e))? {
+                        if let Some(sel) = engine_selection(args, &sock).map_err(nexus_client::ClientError::usage)? {
                             // provider/remote only: a logical id may contain "/"; the exact route id disambiguates
                             model = Some(format!("{}/{}", sel.provider_id, sel.remote_model_id));
                             route = sel.route_id;
