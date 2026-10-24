@@ -35,6 +35,9 @@ pub struct PreparedToolRequest {
     root_digest: String,
     /// A5.5: set only for a model-proposed read call (see `with_ai_origin`).
     ai_origin: Option<String>,
+    /// Filesystem scope of a process call, taken from the Kernel-verified process scope by
+    /// `prepare_process` (always `Scratch` for every other tool).
+    fs_scope: crate::exec_contract::FsScope,
 }
 
 impl PreparedToolRequest {
@@ -45,6 +48,10 @@ impl PreparedToolRequest {
     pub fn with_ai_origin(mut self, origin: String) -> Self {
         self.ai_origin = Some(origin);
         self
+    }
+
+    pub fn fs_scope(&self) -> crate::exec_contract::FsScope {
+        self.fs_scope
     }
 
     pub fn request(&self) -> &ToolRequestV1 {
@@ -127,7 +134,23 @@ pub fn prepare_process(
     if let ToolArgs::Proc(a) = &args {
         policy.resolve(a)?;
     }
+    let fs_scope = match crate::exec_contract::FsScope::parse(&scope.fs_scope) {
+        Some(f) if f.is_implemented() => f,
+        _ => {
+            return Err(ToolError::new(
+                ToolErrorCode::SandboxUnavailable,
+                "the process scope names a filesystem scope this build does not provide; nothing was run",
+            ))
+        }
+    };
+    if fs_scope != crate::exec_contract::FsScope::Scratch && !policy.is_workbench() {
+        return Err(ToolError::new(
+            ToolErrorCode::CommandRefused,
+            "in-place execution is only available with the workbench command policy",
+        ));
+    }
     let mut p = prepare_inner(request, binding, None, true)?;
+    p.fs_scope = fs_scope;
     // Clamp BEFORE the budget digest is sealed.
     p.budgets.proc_wall_ms = p.budgets.proc_wall_ms.min(scope.max_wall_ms).max(1);
     p.budget_digest = p.budgets.digest();
@@ -236,6 +259,7 @@ fn prepare_inner(
         budget_digest: budgets.digest(),
         root_digest,
         ai_origin: None,
+        fs_scope: crate::exec_contract::FsScope::Scratch,
         request,
         tool,
         args,
@@ -618,6 +642,7 @@ pub fn run_process_call(
         policy,
         budgets: &p.budgets,
         scope_max_wall_ms,
+        fs_scope: p.fs_scope,
     };
     crate::process::run_process(&ctx, args, cancel, hooks)
 }

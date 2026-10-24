@@ -120,6 +120,14 @@ pub struct SandboxSpec {
     /// writable so build tools can write their output next to the sources. Whatever is
     /// written there is discarded with the execution (there is no write-back).
     pub src_writable: bool,
+    /// In-place mode (`FsScope::Workspace`): the supervisor's descriptor of the VERIFIED directory that
+    /// is bound read-write at `/work/src` with `--bind-fd`. The descriptor is the object, so a path that is
+    /// renamed or replaced after the check cannot change what is mounted. `src_dir` is ignored then.
+    pub pinned_root: Option<std::os::fd::RawFd>,
+    /// Sub-paths of the pinned root that are read-only or hidden (only entries that exist: masking an
+    /// absent name would create it in the project). Read-only entries carry a descriptor opened
+    /// descriptor-relatively with `O_NOFOLLOW`.
+    pub protect: Vec<Protect>,
     /// Share the host network namespace (dependency installation only). Everything else
     /// runs in a fresh, empty network namespace.
     pub net: bool,
@@ -127,6 +135,19 @@ pub struct SandboxSpec {
     /// Host cgroup directory under which the execution cgroup is created.
     pub cgroup_base: PathBuf,
 }
+
+/// One protected sub-path of a pinned root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Protect {
+    /// Root-relative path, normalized, no `..`.
+    pub rel: String,
+    pub mode: crate::exec_contract::ProtectMode,
+    /// Required for `ReadOnly`: an `O_PATH` descriptor of the exact entry.
+    pub fd: Option<std::os::fd::RawFd>,
+}
+
+/// First descriptor number inside the supervisor's child for in-place mounts (3 is the seccomp program).
+const FIRST_MOUNT_FD: i32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
@@ -413,16 +434,44 @@ pub fn bwrap_argv(spec: &SandboxSpec) -> Vec<String> {
     a.push(l.scratch_bytes.to_string());
     a.push("--tmpfs".to_owned());
     a.push("/work/out".to_owned());
-    a.push(
-        if spec.src_writable {
-            "--bind"
-        } else {
-            "--ro-bind"
+    if spec.pinned_root.is_some() {
+        // In-place: the verified directory object itself (descriptor slot FIRST_MOUNT_FD).
+        a.push("--bind-fd".to_owned());
+        a.push(FIRST_MOUNT_FD.to_string());
+        a.push("/work/src".to_owned());
+        let mut slot = FIRST_MOUNT_FD + 1;
+        for p in &spec.protect {
+            let dest = format!("/work/src/{}", p.rel);
+            match p.mode {
+                crate::exec_contract::ProtectMode::ReadOnly => {
+                    a.push("--ro-bind-fd".to_owned());
+                    a.push(slot.to_string());
+                    a.push(dest);
+                    slot += 1;
+                }
+                crate::exec_contract::ProtectMode::HideFile => {
+                    a.push("--ro-bind".to_owned());
+                    a.push("/dev/null".to_owned());
+                    a.push(dest);
+                }
+                crate::exec_contract::ProtectMode::HideDir => {
+                    a.push("--tmpfs".to_owned());
+                    a.push(dest);
+                }
+            }
         }
-        .to_owned(),
-    );
-    a.push(spec.src_dir.to_string_lossy().into_owned());
-    a.push("/work/src".to_owned());
+    } else {
+        a.push(
+            if spec.src_writable {
+                "--bind"
+            } else {
+                "--ro-bind"
+            }
+            .to_owned(),
+        );
+        a.push(spec.src_dir.to_string_lossy().into_owned());
+        a.push("/work/src".to_owned());
+    }
     if spec.net {
         // name resolution and TLS trust only; no other host configuration
         for f in [
@@ -633,6 +682,8 @@ pub fn preflight() -> SandboxCapabilities {
             ro_binds: vec![],
             rw_binds: vec![],
             src_writable: false,
+            pinned_root: None,
+            protect: Vec::new(),
             net: false,
             limits: SandboxLimits {
                 wall_ms: 10_000,
@@ -827,9 +878,39 @@ pub fn run_sandboxed(
     if !spec.program.starts_with('/') {
         return Err(refuse("program must be an absolute in-sandbox path"));
     }
-    if !spec.src_dir.is_dir() {
+    if spec.pinned_root.is_none() && !spec.src_dir.is_dir() {
         return Err(refuse("staged snapshot directory is missing"));
     }
+    // Descriptors handed to bubblewrap: the pinned root, then each read-only protected entry. They are
+    // duplicated above any number the child setup uses, then placed in fixed slots before exec.
+    let mut mount_srcs: Vec<std::os::fd::RawFd> = Vec::new();
+    if let Some(r) = spec.pinned_root {
+        mount_srcs.push(r);
+        for p in &spec.protect {
+            if p.mode == crate::exec_contract::ProtectMode::ReadOnly {
+                match p.fd {
+                    Some(f) => mount_srcs.push(f),
+                    None => return Err(refuse("a read-only protected entry has no descriptor")),
+                }
+            }
+        }
+    } else if !spec.protect.is_empty() {
+        return Err(refuse("protected entries need a pinned root"));
+    }
+    let mut mount_dups: Vec<std::os::fd::OwnedFd> = Vec::new();
+    for f in &mount_srcs {
+        let d = unsafe { libc::fcntl(*f, libc::F_DUPFD, 100) };
+        if d < 0 {
+            return Err(refuse("cannot duplicate a mount descriptor"));
+        }
+        mount_dups.push(unsafe { std::os::fd::OwnedFd::from_raw_fd(d) });
+    }
+    let mount_slots: Vec<(i32, i32)> = mount_dups
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.as_raw_fd(), FIRST_MOUNT_FD + i as i32))
+        .collect();
+    let first_free_fd: u32 = (FIRST_MOUNT_FD as u32) + mount_slots.len() as u32;
     let kernel_mode = match spec.limits.backend {
         ResourceBackend::Polling => false,
         ResourceBackend::KernelScope => {
@@ -920,7 +1001,12 @@ pub fn run_sandboxed(
                     return Err(std::io::Error::last_os_error());
                 }
             }
-            libc::syscall(libc::SYS_close_range, 4u32, u32::MAX, 0u32);
+            for (src, slot) in &mount_slots {
+                if libc::dup2(*src, *slot) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            libc::syscall(libc::SYS_close_range, first_free_fd, u32::MAX, 0u32);
             libc::prctl(
                 libc::PR_SET_PDEATHSIG,
                 libc::SIGKILL as libc::c_ulong,
@@ -942,6 +1028,7 @@ pub fn run_sandboxed(
         }
     };
     drop(filter);
+    drop(mount_dups);
     let pid = child.id();
     let out_h = child
         .stdout

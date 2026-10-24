@@ -1008,7 +1008,17 @@ pub(crate) fn run(
             .and_then(|v| v.as_str())
             .map(str::to_owned);
         created_worktree = true;
-        b.update(run_id, |r| r.worktree_commit = commit);
+        // True In-Place Execution: the daemon that made the copy says whether its commands write it in
+        // place; the harness text below is chosen from that fact (it grants nothing).
+        let exec_scope = wt
+            .pointer("/worktree/execFsScope")
+            .and_then(|v| v.as_str())
+            .filter(|s| *s == "workspace")
+            .map(str::to_owned);
+        b.update(run_id, |r| {
+            r.worktree_commit = commit;
+            r.exec_scope = exec_scope;
+        });
         // A continuation of an interrupted task, or a follow-up in a conversation, starts from
         // the work already done (A7.1: even when the project's files moved on in between).
         let me = b.store.load(run_id).map(|r| r.run);
@@ -2135,7 +2145,11 @@ fn turn_loop(
             .store
             .load(ctx.run_id)
             .is_some_and(|r| r.run.workspace_kind.as_deref() == Some("direct"));
-        let pre = crate::guidance::code_preamble_body_for(&kinds, true, direct_run);
+        let in_place_cmds = !direct_run
+            && b.store
+                .load(ctx.run_id)
+                .is_some_and(|r| r.run.exec_scope.as_deref() == Some("workspace"));
+        let pre = crate::guidance::code_preamble_body_with(&kinds, true, direct_run, in_place_cmds);
         let ro_note = if ro {
             "[READ-ONLY REQUEST] The user asked for no changes. fs_edit and fs_write are refused by the runtime for this request; use fs_list, fs_search and fs_read (and proc_run only to inspect or verify) and answer in text.\n\n"
         } else {

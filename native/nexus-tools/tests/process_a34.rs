@@ -218,6 +218,7 @@ fn read_and_write_grants_cannot_start_a_process_and_scopes_do_not_cross() {
         max_wall_ms: 60_000,
         approver_id: "attacker".into(),
         independent: true,
+        fs_scope: "scratch".into(),
     };
     if std_policy
         .resolve(&nexus_tools::ProcessArgs {

@@ -133,6 +133,10 @@ pub struct Daemon {
     /// A3.4: sandboxed process execution is refused unless enabled AND the
     /// sandbox preflight succeeded at startup (fail closed).
     pub process_enabled: bool,
+    /// True In-Place Execution milestone 1: the filesystem scope that NEW Isolated task copies are
+    /// created with (`scratch` = the A3.4 behaviour). It is frozen into each copy's identity record at
+    /// creation; nothing a caller or model sends can change the scope of an existing task.
+    pub isolated_exec_scope: nexus_tools::exec_contract::FsScope,
     pub command_policy: nexus_tools::process::CommandPolicy,
     pub run_root: std::path::PathBuf,
     pub sandbox_caps: Option<nexus_tools::sandbox::SandboxCapabilities>,
@@ -1055,11 +1059,21 @@ fn do_process_scope_approve(
             "workspaceRootDigest",
             "maxWallMs",
             "approverId",
+            "fsScope",
         ],
         &req.id,
     ) {
         return r;
     }
+    let fs_scope = match req.params.get("fsScope") {
+        None | Some(serde_json::Value::Null) => nexus_kernel::FS_SCOPE_SCRATCH.to_owned(),
+        Some(serde_json::Value::String(v))
+            if v == nexus_kernel::FS_SCOPE_SCRATCH || v == nexus_kernel::FS_SCOPE_WORKSPACE =>
+        {
+            v.clone()
+        }
+        Some(_) => return refuse("scope-refused", "fsScope must be 'scratch' or 'workspace'"),
+    };
     let command_id = match get_string(&req.params, "commandId") {
         Ok(v) => v,
         Err(r) => return with_id(r, &req.id),
@@ -1082,12 +1096,13 @@ fn do_process_scope_approve(
         Ok(k) => k,
         Err(r) => return r,
     };
-    match kernel.bind_process_scope(
+    match kernel.bind_process_scope_with_fs(
         &command_id,
         &approver_id,
         daemon.approver_independent,
         &digest,
         max,
+        &fs_scope,
     ) {
         Ok(b) => {
             log_line("approver", &req.id, "ok", &req.cmd);
@@ -1270,15 +1285,21 @@ impl Default for AutonomousConfig {
     }
 }
 
-fn autonomous_policy_digest(c: &AutonomousConfig) -> String {
-    sha256_hex_str(&nexus_contracts::canonical_json(&serde_json::json!({
+fn autonomous_policy_digest(c: &AutonomousConfig, in_place_task_copies: bool) -> String {
+    let mut v = serde_json::json!({
         "id": AUTONOMOUS_POLICY_ID,
         "maxEditsPerTask": c.max_edits_per_task,
         "maxCommandsPerTask": c.max_commands_per_task,
         "maxWriteBytes": c.max_write_bytes,
         "protectedNames": nexus_tools::protect::PROTECTED_NAMES,
         "tools": ["fs.write", "fs.edit", "proc.run"],
-    })))
+    });
+    if in_place_task_copies {
+        // The policy additionally approves commands that write a task's own disposable copy in
+        // place. The digest differs ONLY then, so a scratch-only daemon's digest is unchanged.
+        v["execFsScopes"] = serde_json::json!(["scratch", "workspace"]);
+    }
+    sha256_hex_str(&nexus_contracts::canonical_json(&v))
 }
 
 /// Evaluate `autonomous-workspace/v1` for one pending approval. Inputs are facts
@@ -1386,11 +1407,26 @@ fn evaluate_autonomous_policy(
                 Some("install") => installs_ok,
                 _ => false,
             };
+            // The scope the operation declares must be the scope of THIS task (the daemon's own record),
+            // and its write-back description must be the truthful one for that scope.
+            let task_scope = task_fs_scope(daemon, task);
+            let declared = sub
+                .operation
+                .get("execFsScope")
+                .and_then(|v| v.as_str())
+                .unwrap_or("scratch");
+            if declared != task_scope.as_str() {
+                return Err("the operation's filesystem scope is not this task's".into());
+            }
+            let expected_write_back = match task_scope {
+                nexus_tools::exec_contract::FsScope::Workspace => "in-place-task-copy",
+                _ => "none",
+            };
             if !net_ok
                 || sandbox
                     .and_then(|s| s.get("writeBack"))
                     .and_then(|v| v.as_str())
-                    != Some("none")
+                    != Some(expected_write_back)
             {
                 return Err(if net == Some("install") && !installs_ok {
                     "installing dependencies is not enabled for this project".into()
@@ -1403,11 +1439,15 @@ fn evaluate_autonomous_policy(
                 .get("argvDigest")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            Ok(serde_json::json!({
+            let mut facts = serde_json::json!({
                 "copy": task, "project": project, "tool": sub.tool_id,
                 "program": sub.operation.get("program"), "argvDigest": argv_digest,
                 "commandsSoFar": commands, "maxCommands": cfg.max_commands_per_task,
-            }))
+            });
+            if task_scope != nexus_tools::exec_contract::FsScope::Scratch {
+                facts["fsScope"] = task_scope.as_str().into();
+            }
+            Ok(facts)
         }
         _ => Err("this tool class is outside the automated workspace policy".into()),
     }
@@ -1585,6 +1625,9 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             max_wall_ms: ceiling.proc_wall_ms,
             approver_id: "preview".to_owned(),
             independent: false,
+            fs_scope: task_fs_scope(daemon, &request.task_instance_id)
+                .as_str()
+                .to_owned(),
         };
         let prepared = match nexus_tools::prepare_process(
             request.clone(),
@@ -1603,26 +1646,38 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             Err(e) => return tool_fail(daemon, &req.id, &e),
         };
         let b = prepared.budgets();
+        let in_place = prepared.fs_scope() == nexus_tools::exec_contract::FsScope::Workspace;
+        let mut op = serde_json::json!({
+            "kind": "proc.run",
+            "program": resolved.name,
+            "resolvedProgram": resolved.program,
+            "argv": resolved.argv,
+            "argvDigest": resolved.argv_digest(),
+            "cwd": resolved.cwd,
+            "sandbox": {
+                "backend": "bubblewrap+seccomp+cgroup-v2",
+                "network": if resolved.install { "install" } else { "none" },
+                "workspace": if daemon.command_policy.is_workbench() { "throw-away copy of the snapshot" } else { "read-only snapshot" },
+                "writeBack": "none",
+                "env": "allowlist", "shell": resolved.name == "sh",
+            },
+            "filesystemEffects": "none to the workspace: runs on a staged read-only snapshot; scratch output is discarded",
+        });
+        if in_place {
+            // Truthful and sealed: the reviewed operation (and so the Kernel scope bound from it) says the
+            // command writes the task's own working copy in place. `execFsScope` is the single field the
+            // Kernel reads; it is absent for every scratch operation, which stay byte-identical.
+            op["execFsScope"] = "workspace".into();
+            op["sandbox"]["workspace"] =
+                "the task's disposable working copy, read-write in place".into();
+            op["sandbox"]["writeBack"] = "in-place-task-copy".into();
+            op["filesystemEffects"] = "files the command creates, changes or deletes persist in this task's working copy (not the user's folder); .git is read-only; secret-shaped top-level entries are hidden".into();
+        }
         sub_common(
             "process",
             &prepared,
             Vec::new(),
-            serde_json::json!({
-                "kind": "proc.run",
-                "program": resolved.name,
-                "resolvedProgram": resolved.program,
-                "argv": resolved.argv,
-                "argvDigest": resolved.argv_digest(),
-                "cwd": resolved.cwd,
-                "sandbox": {
-                    "backend": "bubblewrap+seccomp+cgroup-v2",
-                    "network": if resolved.install { "install" } else { "none" },
-                    "workspace": if daemon.command_policy.is_workbench() { "throw-away copy of the snapshot" } else { "read-only snapshot" },
-                    "writeBack": "none",
-                    "env": "allowlist", "shell": resolved.name == "sh",
-                },
-                "filesystemEffects": "none to the workspace: runs on a staged read-only snapshot; scratch output is discarded",
-            }),
+            op,
             serde_json::json!({
                 "kind": "argv", "digest": resolved.argv_digest(),
                 "text": resolved.display(),
@@ -1653,7 +1708,11 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                     Ok(facts) => {
                         let d = nexus_kernel::PolicyDecision {
                             policy_id: AUTONOMOUS_POLICY_ID.to_owned(),
-                            policy_digest: autonomous_policy_digest(cfg),
+                            policy_digest: autonomous_policy_digest(
+                                cfg,
+                                daemon.isolated_exec_scope
+                                    == nexus_tools::exec_contract::FsScope::Workspace,
+                            ),
                             request_digest: row.request_digest.clone(),
                             scope_cap: if sub.scope == "process" {
                                 ceiling.proc_wall_ms
@@ -2524,6 +2583,9 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         // Frozen at creation: a later registry change never alters a started task.
         "writeAllow": project_write_allow,
         "installs": project_installs,
+        // Frozen at creation, from the operator's daemon setting (never from the caller): the
+        // filesystem scope commands in this task run under. Absent in a record = scratch.
+        "execFsScope": daemon.isolated_exec_scope.as_str(),
         "createdAtMs": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -2551,6 +2613,33 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "cannot record the working copy identity",
         );
     }
+    // In-place commands may create dependency and tool-cache directories in the copy. They are not part
+    // of the reviewable change (the same names the stager and the effect report already treat as
+    // toolchain artifacts), so the copy's own git excludes them - written here, outside the sandbox
+    // (which sees `.git` read-only).
+    if daemon.isolated_exec_scope == nexus_tools::exec_contract::FsScope::Workspace {
+        let ex = info.path.join(".git").join("info");
+        let res = std::fs::create_dir_all(&ex).and_then(|_| {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(ex.join("exclude"))?;
+            f.write_all(
+                b"\n# Nexus: toolchain artifacts of in-place commands are not part of the change\nnode_modules/\n.venv/\nvenv/\n__pycache__/\n.pytest_cache/\n.mypy_cache/\n.ruff_cache/\n.next/\n.cache/\n",
+            )?;
+            f.sync_all()
+        });
+        if res.is_err() {
+            let _ = std::fs::remove_file(wt_meta_path(root, &task));
+            let _ = nexus_tools::gitwt::remove(root, &task);
+            return fail(
+                &req.id,
+                "internal",
+                "cannot prepare the working copy for in-place commands",
+            );
+        }
+    }
     ok(
         &req.id,
         serde_json::json!({
@@ -2558,9 +2647,37 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                 "path": info.path.to_string_lossy(),
                 "sourceCommit": info.source.commit,
                 "sourceRepoId": info.source.repo_id,
+                "execFsScope": daemon.isolated_exec_scope.as_str(),
             }
         }),
     )
+}
+
+/// The filesystem scope commands of a task run under: read ONLY from the daemon's own identity
+/// record of the task (written at creation from the operator's setting), never from a request. A
+/// direct task, a missing record or an unknown name never yields `workspace`.
+fn task_fs_scope(daemon: &Daemon, task: &str) -> nexus_tools::exec_contract::FsScope {
+    use nexus_tools::exec_contract::FsScope;
+    let Some(root) = daemon.worktree_root.as_ref() else {
+        return FsScope::Scratch;
+    };
+    if !nexus_tools::gitwt::valid_task_id(task) {
+        return FsScope::Scratch;
+    }
+    let meta: Option<serde_json::Value> = std::fs::read_to_string(wt_meta_path(root, task))
+        .ok()
+        .and_then(|r| serde_json::from_str(&r).ok());
+    let Some(meta) = meta else {
+        return FsScope::Scratch;
+    };
+    if meta.get("kind").and_then(|v| v.as_str()) == Some("direct") {
+        // Direct + in-place execution is a later stage; it is never inferred.
+        return FsScope::Scratch;
+    }
+    match meta.get("execFsScope").and_then(|v| v.as_str()) {
+        Some("workspace") => FsScope::Workspace,
+        _ => FsScope::Scratch,
+    }
 }
 
 /// Direct Workspace: open a task whose edits go to the project's REAL folder.
@@ -3330,6 +3447,16 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                 }
                 Err(e) => return kernel_fail(daemon, &req.id, &e),
             };
+            // The Kernel-sealed filesystem scope must be the one the daemon derives from its own record
+            // of this task: an approval for one scope is never executed under another.
+            if scope.fs_scope != task_fs_scope(daemon, &request.task_instance_id).as_str() {
+                daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                return fail(
+                    &req.id,
+                    "scope-refused",
+                    "the approved filesystem scope is not this task's scope; execution refused",
+                );
+            }
             proc_scope_wall = scope.max_wall_ms;
             nexus_tools::prepare_process(request, &binding, &scope, &daemon.command_policy)
         } else if mutating {
@@ -4395,6 +4522,7 @@ mod isolation_tests {
             repo_code_enabled: false,
             writes_enabled: false,
             process_enabled: false,
+            isolated_exec_scope: nexus_tools::exec_contract::FsScope::Scratch,
             command_policy: nexus_tools::process::CommandPolicy::standard(
                 nexus_tools::process::Toolchain::discover(),
             ),
@@ -4477,6 +4605,102 @@ mod isolation_tests {
 
     fn proc_op(network: &str, shell: bool, write_back: &str) -> serde_json::Value {
         serde_json::json!({"program": "cargo", "argvDigest": "x", "sandbox": {"network": network, "shell": shell, "writeBack": write_back}})
+    }
+
+    fn set_scope(root: &std::path::Path, task: &str, extra: serde_json::Value) {
+        let mut m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(wt_meta_path(root, task)).unwrap())
+                .unwrap();
+        for (k, v) in extra.as_object().unwrap() {
+            m[k] = v.clone();
+        }
+        std::fs::write(wt_meta_path(root, task), m.to_string()).unwrap();
+    }
+
+    fn proc_op_scope(scope: Option<&str>, write_back: &str) -> serde_json::Value {
+        let mut o = proc_op("none", false, write_back);
+        if let Some(s) = scope {
+            o["execFsScope"] = s.into();
+        }
+        o
+    }
+
+    #[test]
+    fn the_filesystem_scope_comes_only_from_the_daemons_record_and_must_match_the_operation() {
+        use nexus_tools::exec_contract::FsScope;
+        let (d, _keep, task, digest) = policy_rig(&["src/"]);
+        let root = d.worktree_root.clone().unwrap();
+        let cfg = d.autonomous.clone().unwrap();
+        let run = |scope: Option<&str>, wb: &str| {
+            evaluate_autonomous_policy(
+                &d,
+                &cfg,
+                &sub(
+                    &task,
+                    &digest,
+                    "proc.run",
+                    "process",
+                    &[],
+                    proc_op_scope(scope, wb),
+                ),
+            )
+        };
+        // a record without the field is scratch (every pre-existing copy)
+        assert_eq!(task_fs_scope(&d, &task), FsScope::Scratch);
+        assert!(run(None, "none").is_ok());
+        // a scratch task refuses an operation that claims a workspace scope, whatever its write-back text
+        assert!(run(Some("workspace"), "in-place-task-copy").is_err());
+        assert!(run(Some("workspace"), "none").is_err());
+        // a workspace task
+        set_scope(
+            &root,
+            &task,
+            serde_json::json!({"execFsScope": "workspace"}),
+        );
+        assert_eq!(task_fs_scope(&d, &task), FsScope::Workspace);
+        let ok = run(Some("workspace"), "in-place-task-copy").expect("covered");
+        assert_eq!(ok["fsScope"], "workspace");
+        // it never accepts the scratch description (a lie in either direction), nor an omitted scope
+        assert!(run(None, "none").is_err());
+        assert!(run(Some("scratch"), "none").is_err());
+        assert!(run(Some("workspace"), "none").is_err());
+        assert!(run(Some("full"), "in-place-task-copy").is_err());
+        // unknown / hostile names in the record are scratch, never workspace
+        for v in ["full", "WORKSPACE", "host", ""] {
+            set_scope(&root, &task, serde_json::json!({"execFsScope": v}));
+            assert_eq!(task_fs_scope(&d, &task), FsScope::Scratch, "{v}");
+        }
+        // a direct task is never in place in this milestone, even if its record says so
+        set_scope(
+            &root,
+            &task,
+            serde_json::json!({"execFsScope": "workspace", "kind": "direct"}),
+        );
+        assert_eq!(task_fs_scope(&d, &task), FsScope::Scratch);
+        // an invalid task id or a missing record is scratch
+        assert_eq!(task_fs_scope(&d, "../etc"), FsScope::Scratch);
+        assert_eq!(
+            task_fs_scope(&d, "task-nonexistent0000000001"),
+            FsScope::Scratch
+        );
+    }
+
+    #[test]
+    fn the_policy_digest_changes_only_when_in_place_copies_are_enabled() {
+        let c = AutonomousConfig::default();
+        let scratch_only = autonomous_policy_digest(&c, false);
+        let with_ws = autonomous_policy_digest(&c, true);
+        assert_ne!(scratch_only, with_ws);
+        // the scratch-only digest is the historical one (no extra key)
+        let historical = sha256_hex_str(&nexus_contracts::canonical_json(&serde_json::json!({
+            "id": AUTONOMOUS_POLICY_ID,
+            "maxEditsPerTask": c.max_edits_per_task,
+            "maxCommandsPerTask": c.max_commands_per_task,
+            "maxWriteBytes": c.max_write_bytes,
+            "protectedNames": nexus_tools::protect::PROTECTED_NAMES,
+            "tools": ["fs.write", "fs.edit", "proc.run"],
+        })));
+        assert_eq!(scratch_only, historical);
     }
 
     #[test]

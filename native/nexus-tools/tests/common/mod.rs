@@ -201,6 +201,21 @@ impl Fx {
             .unwrap()
     }
 
+    /// As [`Self::approve_process`], sealing the filesystem scope the approver authorized.
+    pub fn approve_process_fs(&mut self, max_wall_ms: u64, fs_scope: &str) -> ProcessScopeBinding {
+        let root = self.binding().root_digest;
+        self.kernel
+            .bind_process_scope_with_fs(
+                &self.command.clone(),
+                "test-approver",
+                false,
+                &root,
+                max_wall_ms,
+                fs_scope,
+            )
+            .unwrap()
+    }
+
     pub fn pscope(&mut self) -> ProcessScopeBinding {
         self.kernel
             .process_scope_binding(&self.command.clone())

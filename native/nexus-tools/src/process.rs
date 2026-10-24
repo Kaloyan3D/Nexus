@@ -578,6 +578,8 @@ pub struct ProcessContext<'a> {
     pub budgets: &'a ToolBudgets,
     /// Upper bound on wall time from the approved process scope.
     pub scope_max_wall_ms: u64,
+    /// Filesystem scope SEALED in the Kernel process scope (never taken from tool arguments).
+    pub fs_scope: crate::exec_contract::FsScope,
 }
 
 /// Read-only binds plus the provenance note recorded in the journal.
@@ -1015,6 +1017,35 @@ pub fn run_process(
     if let Err(e) = hooks.fence() {
         return failed(hooks, &run_dir, ToolErrorCode::Revoked, e.message);
     }
+    // The grant this command runs under must be one the backend can really enforce. A refusal is final:
+    // there is no substitution of another scope (ADR rev. 2 section 7.5).
+    let in_place = ctx.fs_scope == crate::exec_contract::FsScope::Workspace;
+    {
+        use crate::exec_contract::{
+            check_grant, Approval, ExecBackend, ExecGrant, LinuxBwrapBackend, NetScope,
+        };
+        let grant = ExecGrant {
+            fs: ctx.fs_scope,
+            net: if cmd.install {
+                NetScope::Install
+            } else {
+                NetScope::Offline
+            },
+            approval: Approval::Auto,
+        };
+        if let Err(r) = check_grant(&LinuxBwrapBackend.caps(), &grant) {
+            let e = r.into_error();
+            return failed(hooks, &run_dir, e.code, e.message);
+        }
+        if in_place && !ctx.policy.is_workbench() {
+            return failed(
+                hooks,
+                &run_dir,
+                ToolErrorCode::CommandRefused,
+                "in-place execution is only available with the workbench command policy (nothing was run)".into(),
+            );
+        }
+    }
     let base = match crate::sandbox::cgroup_base() {
         Some(b) => b,
         None => {
@@ -1062,9 +1093,22 @@ pub fn run_process(
         }
         Ok(())
     };
-    let report = match stage_workspace(ctx.ws, &src, &slim, &mut probe, &mut |_| {}) {
-        Ok(r) => r,
-        Err(e) => return failed(hooks, &run_dir, e.code, e.message),
+    // In place: nothing is staged. The task's own working copy is bound by the descriptor the Workspace
+    // pinned; what the command writes is the working copy (reviewed through the task's git diff).
+    let mut mount: Option<crate::inplace::InPlaceMount> = None;
+    let report = if in_place {
+        match crate::inplace::prepare(ctx.ws) {
+            Ok(m) => {
+                mount = Some(m);
+                crate::stage::StageReport::default()
+            }
+            Err(e) => return failed(hooks, &run_dir, e.code, e.message),
+        }
+    } else {
+        match stage_workspace(ctx.ws, &src, &slim, &mut probe, &mut |_| {}) {
+            Ok(r) => r,
+            Err(e) => return failed(hooks, &run_dir, e.code, e.message),
+        }
     };
     hooks.at("after-stage");
     // 1b. Dependency view (A3.5): a per-execution, read-only vendor tree
@@ -1073,7 +1117,12 @@ pub fn run_process(
     let mut dep_note = serde_json::Value::Null;
     if let (Some(dir), "cargo") = (&ctx.policy.dep_cache, cmd.name.as_str()) {
         if args.args.first().map(String::as_str) != Some("fmt") {
-            match prepare_dependency_view(dir, &src, &cmd.cwd, &run_dir) {
+            let dep_src = if in_place {
+                PathBuf::from(ctx.ws.root_path())
+            } else {
+                src.clone()
+            };
+            match prepare_dependency_view(dir, &dep_src, &cmd.cwd, &run_dir) {
                 Ok(Some((binds, note))) => {
                     cmd.ro_binds.extend(binds);
                     cmd.env.insert("CARGO_INCREMENTAL".into(), "0".into());
@@ -1121,7 +1170,8 @@ pub fn run_process(
                     )
                 }
             }
-        } else if let Some(e) = ctx.env {
+        } else if let (Some(e), false) = (ctx.env, in_place) {
+            // (in place, dependencies live in the working copy itself)
             rw_binds.extend(stored_node_modules(e));
         }
         if cmd.name == "cargo" || cmd.name == "go" {
@@ -1155,12 +1205,18 @@ pub fn run_process(
         id: ctx.execution_id.to_owned(),
         program: cmd.program.clone(),
         args: cmd.argv.clone(),
-        src_dir: src.clone(),
+        src_dir: if in_place {
+            PathBuf::new()
+        } else {
+            src.clone()
+        },
         cwd: cmd.cwd.clone(),
         env: cmd.env.clone(),
         ro_binds,
         rw_binds,
         src_writable: ctx.policy.is_workbench(),
+        pinned_root: mount.as_ref().map(|m| m.root_fd()),
+        protect: mount.as_ref().map(|m| m.protect()).unwrap_or_default(),
         net: cmd.install,
         limits: limits.clone(),
         cgroup_base: base.clone(),
@@ -1178,39 +1234,53 @@ pub fn run_process(
     };
     // 3. Durable intent BEFORE spawn: identity, digests, limits, cgroup
     //    and run directory (so recovery can find and kill a leftover).
-    hooks.journal(
-        PH_PREPARED,
-        serde_json::json!({
-            "command": cmd.display(),
-            "program": cmd.name,
-            "argvDigest": cmd.argv_digest(),
-            "cwd": cmd.cwd,
-            "snapshotDigest": report.digest,
-            "snapshotFiles": report.files,
-            "snapshotBytes": report.bytes,
-            "snapshotSkipped": {
-                "hidden": report.skipped_hidden, "sensitive": report.skipped_sensitive,
-                "ignored": report.skipped_ignored, "symlinks": report.skipped_symlinks,
-                "special": report.skipped_special, "hardlinks": report.skipped_hardlinks,
-                "mountCrossing": report.skipped_mount_crossing, "large": report.skipped_large,
-            },
-            "sandboxDigest": sbx_digest,
-            "dependencies": dep_note,
-            "sandbox": {
-                "backend": "bubblewrap+seccomp+cgroup-v2", "network": if cmd.install { "install" } else { "none" },
-                "rootfs": "synthetic (usr ro, tmpfs scratch)", "workspace": if ctx.policy.is_workbench() { "snapshot-scratch" } else { "snapshot-ro" },
-                "writeBack": "none", "env": "allowlist",
-            },
-            "resourceEnforcement": if kernel_mode { "kernel-cgroup" } else { "rlimit-polling" },
-            "limits": {
-                "wallMs": limits.wall_ms, "cpuSecs": limits.cpu_secs,
-                "memoryBytes": limits.memory_bytes, "maxProcs": limits.max_procs,
-                "outputBytes": limits.stdout_cap, "scratchBytes": limits.scratch_bytes,
-            },
-            "cgroup": cgroup_path.display().to_string(),
-            "runDir": run_dir.display().to_string(),
-        }),
-    )?;
+    let mut prepared_record = serde_json::json!({
+        "command": cmd.display(),
+        "program": cmd.name,
+        "argvDigest": cmd.argv_digest(),
+        "cwd": cmd.cwd,
+        "snapshotDigest": report.digest,
+        "snapshotFiles": report.files,
+        "snapshotBytes": report.bytes,
+        "snapshotSkipped": {
+            "hidden": report.skipped_hidden, "sensitive": report.skipped_sensitive,
+            "ignored": report.skipped_ignored, "symlinks": report.skipped_symlinks,
+            "special": report.skipped_special, "hardlinks": report.skipped_hardlinks,
+            "mountCrossing": report.skipped_mount_crossing, "large": report.skipped_large,
+        },
+        "sandboxDigest": sbx_digest,
+        "dependencies": dep_note,
+        "sandbox": {
+            "backend": "bubblewrap+seccomp+cgroup-v2", "network": if cmd.install { "install" } else { "none" },
+            "rootfs": "synthetic (usr ro, tmpfs scratch)", "workspace": if ctx.policy.is_workbench() { "snapshot-scratch" } else { "snapshot-ro" },
+            "writeBack": "none", "env": "allowlist",
+        },
+        "resourceEnforcement": if kernel_mode { "kernel-cgroup" } else { "rlimit-polling" },
+        "limits": {
+            "wallMs": limits.wall_ms, "cpuSecs": limits.cpu_secs,
+            "memoryBytes": limits.memory_bytes, "maxProcs": limits.max_procs,
+            "outputBytes": limits.stdout_cap, "scratchBytes": limits.scratch_bytes,
+        },
+        "cgroup": cgroup_path.display().to_string(),
+        "runDir": run_dir.display().to_string(),
+    });
+    if let (true, Some(m), Some(o)) = (in_place, &mount, prepared_record.as_object_mut()) {
+        // In place the record must say what is true: nothing was staged, the working copy is written.
+        o.insert("snapshotDigest".into(), serde_json::Value::Null);
+        o.insert("fsScope".into(), "workspace".into());
+        let sb = o.get_mut("sandbox").and_then(|v| v.as_object_mut());
+        if let Some(sb) = sb {
+            sb.insert("workspace".into(), "task-working-copy-in-place".into());
+            sb.insert("writeBack".into(), "in-place".into());
+            sb.insert("rootMount".into(), "descriptor-bound".into());
+            sb.insert("protected".into(), m.summary.clone());
+        }
+        o.insert(
+            "effects".into(),
+            "not observed by the process layer in this build; the task's git diff shows file changes".into(),
+        );
+    }
+    hooks.journal(PH_PREPARED, prepared_record)?;
     crash_point("proc-after-prepared");
     let _ = bwrap_argv; // (argv is part of `sandboxDigest`)
                         // 4. Last fence, then run.
@@ -1236,7 +1306,7 @@ pub fn run_process(
     };
     // A successful install keeps its node_modules for the commands that follow.
     let mut env_note = serde_json::Value::Null;
-    if let (true, Ok(o), Some(e)) = (cmd.install, &outcome, ctx.env) {
+    if let (true, false, Ok(o), Some(e)) = (cmd.install, in_place, &outcome, ctx.env) {
         if matches!(o.exit, ExitKind::Exited(0)) {
             env_note = match harvest_node_modules(&src, e) {
                 Ok(n) => serde_json::json!({ "nodeModulesKept": n }),
@@ -1245,7 +1315,7 @@ pub fn run_process(
         }
     }
     // What the command did to its scratch copy (never applied to the project), read before the copy goes.
-    let effects = (ctx.policy.is_workbench() && outcome.is_ok())
+    let effects = (ctx.policy.is_workbench() && !in_place && outcome.is_ok())
         .then(|| scratch_effects(&src, &report))
         .filter(|e| !e.is_empty());
     let _ = std::fs::remove_dir_all(&run_dir);
@@ -1315,6 +1385,11 @@ pub fn run_process(
             }),
         );
     }
+    if let (true, Some(o)) = (in_place, record.as_object_mut()) {
+        o.insert("snapshotDigest".into(), serde_json::Value::Null);
+        o.insert("fsScope".into(), "workspace".into());
+        o.insert("writeBack".into(), "in-place".into());
+    }
     hooks.journal(phase, record)?;
     let output = serde_json::json!({
         "reason": reason, "exitCode": code, "signal": signal,
@@ -1330,6 +1405,15 @@ pub fn run_process(
         "environment": env_note,
     });
     let mut output = output;
+    if let (true, Some(o)) = (in_place, output.as_object_mut()) {
+        o.insert("snapshotDigest".into(), serde_json::Value::Null);
+        o.insert("fsScope".into(), "workspace".into());
+        o.insert("writeBack".into(), "in-place".into());
+        o.insert(
+            "persisted".into(),
+            "files the command created or changed are in the task's working copy".into(),
+        );
+    }
     if let (Some(e), Some(o)) = (&effects, output.as_object_mut()) {
         let mut v = serde_json::to_value(e).unwrap_or_default();
         v["persisted"] = serde_json::json!(false);

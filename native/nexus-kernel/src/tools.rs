@@ -85,6 +85,17 @@ const PROCESS_TERMINALS: [&str; 7] = [
 ];
 
 pub const PROCESS_SCOPE_DOMAIN: &str = "nexus-process-scope/v1";
+/// Used for scopes that carry a non-default filesystem scope. A `scratch` scope is sealed and verified
+/// with the v1 domain and canonical form exactly as before, so every existing row keeps verifying and a
+/// `scratch` row can never be read as anything else.
+pub const PROCESS_SCOPE_DOMAIN_V2: &str = "nexus-process-scope/v2";
+/// Filesystem scopes a process scope can seal. `full` is deliberately absent: not implemented.
+pub const FS_SCOPE_SCRATCH: &str = "scratch";
+pub const FS_SCOPE_WORKSPACE: &str = "workspace";
+
+fn default_fs_scope() -> String {
+    FS_SCOPE_SCRATCH.to_owned()
+}
 pub const WRITE_SCOPE_DOMAIN: &str = "nexus-write-scope/v1";
 pub const WORKSPACE_BINDING_DOMAIN: &str = "nexus-workspace-binding/v1";
 
@@ -210,9 +221,28 @@ pub struct ProcessScopeBinding {
     pub max_wall_ms: u64,
     pub approver_id: String,
     pub independent: bool,
+    /// Filesystem scope the approved command runs under (`scratch` | `workspace`). Rows written before
+    /// this field existed deserialize as `scratch`.
+    #[serde(default = "default_fs_scope")]
+    pub fs_scope: String,
 }
 
 fn process_scope_canonical(b: &ProcessScopeBinding) -> String {
+    if b.fs_scope != FS_SCOPE_SCRATCH {
+        return canonical_json(&serde_json::json!({
+            "domain": PROCESS_SCOPE_DOMAIN_V2,
+            "commandId": b.command_id,
+            "taskInstanceId": b.task_instance_id,
+            "attemptId": b.attempt_id,
+            "leaseEpoch": b.lease_epoch,
+            "storeIncarnation": b.store_incarnation,
+            "rootDigest": b.root_digest,
+            "maxWallMs": b.max_wall_ms,
+            "approverId": b.approver_id,
+            "independent": b.independent,
+            "fsScope": b.fs_scope,
+        }));
+    }
     canonical_json(&serde_json::json!({
         "domain": PROCESS_SCOPE_DOMAIN,
         "commandId": b.command_id,
@@ -1302,6 +1332,26 @@ impl Kernel {
         approved_root_digest: &str,
         max_wall_ms: u64,
     ) -> KernelResult<ProcessScopeBinding> {
+        self.bind_process_scope_with_fs(
+            command_id,
+            approver_id,
+            independent,
+            approved_root_digest,
+            max_wall_ms,
+            FS_SCOPE_SCRATCH,
+        )
+    }
+
+    /// As [`Self::bind_process_scope`], sealing the filesystem scope the approver authorized.
+    pub fn bind_process_scope_with_fs(
+        &mut self,
+        command_id: &str,
+        approver_id: &str,
+        independent: bool,
+        approved_root_digest: &str,
+        max_wall_ms: u64,
+        fs_scope: &str,
+    ) -> KernelResult<ProcessScopeBinding> {
         Self::critical(&self.lock_file, &self.in_process, || {
             Self::bind_process_scope_inner(
                 &mut self.store,
@@ -1311,10 +1361,12 @@ impl Kernel {
                 independent,
                 approved_root_digest,
                 max_wall_ms,
+                fs_scope,
             )
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn bind_process_scope_inner(
         store: &mut nexus_store::Store,
         witness: Option<&nexus_store::WitnessStore>,
@@ -1323,8 +1375,15 @@ impl Kernel {
         independent: bool,
         approved_root_digest: &str,
         max_wall_ms: u64,
+        fs_scope: &str,
     ) -> KernelResult<ProcessScopeBinding> {
         {
+            if fs_scope != FS_SCOPE_SCRATCH && fs_scope != FS_SCOPE_WORKSPACE {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "unsupported filesystem scope for a process scope",
+                ));
+            }
             let receipt = store.read_receipt(command_id)?.ok_or_else(|| {
                 refuse(
                     KernelErrorCode::DeliveryInvalid,
@@ -1370,6 +1429,7 @@ impl Kernel {
                 max_wall_ms,
                 approver_id: approver_id.chars().take(64).collect(),
                 independent,
+                fs_scope: fs_scope.to_owned(),
             };
             let seal = hmac_seal_hex(&key_hex, &process_scope_canonical(&b))?;
             let json = canonical_json(&serde_json::to_value(&b).map_err(|_| {
@@ -1804,5 +1864,55 @@ impl Kernel {
         let n = self.store.verify_tool_journal()?;
         Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod process_scope_compat_tests {
+    use super::*;
+
+    fn scope(fs: &str) -> ProcessScopeBinding {
+        ProcessScopeBinding {
+            command_id: "c".into(),
+            task_instance_id: "t".into(),
+            attempt_id: "at".into(),
+            lease_epoch: 3,
+            store_incarnation: "si".into(),
+            root_digest: "r".into(),
+            max_wall_ms: 1000,
+            approver_id: "a".into(),
+            independent: false,
+            fs_scope: fs.into(),
+        }
+    }
+
+    /// The exact bytes a pre-milestone Kernel sealed. If this string ever changes, every stored
+    /// process scope stops verifying.
+    const V1_CANONICAL: &str = r#"{"approverId":"a","attemptId":"at","commandId":"c","domain":"nexus-process-scope/v1","independent":false,"leaseEpoch":3,"maxWallMs":1000,"rootDigest":"r","storeIncarnation":"si","taskInstanceId":"t"}"#;
+
+    #[test]
+    fn a_scratch_scope_seals_exactly_the_bytes_the_previous_kernel_sealed() {
+        assert_eq!(process_scope_canonical(&scope("scratch")), V1_CANONICAL);
+    }
+
+    #[test]
+    fn a_workspace_scope_has_its_own_domain_and_field_so_scratch_and_workspace_never_share_a_seal()
+    {
+        let w = process_scope_canonical(&scope("workspace"));
+        assert!(
+            w.contains(PROCESS_SCOPE_DOMAIN_V2) && w.contains(r#""fsScope":"workspace""#),
+            "{w}"
+        );
+        assert_ne!(w, process_scope_canonical(&scope("scratch")));
+        // dropping the field from a workspace row cannot reproduce a valid scratch seal input
+        assert!(!w.contains(PROCESS_SCOPE_DOMAIN));
+    }
+
+    #[test]
+    fn rows_stored_before_the_field_existed_read_as_scratch() {
+        let old = r#"{"command_id":"c","task_instance_id":"t","attempt_id":"at","lease_epoch":3,"store_incarnation":"si","root_digest":"r","max_wall_ms":1000,"approver_id":"a","independent":false}"#;
+        let b: ProcessScopeBinding = serde_json::from_str(old).unwrap();
+        assert_eq!(b.fs_scope, FS_SCOPE_SCRATCH);
+        assert_eq!(process_scope_canonical(&b), V1_CANONICAL);
     }
 }

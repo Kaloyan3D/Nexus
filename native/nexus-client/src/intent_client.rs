@@ -196,6 +196,10 @@ pub struct IntentRun {
     /// an isolated working copy, as before). Fixed at submission; never changes during a run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_kind: Option<String>,
+    /// True In-Place Execution: `"workspace"` when this run's commands write its isolated working copy
+    /// in place (reported by the daemon that made the copy; absent = the throw-away-copy behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_scope: Option<String>,
     /// A7.1: the earlier run whose working copy this run started from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed_from: Option<String>,

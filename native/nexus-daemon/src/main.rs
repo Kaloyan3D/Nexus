@@ -677,6 +677,23 @@ fn run(args: &[String]) -> i32 {
     // issuer commands. Writes stay disabled unless explicitly enabled.
     let writes_enabled = args.iter().any(|a| a == "--enable-writes");
     let process_enabled = args.iter().any(|a| a == "--enable-process");
+    // True In-Place Execution, milestone 1: the filesystem scope NEW Isolated task copies run commands
+    // under. `scratch` (default) is the A3.4 behaviour. `workspace` binds each task's own disposable
+    // copy read-write. Anything else - including `full`, which does not exist yet - is refused.
+    let isolated_exec_scope = match flag_str(args, "--isolated-exec-scope").as_deref() {
+        None | Some("scratch") => nexus_tools::exec_contract::FsScope::Scratch,
+        Some("workspace") => nexus_tools::exec_contract::FsScope::Workspace,
+        Some(other) => {
+            eprintln!("--isolated-exec-scope must be 'scratch' or 'workspace' (got '{other}'); 'full' is not implemented (failing closed)");
+            return 2;
+        }
+    };
+    if isolated_exec_scope == nexus_tools::exec_contract::FsScope::Workspace
+        && !(process_enabled && args.iter().any(|a| a == "--autonomous-workspace-policy"))
+    {
+        eprintln!("--isolated-exec-scope workspace requires --enable-process and --autonomous-workspace-policy (the workbench command set; failing closed)");
+        return 2;
+    }
     let approver_cap_path = flag(args, "--approver-cap");
     let approver_uids: Option<Vec<u32>> = match flag_str(args, "--approver-uids") {
         Some(spec) => match parse_allowed_uids(&spec) {
@@ -1180,6 +1197,7 @@ fn run(args: &[String]) -> i32 {
         repo_code_enabled,
         writes_enabled,
         process_enabled,
+        isolated_exec_scope,
         command_policy: {
             let p = nexus_tools::process::CommandPolicy::standard(
                 nexus_tools::process::Toolchain::discover(),

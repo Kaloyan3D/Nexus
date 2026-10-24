@@ -514,6 +514,8 @@ struct Fx {
     reg_dir: Option<PathBuf>,
     repo2: Option<PathBuf>,
     autonomous: bool,
+    /// Extra `nexusd` flags (re-applied when the daemon is restarted).
+    daemon_args: Vec<String>,
     _acap_dir: tempfile::TempDir,
     /// EM-03: the Registry install root (the repository, or a fixture copy of its `config/`).
     install_root: PathBuf,
@@ -547,6 +549,7 @@ fn spawn_daemon(
     env: &[(&str, &str)],
     project_registry: Option<&Path>,
     autonomous: bool,
+    extra_args: &[String],
 ) -> (Child, PathBuf, PathBuf) {
     let uid = own_uid().to_string();
     let (db, wit, socket, cap) = (
@@ -610,6 +613,7 @@ fn spawn_daemon(
             c.arg("--project-registry").arg(r);
         }
     }
+    c.args(extra_args);
     // An AMBIENT credential in the daemon's environment: the sandbox must
     // never hand it to a model-launched process.
     c.env("A56_AMBIENT_SECRET", AMBIENT);
@@ -670,7 +674,7 @@ fn fixture_inner(
     with_registry: bool,
     autonomous: bool,
 ) -> Fx {
-    fixture_full(responder, extra, env, with_registry, autonomous, None)
+    fixture_full(responder, extra, env, with_registry, autonomous, None, &[])
 }
 
 /// EM-03: an autonomous fixture whose Registry install root is a copy of the repository's
@@ -716,6 +720,7 @@ fn fixture_engine_budget(
         true,
         true,
         Some((install.clone(), dir)),
+        &[],
     );
     let r = node_json(&[
         "registry-engine-scope",
@@ -734,6 +739,7 @@ fn fixture_full(
     with_registry: bool,
     autonomous: bool,
     install: Option<(PathBuf, tempfile::TempDir)>,
+    daemon_args: &[String],
 ) -> Fx {
     let (install_root, install_dir) = match install {
         Some((p, d)) => (p, Some(d)),
@@ -791,6 +797,7 @@ fn fixture_full(
         env,
         reg_dir.as_deref(),
         autonomous,
+        daemon_args,
     );
     let creds = tmp.path().join("provider-credentials.json");
     std::fs::write(
@@ -816,6 +823,7 @@ fn fixture_full(
         reg_dir,
         repo2,
         autonomous,
+        daemon_args: daemon_args.to_vec(),
         _acap_dir: acap_dir,
         install_root,
         _install_dir: install_dir,
@@ -839,6 +847,7 @@ impl Fx {
             &[],
             self.reg_dir.as_deref(),
             self.autonomous,
+            &self.daemon_args,
         );
         self.daemon = child;
         self.daemon_socket = socket;
@@ -16571,4 +16580,334 @@ fn isolated_nested_files_land_in_the_copy_and_never_in_the_folder() {
         "the isolated run never touches the folder"
     );
     env.b.shutdown();
+}
+
+// ------------------------------------------- True In-Place Execution, milestone 1
+
+/// The interactive profile with `--isolated-exec-scope workspace`: commands of an Isolated task write the
+/// task's own working copy in place.
+fn fixture_in_place(responder: Responder, env: &[(&str, &str)]) -> Fx {
+    fixture_full(
+        responder,
+        Box::new(|_| {}),
+        env,
+        true,
+        true,
+        None,
+        &["--isolated-exec-scope".to_owned(), "workspace".to_owned()],
+    )
+}
+
+/// Registry-managed broker in the interactive profile (the workbench command set, the relaxed harness).
+fn start_interactive(fx: &Fx, name: &str) -> BrokerHandle {
+    let mut c = fx.config(name);
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    nexus_broker::start(c).expect("broker starts")
+}
+
+fn first_request_text(fx: &Fx) -> String {
+    fx.provider
+        .bodies
+        .lock()
+        .unwrap()
+        .first()
+        .map(|b| b.to_string())
+        .unwrap_or_default()
+}
+
+fn m1_script() -> Responder {
+    script(
+        vec![
+            (
+                "proc_run",
+                r#"{"program":"sh","args":["-c","mkdir -p tools/gen && printf 'GENERATED\\n' > tools/gen/out.txt && echo made"]}"#.to_owned(),
+            ),
+            (
+                "proc_run",
+                r#"{"program":"sh","args":["-c","cat tools/gen/out.txt; echo hook > .git/hooks/pre-commit; echo hook-rc=$?; cat /etc/hostname; ls /home; echo escape-done"]}"#.to_owned(),
+            ),
+        ],
+        "Done.",
+    )
+}
+
+fn proc_outputs(run: &ic::IntentRun) -> Vec<String> {
+    run.tool_activity
+        .iter()
+        .filter(|a| a.tool == "proc_run")
+        .map(|a| format!("{a:?}"))
+        .collect()
+}
+
+#[test]
+fn m1_commands_persist_in_the_isolated_copy_reach_its_patch_and_never_touch_the_original() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_in_place(m1_script(), &[]);
+    let b = start_interactive(&fx, "m1");
+    let repo2 = fx.repo2.clone().unwrap();
+    let before = fp_of(&repo2);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "m1-inplace-0000001", |_| {}),
+        150,
+    );
+    assert_eq!(run.state, "completed", "{run:?} {:?}", proc_outputs(&run));
+    let procs: Vec<_> = run
+        .tool_activity
+        .iter()
+        .filter(|a| a.tool == "proc_run")
+        .collect();
+    assert_eq!(procs.len(), 2, "{:?}", statuses(&run));
+    for p in &procs {
+        assert_eq!(
+            p.approval_actor.as_deref(),
+            Some("automated-policy"),
+            "{p:?}"
+        );
+    }
+    // the mkdir/generator result persisted in the task's copy and a LATER command saw it
+    let wc = working_copy(&fx).expect("retained working copy");
+    assert_eq!(
+        std::fs::read_to_string(wc.join("tools/gen/out.txt")).unwrap(),
+        "GENERATED\n"
+    );
+    // it is part of the reviewable change
+    let d = ic::diff(b.socket_path(), &run.run_id).unwrap();
+    assert!(
+        d.files.iter().any(|f| f.path == "tools/gen/out.txt"),
+        "{:?}",
+        d.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>()
+    );
+    // the protections held: the hook was not written, the original is untouched
+    assert!(!wc.join(".git/hooks/pre-commit").exists());
+    assert_eq!(fp_of(&repo2), before, "the original changed");
+    // the harness text the model got told the truth (checked through the provider's recorded request)
+    let first = first_request_text(&fx);
+    assert!(
+        first.contains("directly ON YOUR WORKING COPY"),
+        "the model was not told commands persist"
+    );
+    assert!(!first.contains("DISCARDED"), "{first}");
+    b.shutdown();
+}
+
+#[test]
+fn m1_the_default_daemon_keeps_the_throw_away_copy_behaviour_exactly() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(m1_script());
+    let b = start_interactive(&fx, "m1s");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "m1-scratch-0000001", |_| {}),
+        150,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let wc = working_copy(&fx).expect("retained working copy");
+    assert!(
+        !wc.join("tools/gen/out.txt").exists(),
+        "a scratch-scope command reached the working copy"
+    );
+    let first = first_request_text(&fx);
+    assert!(
+        first.contains("over a throw-away copy"),
+        "historical harness text changed"
+    );
+    assert!(!first.contains("directly ON YOUR WORKING COPY"));
+    b.shutdown();
+}
+
+#[test]
+fn m1_a_daemon_crash_after_an_in_place_command_is_never_reported_as_success_keeps_the_files_and_never_reruns(
+) {
+    if !sandbox_ready() {
+        return;
+    }
+    let mut fx = fixture_in_place(
+        script(
+            vec![(
+                "proc_run",
+                r#"{"program":"sh","args":["-c","mkdir -p crashdir && echo persisted > crashdir/f.txt"]}"#.to_owned(),
+            )],
+            "never reached",
+        ),
+        &[("NEXUS_TEST_WRITE_CRASH_AT", "proc-after-exit")],
+    );
+    let b = start_interactive(&fx, "m1c");
+    let sock = b.socket_path().to_owned();
+    let r = ic::submit(
+        &sock,
+        &code_intent_for("other", "go", "m1-crash-00000001", |_| {}),
+    )
+    .unwrap()
+    .run;
+    // the REAL daemon SIGKILLs itself right after the sandboxed command exited (feature crash-injection)
+    let end = Instant::now() + Duration::from_secs(90);
+    while !matches!(fx.daemon.try_wait(), Ok(Some(_))) {
+        assert!(Instant::now() < end, "the crash point never fired");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    b.shutdown();
+    fx.restart_daemon();
+    let b = start_interactive(&fx, "m1c");
+    let st = wait_terminal(b.socket_path(), &r.run_id, 90);
+    assert!(st.terminal, "{st:?}");
+    assert_ne!(st.state, "completed", "{st:?}");
+    if let Some(oc) = &st.coding_outcome {
+        assert_ne!(oc.verification, "verified-passed", "{oc:?}");
+    }
+    // the files the command wrote are still there, visible in the patch; nothing re-ran the command
+    let wc = working_copy(&fx).expect("working copy");
+    assert_eq!(
+        std::fs::read_to_string(wc.join("crashdir/f.txt")).unwrap(),
+        "persisted\n"
+    );
+    let ti = st.task_instance_id.clone().unwrap();
+    let tid = st.task_id.clone().unwrap();
+    let mut all: Vec<Value> = Vec::new();
+    for a in 1..=last_attempts(&st) {
+        all.extend(tool_events(&fx, &ti, &format!("{tid}-A{a}")));
+    }
+    let execs: std::collections::HashSet<String> = all
+        .iter()
+        .filter(|r| r["toolId"] == "proc.run")
+        .filter_map(|r| r["executionId"].as_str().map(str::to_owned))
+        .collect();
+    let phases: Vec<String> = all
+        .iter()
+        .filter(|r| r["executionId"].as_str().is_some_and(|e| execs.contains(e)))
+        .filter_map(|r| r["phase"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        execs.len(),
+        1,
+        "exactly one execution of the command: {phases:?}"
+    );
+    assert!(
+        phases.iter().any(|p| p == "interrupted"),
+        "explicit interruption: {phases:?}"
+    );
+    assert!(
+        !phases.iter().any(|p| p == "exited" || p == "completed"),
+        "{phases:?}"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn m1_killing_the_daemon_during_an_in_place_command_ends_the_whole_process_tree() {
+    if !sandbox_ready() {
+        return;
+    }
+    let mut fx = fixture_in_place(
+        script(
+            vec![(
+                "proc_run",
+                r#"{"program":"sh","args":["-c","echo started > started.txt; sleep 119"]}"#
+                    .to_owned(),
+            )],
+            "never reached",
+        ),
+        &[],
+    );
+    let b = start_interactive(&fx, "m1k");
+    let sock = b.socket_path().to_owned();
+    let r = ic::submit(
+        &sock,
+        &code_intent_for("other", "go", "m1-kill-000000001", |_| {}),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(60);
+    let running = || {
+        std::fs::read_dir("/proc").unwrap().flatten().any(|e| {
+            std::fs::read(e.path().join("cmdline"))
+                .map(|c| String::from_utf8_lossy(&c).contains("sleep\x00119"))
+                .unwrap_or(false)
+        })
+    };
+    // in place, the command's first write is visible in the copy while it is still running
+    while !(running() && working_copy(&fx).is_some_and(|w| w.join("started.txt").exists())) {
+        assert!(
+            Instant::now() < end,
+            "command never started: {:?}",
+            ic::status(&sock, &r.run_id)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    kill(&mut fx.daemon);
+    let gone = Instant::now();
+    while running() && gone.elapsed() < Duration::from_secs(30) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !running(),
+        "the sandbox survived the death of its supervisor"
+    );
+    b.shutdown();
+    fx.restart_daemon();
+    // recovery: the interrupted execution is closed explicitly (never invented as success)
+    let b = start_interactive(&fx, "m1k");
+    let st = wait_terminal(b.socket_path(), &r.run_id, 60);
+    assert!(st.terminal && st.state != "completed", "{st:?}");
+    let ti = st.task_instance_id.clone().unwrap();
+    let tid = st.task_id.clone().unwrap();
+    let recs = tool_events(&fx, &ti, &format!("{tid}-A{}", last_attempts(&st)));
+    let phases: Vec<&str> = recs.iter().filter_map(|r| r["phase"].as_str()).collect();
+    assert!(
+        !phases.contains(&"exited") && !phases.contains(&"completed"),
+        "{phases:?}"
+    );
+    assert!(phases.contains(&"interrupted"), "{phases:?}");
+    let wc = working_copy(&fx).expect("working copy");
+    assert!(
+        wc.join("started.txt").exists(),
+        "what the command wrote stays"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn m1_dependency_and_cache_folders_made_by_in_place_commands_are_not_part_of_the_patch() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_in_place(
+        script(
+            vec![(
+                "proc_run",
+                r#"{"program":"sh","args":["-c","mkdir -p node_modules/pkg .venv __pycache__ keep && echo 1 > node_modules/pkg/index.js && echo 1 > .venv/x && echo 1 > __pycache__/y && echo kept > keep/k.txt"]}"#.to_owned(),
+            )],
+            "Done.",
+        ),
+        &[],
+    );
+    let b = start_interactive(&fx, "m1n");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "m1-nodemod-0000001", |_| {}),
+        150,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let wc = working_copy(&fx).expect("working copy");
+    assert!(
+        wc.join("node_modules/pkg/index.js").exists(),
+        "the command's output persists in the copy"
+    );
+    let d = ic::diff(b.socket_path(), &run.run_id).unwrap();
+    let paths: Vec<_> = d.files.iter().map(|f| f.path.clone()).collect();
+    assert_eq!(
+        paths,
+        ["keep/k.txt"],
+        "toolchain artifacts leaked into the patch: {paths:?}"
+    );
+    b.shutdown();
 }
