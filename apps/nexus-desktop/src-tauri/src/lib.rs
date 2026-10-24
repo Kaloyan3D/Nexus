@@ -713,6 +713,24 @@ async fn project_forget(
         .map_err(|m| ui_msg("project", m))
 }
 
+/// Choose where NEW tasks of an opened project edit: its real folder ("direct") or a throw-away copy
+/// ("isolated"). Choosing direct is confirmed natively.
+#[tauri::command]
+async fn project_set_edit_mode(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+    project_id: String,
+    mode: String,
+) -> Result<serde_json::Value, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        rt.project_set_workspace(d.as_ref(), &project_id, &mode)
+    })
+    .await
+    .map_err(|_| internal())?
+    .map_err(|m| ui_msg("project", m))
+}
+
 /// Apply a finished run's patch to the user's own folder after a native confirmation.
 #[tauri::command]
 async fn project_adopt(
@@ -1125,6 +1143,7 @@ pub fn run() {
             project_list,
             project_refresh,
             project_set_policy,
+            project_set_edit_mode,
             code_limits_set,
             project_forget,
             project_adopt,
@@ -1187,6 +1206,7 @@ mod authz_tests {
         "project_list",
         "project_refresh",
         "project_set_policy",
+        "project_set_edit_mode",
         "code_limits_set",
         "project_forget",
         "project_adopt",

@@ -149,7 +149,7 @@ function OutcomeCard({ run }: { run: IntentRun }) {
         <Button size="sm" variant="ghost" onClick={() => openPanel("source")}>
           Source
         </Button>
-        {hasDiff && o?.change === "applied" && <AdoptButton run={run} />}
+        {hasDiff && o?.change === "applied" && run.workspaceKind !== "direct" && <AdoptButton run={run} />}
       </div>
     </section>
   );

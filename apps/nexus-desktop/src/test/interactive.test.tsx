@@ -180,6 +180,28 @@ describe("Projects page and evidence (A6.1.4)", () => {
     expect(document.querySelector("input[type=file], input[type=text]")).toBeNull();
   });
 
+  it("each project shows where its tasks edit and changes it through the backend (direct needs the native confirmation there)", async () => {
+    const setWs = vi.fn(async () => ({}));
+    const list = vi.fn(async () => ({
+      projects: [project({ workspaceMode: "direct" }), project({ projectId: "svc-aaaaaa", label: "svc", workspaceMode: "isolated" })],
+    }));
+    const user = userEvent.setup();
+    mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetEditMode: setWs }), "#/projects");
+    const table = await screen.findByRole("table", { name: "Opened projects" });
+    const direct = within(table).getByRole("combobox", { name: "Workspace for tinycsv" }) as HTMLSelectElement;
+    const iso = within(table).getByRole("combobox", { name: "Workspace for svc" }) as HTMLSelectElement;
+    expect(direct.value).toBe("direct");
+    expect(iso.value).toBe("isolated");
+    expect(within(table).getByText("edits your files")).toBeInTheDocument();
+    // "apply automatically" belongs to isolated copies only
+    expect(within(table).queryByLabelText("Apply finished work to tinycsv automatically")).not.toBeInTheDocument();
+    expect(within(table).getByLabelText("Apply finished work to svc automatically")).toBeInTheDocument();
+    await user.selectOptions(iso, "direct");
+    expect(setWs).toHaveBeenCalledWith("svc-aaaaaa", "direct");
+    await user.selectOptions(direct, "isolated");
+    expect(setWs).toHaveBeenCalledWith("tinycsv-6c94b7", "isolated");
+  });
+
   it("a policy grant is labelled as automated, never as an approval by a person", async () => {
     const run = fakeRun({
       intentType: "repo-code", conversationId: CONV, state: "completed", terminal: true, workspaceId: "tinycsv-6c94b7",

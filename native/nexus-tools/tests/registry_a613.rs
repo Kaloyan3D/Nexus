@@ -429,10 +429,16 @@ fn workspace_mode_is_a_durable_project_choice_only_for_opened_projects() {
     // a direct record without an origin folder is refused when it is written
     let mut bad = reg::load(&rd, &t()).unwrap().get("op").unwrap().clone();
     bad.workspace_mode = WorkspaceMode::Direct;
-    assert_eq!(reg::validate_record(&bad).unwrap_err().code, "bad-workspace-mode");
+    assert_eq!(
+        reg::validate_record(&bad).unwrap_err().code,
+        "bad-workspace-mode"
+    );
     bad.managed = true;
     bad.origin = Some("/home/user/../x".into());
-    assert_eq!(reg::validate_record(&bad).unwrap_err().code, "bad-workspace-mode");
+    assert_eq!(
+        reg::validate_record(&bad).unwrap_err().code,
+        "bad-workspace-mode"
+    );
     bad.origin = Some("/home/user/proj".into());
     assert!(reg::validate_record(&bad).is_ok());
     // the strings round-trip

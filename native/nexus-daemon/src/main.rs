@@ -1091,6 +1091,16 @@ fn run(args: &[String]) -> i32 {
         if swept > 0 {
             eprintln!("nexusd: removed {swept} stale half-built working copy director(ies)");
         }
+        // Direct Workspace: the kept originals of long-finished direct tasks are retained for 30 days.
+        let old = nexus_tools::direct::sweep_old(
+            &canon_root,
+            std::time::Duration::from_secs(30 * 24 * 3600),
+        );
+        if old > 0 {
+            eprintln!(
+                "nexusd: removed the kept originals of {old} direct task(s) older than 30 days"
+            );
+        }
     } else if worktree_root.is_some() {
         return fatal(
             "bad-config",

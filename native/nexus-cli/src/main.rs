@@ -1793,7 +1793,7 @@ fn cmd_project(args: &[String], cfg: &ClientConfig) -> ExitCode {
                 Err(e) => fail_reg(e),
             }
         }
-        "open" | "forget" | "refresh" | "ls" | "policy" => {
+        "open" | "forget" | "refresh" | "ls" | "policy" | "workspace" => {
             // A6.1.4: through the BROKER (the same verbs the Desktop's native backend uses).
             use nexus_client::intent_client as ic;
             let sock = flag_value(args, "--broker-socket")
@@ -1801,7 +1801,22 @@ fn cmd_project(args: &[String], cfg: &ClientConfig) -> ExitCode {
                 .unwrap_or_else(ic::default_broker_socket);
             let arg = positional.first().map(|s| s.as_str()).unwrap_or("");
             let r = match sub {
-                "open" => ic::project_open(&sock, arg),
+                "open" => {
+                    // Direct Workspace: a NEWLY authorized project defaults to editing its real folder in
+                    // place (an existing project keeps its durable choice). Said out loud before any task.
+                    let ws = flag_value(args, "--workspace").unwrap_or_else(|| "direct".to_owned());
+                    if !matches!(ws.as_str(), "direct" | "isolated") {
+                        return fail(cfg, "usage: nexus project open <folder> [--workspace direct|isolated]");
+                    }
+                    ic::project_open_with(&sock, arg, Some(&ws))
+                }
+                "workspace" => {
+                    let mode = positional.get(1).map(|s| s.as_str()).unwrap_or("");
+                    if !matches!(mode, "direct" | "isolated") || arg.is_empty() {
+                        return fail(cfg, "usage: nexus project workspace <id> direct|isolated");
+                    }
+                    ic::project_set_workspace(&sock, arg, mode)
+                }
                 "forget" => ic::project_forget(&sock, arg),
                 "refresh" => ic::project_refresh(&sock, arg),
                 "policy" => {
@@ -1819,6 +1834,20 @@ fn cmd_project(args: &[String], cfg: &ClientConfig) -> ExitCode {
                         &v,
                         &serde_json::to_string_pretty(&v).unwrap_or_default(),
                     );
+                    if !cfg.json && matches!(sub, "open" | "workspace") {
+                        let mode = v
+                            .pointer("/project/workspaceMode")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("isolated");
+                        eprintln!(
+                            "{}",
+                            if mode == "direct" {
+                                "Workspace: DIRECT. Nexus edits the files in this folder in place; each approved change is on disk immediately and there is no patch to apply. Change it with `nexus project workspace <id> isolated`."
+                            } else {
+                                "Workspace: ISOLATED. Nexus works in a throw-away copy; review and apply its patch. Change it with `nexus project workspace <id> direct`."
+                            }
+                        );
+                    }
                     ExitCode::Ok
                 }
                 Err(e) => emit_err(cfg.json, &e),
@@ -1884,7 +1913,7 @@ fn cmd_project(args: &[String], cfg: &ClientConfig) -> ExitCode {
         }
         _ => fail(
             cfg,
-            "usage: nexus project <add|list|show|remove|repin|set-scope|set-clients> ...",
+            "usage: nexus project <add|list|show|remove|repin|set-scope|set-clients|open|workspace|ls|policy|refresh|forget> ...",
         ),
     }
 }

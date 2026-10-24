@@ -717,7 +717,12 @@ pub(crate) fn run(
         .unwrap_or_default();
     // A6.1.4: a project opened from the Desktop starts every NEW task from its current
     // files (re-snapshot when the folder changed); already-running tasks keep their copy.
-    if mode == Mode::Code {
+    // A direct run edits the folder itself, so there is nothing to refresh for it.
+    let direct_kind = b
+        .store
+        .load(run_id)
+        .is_some_and(|r| r.run.workspace_kind.as_deref() == Some("direct"));
+    if mode == Mode::Code && !direct_kind {
         if let Some(env) = b.cfg.project_env() {
             crate::projects::ensure_fresh(&env, &workspace_id);
         }
@@ -1132,6 +1137,7 @@ pub(crate) fn run(
                 limits.output_tokens
             },
             max_tool_result_bytes: limits.result_bytes,
+            direct: run_direct,
         };
         if b.cfg.interactive {
             // A6.1.4: issued by the broker from the standing user consent, per run, audited.

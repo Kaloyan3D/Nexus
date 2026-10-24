@@ -39,8 +39,8 @@ pub fn consent_text(provider_id: &str, remote_model_id: &str) -> String {
     format!(
         "Allow Nexus to work autonomously on your projects using {provider_id} ({remote_model_id}).\n\n\
          • Your task text, project files the model reads, and the output of build/test commands are sent to this provider. Provider use is billable.\n\
-         • The model may edit files and run build/test commands only inside an isolated copy of your project, without asking you for each operation. Every such grant is recorded as an automated workspace-policy grant, not as your approval.\n\
-         • Your original project is never modified, committed, pushed or deployed by Nexus; you review the resulting patch and decide.\n\
+         • The model may edit files and run build/test commands without asking you for each operation, in the workspace you chose for each project: an isolated copy (your original is untouched until you review and apply the patch) or, for a project you let Nexus edit directly, that project's real folder (each change is on disk at once and Nexus keeps the original of every file it changes). Every such grant is recorded as an automated workspace-policy grant, not as your approval.\n\
+         • Nexus never commits, pushes, merges or deploys, and never reads or changes secrets, credential stores or the .git folder.\n\
          • You can revoke this in Settings at any time."
     )
 }
@@ -204,6 +204,13 @@ pub fn authorize_run(
     if !c.intent_types.iter().any(|t| t == a.intent_type) {
         return refuse("the consent does not cover this kind of run");
     }
+    // Editing a project's real folder needs a consent given for the text that says so: an older
+    // consent (isolated copies only) never silently stretches to it.
+    if a.direct && c.text_sha256 != prompt_digest(&consent_text(a.provider_id, a.remote_model_id)) {
+        return refuse(
+            "this project is set to edit its folder directly, but your standing consent was given before that existed: give consent again in Nexus settings (nothing was changed)",
+        );
+    }
     if a.prompt.trim().is_empty() || a.workspace_id.is_empty() {
         return refuse("a run needs a task text and a project");
     }
@@ -240,7 +247,7 @@ pub fn authorize_run(
         serde_json::json!({"atMs": now_ms(), "kind": "run-authorized", "runId": run_id,
             "consentId": c.consent_id, "intentType": a.intent_type, "provider": a.provider_id,
             "model": a.remote_model_id, "workspace": a.workspace_id,
-            "promptSha256": rec.prompt_sha256, "maxTurns": a.max_turns,
+            "promptSha256": rec.prompt_sha256, "workspaceKind": if a.direct { "direct" } else { "isolated" }, "maxTurns": a.max_turns,
             "maxToolCalls": a.max_tool_calls, "maxOutputTokens": rec.max_output_tokens}),
     );
     Ok(rec)
@@ -261,6 +268,7 @@ mod tests {
             max_tool_calls: 200,
             max_output_tokens: Some(16_384),
             max_tool_result_bytes: 512 * 1024,
+            direct: false,
         }
     }
 
@@ -307,6 +315,35 @@ mod tests {
         )
         .is_err());
         assert!(status(d.path()).is_none());
+    }
+
+    #[test]
+    fn a_consent_given_before_direct_workspaces_never_stretches_to_editing_a_real_folder() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        // the current text names the direct workspace: a consent given for it covers both kinds of run
+        give(d.path());
+        let mut a = att("fix it");
+        a.direct = true;
+        assert!(authorize_run(d.path(), &a, "run_d").is_ok());
+        // a consent recorded for any OTHER text (an older, isolated-only one) covers isolated runs only
+        let mut old = status(d.path()).unwrap();
+        old.text_sha256 = prompt_digest("the old, isolated-copy-only text");
+        atomic_write(
+            &consent_path(d.path()),
+            serde_json::to_string(&old).unwrap().as_bytes(),
+        )
+        .unwrap();
+        assert!(authorize_run(d.path(), &att("fix it"), "run_i").is_ok());
+        let e = authorize_run(d.path(), &a, "run_d2").unwrap_err();
+        assert_eq!(e.0, "live-not-authorized");
+        assert!(e.1.contains("consent again"), "{}", e.1);
+        // and the text really says what the agent may do to the folder
+        let t = consent_text("p", "m");
+        assert!(
+            t.contains("real folder") && t.contains("isolated copy"),
+            "{t}"
+        );
     }
 
     #[test]

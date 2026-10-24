@@ -1,5 +1,6 @@
 import { FolderGit2, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 import { useNexus } from "../../state/NexusContext";
+import type { WorkspaceMode } from "../../lib/contracts";
 import { Alert, Badge, Button, EmptyState } from "../../components/ui/primitives";
 
 /**
@@ -8,7 +9,7 @@ import { Alert, Badge, Button, EmptyState } from "../../components/ui/primitives
  * something the Desktop can do or request.
  */
 function OpenedProjects() {
-  const { projects, openProject, refreshProject, forgetProject, setProjectPolicy, refreshProjects, setupBusy, setupError } = useNexus();
+  const { projects, openProject, refreshProject, forgetProject, setProjectPolicy, setProjectEditMode, refreshProjects, setupBusy, setupError } = useNexus();
   const managed = projects.filter((p) => p.managed);
   return (
     <section aria-label="Your projects" className="nv-stack" style={{ gap: 10 }}>
@@ -36,6 +37,7 @@ function OpenedProjects() {
             <tr>
               <th>Project</th>
               <th>Type</th>
+              <th>Workspace</th>
               <th>Snapshot</th>
               <th />
             </tr>
@@ -53,6 +55,22 @@ function OpenedProjects() {
                     </Badge>
                   ))}
                 </td>
+                <td>
+                  <label className="nv-note" title="Where Nexus makes changes for NEW tasks. Direct: the real files in your project folder, saved as each change is made (no patch to apply). Isolated: a throw-away copy; you review and apply its patch.">
+                    <span className="nv-sr-only">Workspace for {p.label}</span>
+                    <select
+                      className="nv-select nv-select--quiet"
+                      aria-label={`Workspace for ${p.label}`}
+                      value={p.workspaceMode === "direct" ? "direct" : "isolated"}
+                      onChange={(e) => void setProjectEditMode(p.projectId, e.target.value as WorkspaceMode)}
+                      disabled={setupBusy === "project"}
+                    >
+                      <option value="direct">Edit my folder directly</option>
+                      <option value="isolated">Isolated copy (review and apply)</option>
+                    </select>
+                  </label>
+                  {p.workspaceMode === "direct" ? <Badge tone="warning" title="Changes are written to your real files">edits your files</Badge> : null}
+                </td>
                 <td className="nv-note">
                   {new Date(p.snapshotAtMs).toLocaleString()}
                   {p.changedSinceSnapshot === true ? " · folder changed since (new tasks refresh automatically)" : ""}
@@ -62,9 +80,13 @@ function OpenedProjects() {
                   <label className="nv-note" title="Lets Nexus download this project's dependencies (npm ci, pip install, ...) inside its sandbox. Everything else runs without network.">
                     <input type="checkbox" checked={p.installs === true} onChange={(e) => void setProjectPolicy(p.projectId, { installs: e.target.checked })} disabled={setupBusy === "project"} aria-label={`Allow dependency installs for ${p.label}`} /> installs
                   </label>{" "}
+                  {p.workspaceMode !== "direct" && (
+                    <>
                   <label className="nv-note" title="Trusted workspace: when a task finishes and its checks pass, Nexus applies the change to your folder by itself (all-or-nothing, only if your folder did not change meanwhile). Nothing is committed or pushed.">
-                    <input type="checkbox" checked={p.trusted === true} onChange={(e) => void setProjectPolicy(p.projectId, { trusted: e.target.checked })} disabled={setupBusy === "project"} aria-label={`Apply finished work to ${p.label} automatically`} /> apply automatically
-                  </label>{" "}
+                        <input type="checkbox" checked={p.trusted === true} onChange={(e) => void setProjectPolicy(p.projectId, { trusted: e.target.checked })} disabled={setupBusy === "project"} aria-label={`Apply finished work to ${p.label} automatically`} /> apply automatically
+                      </label>{" "}
+                    </>
+                  )}
                   <Button size="sm" variant="ghost" icon={<RefreshCw size={13} />} aria-label={`Refresh ${p.label}`} onClick={() => void refreshProject(p.projectId)} disabled={setupBusy === "project"}>
                     Refresh
                   </Button>
@@ -89,7 +111,7 @@ export function ProjectsPage() {
         <OpenedProjects />
         <h2 className="nv-subheading">What applies to every task</h2>
         <ul className="nv-list" aria-label="Execution policy">
-          <li>Nexus works in an isolated copy of your project; your folder is never modified, and nothing is committed, pushed or merged.</li>
+          <li>Each project has a workspace setting you choose: Nexus edits the real files in the project folder directly (every change is on disk as soon as it is made; it keeps the original of every file it changes), or works in an isolated copy that you review and apply. Nothing is ever committed, pushed or merged.</li>
           <li>Edits and build/test commands run automatically under a workspace policy (recorded as automated grants, never as your approval). Commands run in a sandbox with the network off.</li>
           <li>Protected files (lock files, build scripts, hidden and credential-shaped paths, version-control internals) cannot be written.</li>
           <li>Selected source text and command output are sent to your connected provider; each model turn is a billable request. You can revoke consent in Settings.</li>

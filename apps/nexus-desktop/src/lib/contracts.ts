@@ -434,6 +434,8 @@ export interface IntentRun {
   readOnly?: boolean;
   /** How the working copy relates to earlier runs: fresh | continued | rebased | fresh-by-choice. */
   workspaceRelation?: string | null;
+  /** `direct` when this run edited the project's real folder in place (fixed at submission); absent = an isolated copy. */
+  workspaceKind?: "direct" | null;
   workspaceNote?: string | null;
   /** The earlier run whose working copy this run started from. */
   seedFrom?: string | null;
@@ -551,6 +553,8 @@ export interface ProjectKindView {
   supported: boolean;
 }
 
+export type WorkspaceMode = "direct" | "isolated";
+
 export interface ProjectView {
   projectId: string;
   label: string;
@@ -562,6 +566,8 @@ export interface ProjectView {
   installs?: boolean;
   /** Trusted workspace: finished, verified work is applied to the user's folder automatically. */
   trusted?: boolean;
+  /** Where NEW tasks edit: `direct` = this project's real folder, in place; `isolated` (or absent) = a throw-away copy. */
+  workspaceMode?: WorkspaceMode;
   snapshotAtMs: number;
   originDirty: boolean;
   /** True when the folder changed since Nexus last copied it (new tasks refresh automatically). */

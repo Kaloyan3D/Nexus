@@ -58,6 +58,7 @@
     "allow-adaptive-setup",
     "allow-run-engine",
     "allow-intent-resume",
-    "allow-run-resumable"
+    "allow-run-resumable",
+    "allow-project-set-edit-mode"
   ]
 }

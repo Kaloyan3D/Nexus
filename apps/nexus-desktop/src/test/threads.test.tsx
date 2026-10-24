@@ -365,4 +365,37 @@ describe("Persistent conversations (A7.1)", () => {
     expect(within(run3).queryByText(/^Tests passed/)).toBeNull();
     expect(within(run3).getByText("Cancelled")).toBeInTheDocument();
   });
+
+  describe("Direct Workspace", () => {
+    const managed = { projectId: "east-india", label: "East India", managed: true, kinds: [], pinnedCommit: "0".repeat(40), writeAllow: [], snapshotAtMs: 1, originDirty: false, changedSinceSnapshot: null };
+    const applied = { change: "applied", verification: "verified-passed", editsApplied: 1, editsNotApplied: 0, testsExecuted: 1, testsNotExecuted: 0, blockedByApproval: 0, lastExitCode: 0, staleAfterEdit: false, uncertainOperations: 0 };
+    const withRun = (extra: Record<string, unknown>) =>
+      detail({
+        thread: summary({ runCount: 3 }),
+        messages: [...detail().messages, msg(5, "user", "request", R("3"), "Fix it")],
+        runs: [
+          runView(1, { mode: "review", readOnly: true }, { readOnly: true }),
+          runView(2, {}, {}),
+          runView(3, { userSeq: 5, assistantSeq: null }, { changedFiles: [{ path: "src/lib.rs", status: "modified", additions: 1, deletions: 1 }] as never, codingOutcome: applied as never, workspaceId: "east-india", ...extra }),
+        ],
+      });
+
+    it("a direct run says it edited the folder itself and offers NO Apply step", async () => {
+      const d = withRun({ workspaceKind: "direct", workspaceRelation: "direct", workspaceNote: "Edits go directly to your project folder; they are on disk as soon as each one is made." });
+      mount(base({ threadGet: async () => d, threadList: async () => ({ threads: [d.thread] }), projectList: async () => ({ projects: [managed] }) }), `#/workspace/c/${T1}`);
+      const run3 = await screen.findByRole("region", { name: "Run 3" });
+      expect(within(run3).getByText("Edits your folder directly")).toBeInTheDocument();
+      expect(within(run3).getByText(/Edits go directly to your project folder/)).toBeInTheDocument();
+      expect(within(run3).getByRole("button", { name: /View diff/ })).toBeInTheDocument(); // the evidence of what changed stays
+      expect(screen.queryByRole("button", { name: /Apply to my folder/ })).not.toBeInTheDocument();
+    });
+
+    it("an isolated run keeps its Apply step", async () => {
+      const d = withRun({});
+      mount(base({ threadGet: async () => d, threadList: async () => ({ threads: [d.thread] }), projectList: async () => ({ projects: [managed] }) }), `#/workspace/c/${T1}`);
+      const run3 = await screen.findByRole("region", { name: "Run 3" });
+      expect(within(run3).queryByText("Edits your folder directly")).not.toBeInTheDocument();
+      expect(await screen.findByRole("button", { name: /Apply to my folder/ })).toBeInTheDocument();
+    });
+  });
 });

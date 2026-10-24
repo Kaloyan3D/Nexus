@@ -61,7 +61,7 @@ export function SetupCard() {
           {connected && !consented && (
             <div className="nv-setup__act">
               <p className="nv-note">
-                Nexus will read your project, edit files and run build/test commands in an isolated copy without asking for each step. Your original folder is never changed. You confirm once, in a system dialog.
+                Nexus will read your project, edit files and run build/test commands without asking for each step: directly in the project folder or in an isolated copy, as you choose for each project. Nothing is ever committed, pushed or deployed. You confirm once, in a system dialog.
               </p>
               <Button onClick={() => void giveConsent()} disabled={setupBusy === "consent"}>
                 Review and allow…

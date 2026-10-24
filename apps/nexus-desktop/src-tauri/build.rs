@@ -40,6 +40,7 @@ const COMMANDS: &[&str] = &[
     "project_list",
     "project_refresh",
     "project_set_policy",
+    "project_set_edit_mode",
     "code_limits_set",
     "project_forget",
     "project_adopt",

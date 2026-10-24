@@ -474,7 +474,40 @@ impl Runtime {
         let Some(path) = d.pick_folder("Open a project folder")? else {
             return Err("cancelled".into());
         };
-        ic::project_open(&self.sock(), &path).map_err(|e| e.message)
+        // A project that is already open keeps its durable workspace choice. A NEW one asks, in plain
+        // words and before any task can run, where Nexus is allowed to make changes.
+        let v = ic::project_open_with(&self.sock(), &path, None).map_err(|e| e.message)?;
+        if v.get("created") == Some(&serde_json::Value::Bool(true)) {
+            let id = v["project"]["projectId"].as_str().unwrap_or("").to_owned();
+            if d.confirm(DIRECT_TITLE, DIRECT_TEXT)? {
+                return ic::project_set_workspace(&self.sock(), &id, "direct")
+                    .map(|mut w| {
+                        // keep the snapshot facts of the open; the project view is the updated one
+                        if let (Some(o), Some(n)) = (v.as_object(), w.as_object_mut()) {
+                            for (k, val) in o {
+                                n.entry(k.clone()).or_insert(val.clone());
+                            }
+                        }
+                        w
+                    })
+                    .map_err(|e| e.message);
+            }
+        }
+        Ok(v)
+    }
+
+    /// Change where NEW tasks of an opened project edit. Choosing the direct workspace needs a native
+    /// confirmation (the agent will change the real files); choosing the isolated copy does not.
+    pub fn project_set_workspace(
+        &self,
+        d: &dyn Dialogs,
+        id: &str,
+        mode: &str,
+    ) -> Result<serde_json::Value, String> {
+        if mode == "direct" && !d.confirm(DIRECT_TITLE, DIRECT_TEXT)? {
+            return Err("cancelled".into());
+        }
+        ic::project_set_workspace(&self.sock(), id, mode).map_err(|e| e.message)
     }
 
     /// Apply a finished run's patch to the user's folder after a NATIVE confirmation that
@@ -508,6 +541,9 @@ impl Runtime {
         ic::project_forget(&self.sock(), id).map_err(|e| e.message)
     }
 }
+
+const DIRECT_TITLE: &str = "Let Nexus edit this folder directly?";
+const DIRECT_TEXT: &str = "Yes: Nexus reads, creates, changes and deletes files in this project folder itself. Each change is on disk as soon as it is made, your editor and terminal see it at once, and there is no patch to apply afterwards. Nexus still cannot leave the folder, touch secrets or .git, or overwrite a file you changed since it read it, and it keeps the original of every file it changes.\n\nNo: Nexus works in a throw-away copy and you review and apply its patch yourself.\n\nYou can change this later in the project's settings; it applies to new tasks only.";
 
 /// The Desktop's coding submission: text + project identity only. The limits are the
 /// broker's (never the renderer's). Shared by the Tauri command and the acceptance runner

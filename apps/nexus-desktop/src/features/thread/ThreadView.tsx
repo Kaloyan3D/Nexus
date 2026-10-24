@@ -28,6 +28,7 @@ const WORKSPACE_LABEL: Record<string, string> = {
   rebased: "Continues the workspace on your updated project",
   fresh: "Started from the project's files",
   "fresh-by-choice": "Started from your project's current files, as you chose",
+  direct: "Edits your project folder directly",
 };
 
 function Steps({ run, limit }: { run: IntentRun; limit?: number }) {
@@ -118,6 +119,11 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
         <Badge tone={r.readOnly ? "neutral" : "purple"} icon={r.readOnly ? <Lock size={11} aria-hidden="true" /> : undefined} title={r.modeReason}>
           {r.readOnly ? "Read-only" : "Can change files"}
         </Badge>
+        {run?.workspaceKind === "direct" && (
+          <Badge tone="warning" title="This run edits the real files in your project folder. Each change is saved as it is made; nothing is left to apply.">
+            Edits your folder directly
+          </Badge>
+        )}
         <Badge tone={v.tone} icon={<StatusDot tone={v.tone} pulse={v.pulse} />} title="What this run did (lifecycle), not whether the task succeeded">
           {v.label}
         </Badge>
@@ -160,6 +166,7 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
               turn {run.turn ?? 0} of {run.maxTurns ?? "—"}
             </span>
           </div>
+          {run.workspaceKind === "direct" && <p className="nv-note">Editing your project folder directly: every change below is already saved in your files.</p>}
           <Steps run={run} limit={6} />
           <p className="nv-note">
             {(() => {
@@ -194,7 +201,7 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
           <Button size="sm" onClick={() => openPanel("evidence", run)}>
             Execution evidence
           </Button>
-          {isLatestWithChanges(detail, r) && run.codingOutcome?.change === "applied" && <AdoptButton run={run} />}
+          {isLatestWithChanges(detail, r) && run.codingOutcome?.change === "applied" && run.workspaceKind !== "direct" && <AdoptButton run={run} />}
         </div>
       )}
       {!live && run && r.readOnly && (

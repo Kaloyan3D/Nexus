@@ -343,6 +343,9 @@ pub struct SessionAttempt<'a> {
     pub max_tool_calls: u32,
     pub max_output_tokens: Option<u64>,
     pub max_tool_result_bytes: u64,
+    /// Direct Workspace: the run edits the project's real folder. The standing consent must then be
+    /// one that was given for the text that says so.
+    pub direct: bool,
 }
 
 /// Verify and CONSUME the session record (rename = the single-use point).
@@ -552,6 +555,7 @@ mod tests {
             max_tool_calls: 10,
             max_output_tokens: Some(512),
             max_tool_result_bytes: 65536,
+            direct: false,
         }
     }
 

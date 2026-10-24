@@ -10,9 +10,9 @@ import { failedBeforeSubmissionMessage, refusalMessage } from "../models/modelTa
 export const THREAD_PLACEHOLDER = "Message Nexus about this project…";
 
 const MODES: Array<{ id: ThreadMode; label: string; title: string }> = [
-  { id: "auto", label: "Auto", title: "Questions and reviews stay read-only; requests to change something may edit the isolated copy" },
+  { id: "auto", label: "Auto", title: "Questions and reviews stay read-only; requests to change something may edit the project (in the workspace you chose for it)" },
   { id: "review", label: "Review only", title: "Read-only: Nexus can read and run checks but cannot change a file" },
-  { id: "edit", label: "Make changes", title: "Nexus may edit files in the conversation's isolated copy and run tests there" },
+  { id: "edit", label: "Make changes", title: "Nexus may edit files in the project (in the workspace you chose for it) and run tests there" },
 ];
 
 /** Run endings that mean the conversation's workspace could not be carried into a new run. */

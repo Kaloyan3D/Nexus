@@ -28,6 +28,7 @@ import type {
   RegistryTarget,
   ThreadMode,
   AdaptiveSetupReport,
+  WorkspaceMode,
   EngineChoiceView,
   EngineKind,
   ThreadSendReply,
@@ -158,6 +159,7 @@ export interface NexusState {
   refreshProject: (projectId: string) => Promise<void>;
   forgetProject: (projectId: string) => Promise<void>;
   setProjectPolicy: (projectId: string, policy: { installs?: boolean; trusted?: boolean }) => Promise<void>;
+  setProjectEditMode: (projectId: string, mode: WorkspaceMode) => Promise<void>;
 }
 
 function newIdempotencyKey(): string {
@@ -623,6 +625,13 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     },
     [guarded, nativeApi, refreshProjects],
   );
+  const setProjectEditMode = useCallback(
+    async (id: string, mode: WorkspaceMode) => {
+      await guarded("project", () => nativeApi.projectSetEditMode(id, mode));
+      await refreshProjects(false);
+    },
+    [guarded, nativeApi, refreshProjects],
+  );
   const forgetProject = useCallback(async (id: string) => void (await guarded("project", () => nativeApi.projectForget(id))), [guarded, nativeApi]);
 
   // ---- A7.1 conversations -----------------------------------------------------------
@@ -841,6 +850,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     refreshProject,
     forgetProject,
     setProjectPolicy,
+    setProjectEditMode,
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

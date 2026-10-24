@@ -377,6 +377,42 @@ impl Store {
     }
 }
 
+/// Retention: remove the kept originals of direct tasks that ended long ago (their record too). Only
+/// daemon-private data under `<base>/.direct` and `<base>/.meta` is ever touched, never a project folder.
+/// Returns how many tasks were swept.
+pub fn sweep_old(base: &Path, max_age: std::time::Duration) -> usize {
+    let Ok(rd) = std::fs::read_dir(base.join(".direct")) else {
+        return 0;
+    };
+    let mut n = 0;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !crate::gitwt::valid_task_id(&name) {
+            continue;
+        }
+        let manifest = e.path().join("manifest.json");
+        let age = std::fs::symlink_metadata(&manifest)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok());
+        if age.is_some_and(|a| a >= max_age) {
+            let meta = base.join(".meta").join(format!("{name}.json"));
+            // only a record that says it is a direct task is removed along with its store
+            let is_direct = std::fs::read_to_string(&meta)
+                .ok()
+                .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
+                .is_some_and(|m| m.get("kind").and_then(|k| k.as_str()) == Some("direct"));
+            if std::fs::remove_dir_all(e.path()).is_ok() {
+                if is_direct {
+                    let _ = std::fs::remove_file(&meta);
+                }
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 /// The current bytes of `path` in the folder, read through the descriptor-relative boundary
 /// (`Ok(None)` = absent; a symlink or special file is an error, never followed).
 fn read_current(ws: &Workspace, path: &str) -> Result<Option<Vec<u8>>, DirectError> {
@@ -755,6 +791,35 @@ mod tests {
         let f = d.path().join("file");
         std::fs::write(&f, "x").unwrap();
         assert!(validate_root(f.to_str().unwrap(), &[]).is_err());
+    }
+
+    #[test]
+    fn old_stores_are_swept_and_recent_ones_and_projects_are_not() {
+        let (proj, base, store, _root) = setup();
+        std::fs::write(proj.path().join("keep.txt"), "keep\n").unwrap();
+        store.record_pre("keep.txt", Some(b"keep\n"), None).unwrap();
+        // a recent store survives a 30-day sweep
+        assert_eq!(
+            sweep_old(base.path(), std::time::Duration::from_secs(30 * 86400)),
+            0
+        );
+        assert!(store.exists());
+        // an old one goes (its manifest is older than the cutoff), the project never
+        let f = std::fs::File::options()
+            .write(true)
+            .open(store.dir().join("manifest.json"))
+            .unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86400))
+            .unwrap();
+        assert_eq!(
+            sweep_old(base.path(), std::time::Duration::from_secs(30 * 86400)),
+            1
+        );
+        assert!(!store.exists());
+        assert_eq!(
+            std::fs::read_to_string(proj.path().join("keep.txt")).unwrap(),
+            "keep\n"
+        );
     }
 
     #[test]

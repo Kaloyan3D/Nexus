@@ -45,6 +45,7 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
     cancelPendingIntent,
     runtimeState,
     openProject,
+    projects,
     setupBusy,
   } = useNexus();
   const interactive = runtimeState?.mode === "interactive";
@@ -61,6 +62,8 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
   const sources = intentCodeSources ?? [];
   const workspace = workspaces.length > 0 ? workspaces[Math.min(wsIdx, workspaces.length - 1)]! : null;
   const source = sources.length > 0 ? sources[Math.min(srcIdx, sources.length - 1)]! : null;
+  // Direct Workspace: whether the chosen project's tasks edit its real folder (the durable project choice)
+  const directMode = projects.some((p) => p.projectId === source?.sourceId && p.workspaceMode === "direct");
   const model = intentModels && intentModels.length > 0 ? intentModels[Math.min(modelIdx, intentModels.length - 1)]! : null;
   const empty = text.trim().length === 0;
   // Interactive profile: working on a project is THE default once one is open.
@@ -245,7 +248,7 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
           <div className="nv-terms__line">
             <span>
               <span className="nv-mono">{source.label ?? source.sourceId}</span>
-              {source.kinds && source.kinds.length > 0 ? ` · ${source.kinds.join(", ")}` : ""} · Nexus works in an isolated copy and runs builds and tests there automatically. Your folder is not changed until you apply the patch.
+              {source.kinds && source.kinds.length > 0 ? ` · ${source.kinds.join(", ")}` : ""} · {directMode ? "Nexus edits the real files in this folder directly (each change is on disk as soon as it is made; no patch to apply) and runs builds and tests automatically." : "Nexus works in an isolated copy and runs builds and tests there automatically. Your folder is not changed until you apply the patch."}
             </span>
           </div>
           <div className="nv-terms__line nv-note">
@@ -289,9 +292,9 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
             </button>
           </label>
           {moreTerms && (
-            <Alert tone="warning" title="This mode can change files (in an isolated copy) and run commands">
+            <Alert tone="warning" title={directMode ? "This mode changes files directly in your project folder and runs commands" : "This mode can change files (in an isolated copy) and run commands"}>
               The model may propose edits and build/test commands. Nothing runs until a separate approver reviews the exact patch or command; this application cannot approve. Changes are
-              made in a throw-away copy, never your repository, and nothing is committed, pushed or merged. Selected source text and command output are sent to the provider; commands run
+              made {directMode ? "directly in your project folder, with the original of every changed file kept," : "in a throw-away copy, never your repository,"} and nothing is committed, pushed or merged. Selected source text and command output are sent to the provider; commands run
               offline in a sandbox. Each model turn is a billable request.
             </Alert>
           )}

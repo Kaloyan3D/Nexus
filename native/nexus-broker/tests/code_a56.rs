@@ -16090,3 +16090,59 @@ fn isolated_mode_is_unchanged_and_mode_changes_never_migrate_a_task() {
         .contains("a + b"));
     env.b.shutdown();
 }
+
+/// 6 (restart): the broker is stopped and started again while a direct run is unfinished. The edit that was
+/// already made is still in the folder, nothing was lost or repeated, no stale writer slot survives the restart,
+/// and the interrupted run can be resumed natively in the same folder.
+#[test]
+fn direct_survives_a_broker_restart_without_losing_the_edit_or_the_writer_slot() {
+    if !sandbox_ready() {
+        return;
+    }
+    let env = direct_env("direct-restart", hold_after_edit);
+    let DirectEnv {
+        fx,
+        b,
+        sock,
+        folder,
+        pid,
+    } = env;
+    let first = ic::submit(
+        &sock,
+        &code_intent_for(
+            &pid,
+            "Fix the failing add test.",
+            "direct-restart-001",
+            |_| {},
+        ),
+    )
+    .expect("submit")
+    .run;
+    wait_until(120, "the edit to reach the folder", || {
+        std::fs::read_to_string(folder.join("src/lib.rs"))
+            .map(|t| t.contains("a + b"))
+            .unwrap_or(false)
+    });
+    b.shutdown();
+    // the same state directory, a new broker process
+    let b2 = managed_broker(&fx, "direct-restart");
+    let sock2 = b2.socket_path().to_owned();
+    let old = ic::status(&sock2, &first.run_id).expect("the run is still known");
+    assert!(old.terminal, "{old:?}");
+    assert!(std::fs::read_to_string(folder.join("src/lib.rs"))
+        .unwrap()
+        .contains("a + b"));
+    // no writer slot is held by the dead process
+    let v = ic::resume(&sock2, &first.run_id).expect("resume after a restart");
+    let second = wait_terminal(&sock2, v["run"]["runId"].as_str().unwrap(), 180);
+    assert_eq!(second.state, "completed", "{second:?}");
+    assert_eq!(second.workspace_kind.as_deref(), Some("direct"));
+    // what the interrupted run changed is still attributable to it (its originals were kept)
+    let d = ic::diff(&sock2, &first.run_id).expect("diff of the interrupted run");
+    assert!(
+        d.files.iter().any(|f| f.path == "src/lib.rs"),
+        "{:?}",
+        d.files
+    );
+    b2.shutdown();
+}
