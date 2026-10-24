@@ -4,6 +4,7 @@ import { useNexus } from "../../state/NexusContext";
 import { Alert, Button } from "../../components/ui/primitives";
 import type { ThreadMode } from "../../lib/contracts";
 import { ModeSwitch } from "../thread/ThreadComposer";
+import { EngineChoice } from "../engine/EngineChoice";
 
 export const COMPOSER_PLACEHOLDER = "Describe the task…";
 
@@ -212,6 +213,7 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
           {(!intentModels || intentModels.length === 0) && <option value={0}>No model available</option>}
         </select>
         {mode === "code" && interactive && <ModeSwitch value={threadMode} onChange={setThreadMode} />}
+        {mode === "code" && interactive && <EngineChoice compact />}
         <span className="nv-composer__spacer" />
         {intentPending && (
           <Button variant="ghost" onClick={() => void cancelPendingIntent()} aria-label="Cancel submission" icon={<Ban size={15} />} disabled={intentPending.cancelRequested}>

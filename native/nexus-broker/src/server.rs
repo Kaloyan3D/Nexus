@@ -853,6 +853,83 @@ impl Broker {
 
     /// Read-only facts about the retained isolated working copy of one of THIS
     /// client's runs (A6.1.3). Never a path; ownership-checked like the diff.
+    /// Phase 2: what the run's ENGINE durably recorded, for the person looking at the run: which engine
+    /// and mode it was bound to, each attempt's authorized effort, and the effort events. Read from the
+    /// HMAC-authenticated engine-state record (a record that fails authentication is an error, never
+    /// shown). Nothing here is derived from the model; a run that never reached its engine says so.
+    fn engine_summary(&self, client: &str, run_id: &str) -> CmdResult {
+        let rec = self.owned(client, run_id)?;
+        let bound = json!({
+            "engineId": rec.engine_id, "modeId": rec.engine_mode_id,
+            "route": rec.run.route_id,
+        });
+        let Some(task) = rec.run.task_instance_id.clone() else {
+            return Ok(
+                json!({ "run": run_id, "bound": bound, "record": null, "live": !rec.run.terminal }),
+            );
+        };
+        let store =
+            crate::engine_state::EngineStateStore::open(&self.cfg.state_dir).map_err(|e| {
+                (
+                    "internal",
+                    format!("the engine state is unavailable ({})", e.code),
+                )
+            })?;
+        let st = match store.load(&task) {
+            Ok(Some(st)) => st,
+            Ok(None) => {
+                return Ok(json!({ "run": run_id, "bound": bound, "record": null, "live": !rec.run.terminal }))
+            }
+            Err(e) => {
+                return Err((
+                    "engine-state-unverified",
+                    format!("the engine record failed authentication or could not be read ({}); it is not shown", e.code),
+                ))
+            }
+        };
+        let v = serde_json::to_value(&st).unwrap_or_default();
+        let all_events: Vec<Value> = v["events"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|e| {
+                        matches!(
+                            e["kind"].as_str(),
+                            Some("effort-selected" | "effort-reset-continuation" | "run-ended" | "continued-without-predecessor-state" | "predecessor-state-from-ancestor")
+                        )
+                    })
+                    .map(|e| json!({ "kind": e["kind"], "attempt": e["attempt"], "effort": e["effort"], "detail": e["detail"] }))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // the newest 64 (bounded)
+        let events: Vec<Value> = all_events
+            .iter()
+            .skip(all_events.len().saturating_sub(64))
+            .cloned()
+            .collect();
+        let attempts: Vec<Value> = v["attempts"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|x| json!({ "ordinal": x["ordinal"], "effort": x["effort"], "state": x["state"] }))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(json!({
+            "run": run_id,
+            "bound": bound,
+            "live": !rec.run.terminal,
+            "record": {
+                "authenticated": true,
+                "engineId": v["engineId"], "modeId": v["modeId"], "defaultEffort": v["defaultEffort"],
+                "revision": v["revision"], "attempts": attempts, "events": events,
+                "lineage": v["lineage"].get("rule").cloned().unwrap_or(Value::Null),
+                "limiter": v["payload"]["adaptive"]["limiter"].clone(),
+            },
+        }))
+    }
+
     fn copy_info(&self, client: &str, run_id: &str) -> CmdResult {
         let rec = self.owned(client, run_id)?;
         if rec.run.intent_type != nexus_contracts::intent::INTENT_REPO_CODE {
@@ -1203,6 +1280,7 @@ impl Broker {
             })),
             "intent-diff" => self.diff(client, run_id),
             "intent-copy" => self.copy_info(client, run_id),
+            "intent-engine" => self.engine_summary(client, run_id),
             "project-open" | "project-list" | "project-forget" | "project-refresh"
             | "project-policy" => self.project_verb(cmd, params),
             "project-adopt" => self.project_adopt(client, run_id),

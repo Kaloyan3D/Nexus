@@ -48,6 +48,11 @@ const COMMANDS: &[&str] = &[
     "thread_send",
     "thread_create",
     "thread_update",
+    "engine_choice",
+    "engine_prefer",
+    "adaptive_setup",
+    "run_engine",
+    "intent_resume",
 ];
 
 fn main() {

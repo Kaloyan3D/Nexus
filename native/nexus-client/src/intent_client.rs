@@ -869,6 +869,17 @@ pub fn code_sources(socket: &Path) -> Result<Vec<AllowedCodeSource>, ClientError
 }
 
 /// The reviewable change set of one of THIS client's repo-code runs.
+/// Phase 2: what the run's engine durably recorded (engine, mode, per-attempt efforts, effort events),
+/// read from the broker's authenticated engine-state record.
+pub fn engine_summary(socket: &Path, run_id: &str) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "intent-engine",
+        serde_json::json!({ "runId": run_id }),
+        20_000,
+    )
+}
+
 pub fn diff(socket: &Path, run_id: &str) -> Result<DiffReply, ClientError> {
     decode(call(
         socket,
@@ -1118,6 +1129,9 @@ pub struct ThreadSend<'a> {
     pub model: Option<&'a str>,
     /// Optional route identity: exact catalog `routeId`.
     pub route: Option<&'a str>,
+    /// Optional Engineering Mode id (e.g. `engineering-v2-adaptive`); needs an explicit model
+    /// selection and is bound to the conversation. Absent = the default mode.
+    pub mode_id: Option<&'a str>,
 }
 
 pub fn thread_send(socket: &Path, s: &ThreadSend<'_>) -> Result<serde_json::Value, ClientError> {
@@ -1129,7 +1143,7 @@ pub fn thread_send(socket: &Path, s: &ThreadSend<'_>) -> Result<serde_json::Valu
             "mode": if s.mode.is_empty() { "auto" } else { s.mode },
             "workspace": if s.workspace.is_empty() { "continue" } else { s.workspace },
             "idempotencyKey": s.idempotency_key,
-            "model": s.model, "route": s.route,
+            "model": s.model, "route": s.route, "modeId": s.mode_id,
         }),
         90_000,
     )

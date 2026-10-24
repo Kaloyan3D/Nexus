@@ -27,6 +27,9 @@ import type {
   ProjectView,
   RegistryTarget,
   ThreadMode,
+  AdaptiveSetupReport,
+  EngineChoiceView,
+  EngineKind,
   ThreadSendReply,
   ThreadSummary,
   RuntimeSnapshot,
@@ -125,6 +128,14 @@ export interface NexusState {
   sendThread: (input: { threadId: string | null; projectId: string; content: string; mode: ThreadMode; workspace?: "continue" | "fresh"; model?: ModelSelection | null }) => Promise<ThreadSendReply | null>;
   threadSending: boolean;
   threadError: UiError | null;
+  /** Phase 2: the engine new tasks use (null = not loaded / not in the shell). */
+  engineChoice: EngineChoiceView | null;
+  setEnginePreference: (engine: EngineKind) => Promise<void>;
+  /** The one-time Nexus Adaptive setup (native confirmation; billable checks). */
+  setupAdaptive: () => Promise<void>;
+  adaptiveBusy: boolean;
+  adaptiveReport: AdaptiveSetupReport | null;
+  adaptiveError: UiError | null;
   clearThreadError: () => void;
   /** A5.6: submit a controlled coding task for a source identity. */
   sendCode: (prompt: string, sourceId: string) => Promise<boolean>;
@@ -658,6 +669,44 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     };
   }, [nativeApi, applyThreads, anyThreadActive, readyKey, reloadTick]);
   const [threadSending, setThreadSending] = useState(false);
+  const [engineChoice, setEngineChoice] = useState<EngineChoiceView | null>(null);
+  const [adaptiveBusy, setAdaptiveBusy] = useState(false);
+  const [adaptiveReport, setAdaptiveReport] = useState<AdaptiveSetupReport | null>(null);
+  const [adaptiveError, setAdaptiveError] = useState<UiError | null>(null);
+  useEffect(() => {
+    let alive = true;
+    nativeApi
+      .engineChoice()
+      .then((c) => alive && setEngineChoice(c))
+      .catch(() => alive && setEngineChoice(null));
+    return () => {
+      alive = false;
+    };
+  }, [nativeApi, readyKey, reloadTick]);
+  const setEnginePreference = useCallback(
+    async (engine: EngineKind) => {
+      await nativeApi.enginePrefer(engine);
+      setEngineChoice(await nativeApi.engineChoice());
+    },
+    [nativeApi],
+  );
+  const setupAdaptive = useCallback(async () => {
+    setAdaptiveBusy(true);
+    setAdaptiveError(null);
+    setAdaptiveReport(null);
+    try {
+      setAdaptiveReport(await nativeApi.adaptiveSetup());
+    } catch (e) {
+      setAdaptiveError(asUiError(e));
+    } finally {
+      setAdaptiveBusy(false);
+      try {
+        setEngineChoice(await nativeApi.engineChoice());
+      } catch {
+        /* the banner keeps its last answer */
+      }
+    }
+  }, [nativeApi]);
   const [threadError, setThreadError] = useState<UiError | null>(null);
   const clearThreadError = useCallback(() => setThreadError(null), []);
   const openThread = useCallback((id: string) => select({ kind: "thread", id }), [select]);
@@ -765,6 +814,12 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     sendThread,
     threadSending,
     threadError,
+    engineChoice,
+    setEnginePreference,
+    setupAdaptive,
+    adaptiveBusy,
+    adaptiveReport,
+    adaptiveError,
     clearThreadError,
     sendCode,
     intentPending,

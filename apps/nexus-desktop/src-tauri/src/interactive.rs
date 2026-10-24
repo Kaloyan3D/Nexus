@@ -65,6 +65,44 @@ pub fn install(rt: std::sync::Arc<Runtime>) {
     let _ = GLOBAL.set(rt);
 }
 
+/// Phase 2: the Home of the engine preference / saved adaptive configuration (the app's own runtime, or
+/// the environment's home when an external broker is used).
+pub fn engine_home() -> Result<Home, String> {
+    match GLOBAL.get() {
+        Some(rt) => rt.engine_home(),
+        None => Home::resolve(),
+    }
+}
+
+/// Phase 2: the engine choice for a NEW task: the explicit `engine` (adaptive | stable) or the operator's
+/// preference (default adaptive). `Ok(None)` = stable (the request every earlier version sent);
+/// adaptive that cannot be used is an error with an actionable message - never a silent stable.
+pub fn new_task_selection(
+    engine: Option<&str>,
+) -> Result<Option<nexus_runtime::engine_choice::Selection>, UiError> {
+    use nexus_runtime::engine_choice as ec;
+    let requested = match engine {
+        None => None,
+        Some(e) => Some(ec::Engine::parse(e).ok_or(UiError {
+            code: "bad-usage".to_owned(),
+            message: "the engine must be adaptive or stable".to_owned(),
+        })?),
+    };
+    let home = engine_home().map_err(|m| UiError {
+        code: "engine".to_owned(),
+        message: m,
+    })?;
+    if requested.unwrap_or_else(|| ec::preferred(&home)) == ec::Engine::Stable {
+        return Ok(None);
+    }
+    let targets = ic::registry_targets(&ic::default_broker_socket())
+        .map_err(|e| crate::backend::ui_error(&e))?;
+    ec::selection_for(&home, requested, &targets).map_err(|e| UiError {
+        code: e.code.to_owned(),
+        message: e.message,
+    })
+}
+
 /// Run a submission under the runtime's freshness check and update gate.
 pub fn guarded<T>(call: impl FnOnce() -> Result<T, UiError>) -> Result<T, UiError> {
     match GLOBAL.get() {
@@ -372,6 +410,29 @@ impl Runtime {
             return Err("cancelled".into());
         };
         nexus_runtime::connect_provider(home, tools, &key)
+    }
+
+    /// Phase 2: the explicit one-time setup of Nexus Adaptive. A NATIVE confirmation states exactly what
+    /// will be sent to the provider; only a "yes" there starts it. The renderer supplies nothing.
+    pub fn adaptive_setup(&self, d: &dyn Dialogs) -> Result<nexus_runtime::ConnectReport, String> {
+        let (Some(home), Ok(tools)) = (&self.home, &self.tools) else {
+            return Err("this app is not running its own runtime".into());
+        };
+        if !d.confirm(
+            "Set up Nexus Adaptive",
+            "Nexus will verify the adaptive route with OpenCode Go using your stored key: 8 small requests (a models call, a short text request at each reasoning level low, medium, high and xhigh, a streaming request, a tool call and its continuation). They count against your OpenCode Go plan. If every check passes, the adaptive configuration is saved. Nothing else is sent.",
+        )? {
+            return Err("cancelled".into());
+        }
+        nexus_runtime::enable_adaptive(home, tools)
+    }
+
+    /// The Home the engine preference and the saved adaptive configuration live in.
+    pub fn engine_home(&self) -> Result<Home, String> {
+        match &self.home {
+            Some(h) => Ok(h.clone()),
+            None => Home::resolve(),
+        }
     }
 
     /// One-time consent: the exact text the broker serves is shown in a NATIVE dialog;

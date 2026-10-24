@@ -50,6 +50,7 @@ fn main() {
                     idempotency_key: &a[5],
                     model: None,
                     route: None,
+                    mode_id: None,
                 },
             )
             .expect("thread-send");

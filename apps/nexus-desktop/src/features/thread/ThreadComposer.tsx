@@ -3,6 +3,7 @@ import { useRef, useState } from "react";
 import type { ModelSelection, ThreadDetail, ThreadMode } from "../../lib/contracts";
 import { Alert, Button } from "../../components/ui/primitives";
 import { useNexus } from "../../state/NexusContext";
+import { engineLabelForMode } from "../engine/EngineChoice";
 import { ModelPicker } from "../models/ModelPicker";
 import { failedBeforeSubmissionMessage, refusalMessage } from "../models/modelTargets";
 
@@ -50,6 +51,7 @@ export function ThreadComposer({ detail, onSent }: { detail: ThreadDetail; onSen
   const consentOk = !interactive || (runtimeState?.consent.given === true && runtimeState.providerConnected);
   const workspaceProblem = last?.run?.errorCode && WORKSPACE_CODES.has(last.run.errorCode) ? last.run : null;
   const cacheNote = failedBeforeSubmissionMessage(last?.run?.errorCode ?? null, last?.run?.errorMessage ?? null);
+  const engineLabel = engineLabelForMode(t.target?.modeId ?? null);
   const busy = t.active;
   const empty = text.trim().length === 0;
   const canSend = !busy && !threadSending && !empty && consentOk && !t.archived;
@@ -108,7 +110,13 @@ export function ThreadComposer({ detail, onSent }: { detail: ThreadDetail; onSen
         }}
       />
       <div className="nv-composer__ctx">
-        <ModelPicker targets={intentTargets} value={model} bound={t.target ?? null} disabled={busy} onChange={setModel} />
+        {engineLabel ? (
+          <span className="nv-note" title="This conversation keeps the engine it started with. Start a new conversation to use another.">
+            Engine: {engineLabel}
+          </span>
+        ) : (
+          <ModelPicker targets={intentTargets} value={model} bound={t.target ?? null} disabled={busy} onChange={setModel} />
+        )}
         <ModeSwitch value={mode} onChange={setMode} />
         {fresh && <span className="nv-note">Next message starts from your project's current files.</span>}
         <span className="nv-composer__spacer" />

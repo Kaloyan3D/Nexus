@@ -1,6 +1,10 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
+  AdaptiveSetupReport,
+  EngineChoiceView,
+  EngineKind,
+  RunEngineSummary,
   ApprovalsView,
   ConversationQuery,
   ConversationView,
@@ -103,6 +107,16 @@ export interface NativeApi {
   threadGet(threadId: string, afterSeq?: number | null): Promise<ThreadDetail>;
   threadSend(input: ThreadSendInput): Promise<ThreadSendReply>;
   threadCreate(projectId: string, title?: string | null): Promise<{ thread: ThreadSummary }>;
+  /** Phase 2: the engine choice for new tasks (read-only facts from the saved Registry configuration). */
+  engineChoice(): Promise<EngineChoiceView>;
+  /** Phase 2: remember the preferred engine for new tasks. */
+  enginePrefer(engine: EngineKind): Promise<EngineKind>;
+  /** Phase 2: the one-time Nexus Adaptive setup, after a NATIVE confirmation (billable provider checks). */
+  adaptiveSetup(): Promise<AdaptiveSetupReport>;
+  /** Phase 2: what a run's engine durably recorded (engine, per-attempt efforts, effort events). */
+  runEngine(runId: string): Promise<RunEngineSummary>;
+  /** Phase 2: continue an interrupted run in a new run from its work (the broker decides whether it may). */
+  intentResume(runId: string): Promise<{ run: IntentRun }>;
   threadUpdate(threadId: string, patch: { title?: string | null; archived?: boolean | null }): Promise<{ thread: ThreadSummary }>;
   intentStatus(runId: string): Promise<IntentRun>;
   intentResult(runId: string): Promise<string>;
@@ -201,7 +215,13 @@ export const tauriApi: NativeApi = {
       logicalModelId: i.model?.logicalModelId ?? null,
       routeId: i.model?.routeId ?? null,
       idempotencyKey: i.idempotencyKey,
+      engine: i.engine ?? null,
     }),
+  engineChoice: () => invoke<EngineChoiceView>("engine_choice"),
+  enginePrefer: (engine) => invoke<EngineKind>("engine_prefer", { engine }),
+  adaptiveSetup: () => invoke<AdaptiveSetupReport>("adaptive_setup"),
+  runEngine: (runId) => invoke<RunEngineSummary>("run_engine", { runId }),
+  intentResume: (runId) => invoke<{ run: IntentRun }>("intent_resume", { runId }),
   threadCreate: (projectId, title) => invoke<{ thread: ThreadSummary }>("thread_create", { projectId, title: title ?? null }),
   threadUpdate: (threadId, patch) => invoke<{ thread: ThreadSummary }>("thread_update", { threadId, title: patch.title ?? null, archived: patch.archived ?? null }),
   intentStatus: (runId) => invoke<IntentRun>("intent_status", { runId }),
@@ -283,6 +303,11 @@ export const unavailableApi: NativeApi = {
   threadList: () => Promise.resolve({ threads: [] }),
   threadGet: () => Promise.reject(notInShell),
   threadSend: () => Promise.reject(notInShell),
+  engineChoice: () => Promise.reject(notInShell),
+  enginePrefer: () => Promise.reject(notInShell),
+  adaptiveSetup: () => Promise.reject(notInShell),
+  runEngine: () => Promise.reject(notInShell),
+  intentResume: () => Promise.reject(notInShell),
   threadCreate: () => Promise.reject(notInShell),
   threadUpdate: () => Promise.reject(notInShell),
   intentStatus: () => Promise.reject(notInShell),

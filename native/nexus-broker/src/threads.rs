@@ -167,6 +167,11 @@ pub struct ThreadTarget {
     pub context_limit_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_limit_tokens: Option<u64>,
+    /// Phase 2: the Engineering Mode the conversation was started under (absent = the default
+    /// `engineering-v2`, exactly as every conversation before this field). A conversation keeps its
+    /// engine: it is never silently migrated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1508,9 +1513,30 @@ fn parse_thread_selection(
         .unwrap_or("")
         .trim()
         .to_owned();
+    let mode = params
+        .get("modeId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    if !mode.is_empty()
+        && (mode.len() > 64
+            || !mode
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'))
+    {
+        return Err(("bad-intent", "the engineering mode id is not valid".into()));
+    }
     if model.is_empty() && route.is_empty() {
+        if !mode.is_empty() {
+            return Err((
+                "bad-intent",
+                "an engineering mode is chosen together with an explicit model selection".into(),
+            ));
+        }
         return Ok(None);
     }
+    let mode_id = if mode.is_empty() { None } else { Some(mode) };
     if !route.is_empty() {
         if route.len() > 200 || model.len() > 400 {
             return Err(("bad-intent", "selection is too long".into()));
@@ -1525,7 +1551,7 @@ fn parse_thread_selection(
                 remote_model_id: parts[1].to_owned(),
                 logical_model_id: parts.get(2).map(|s| (*s).to_owned()),
                 route_id: Some(route),
-                mode_id: None,
+                mode_id: mode_id.clone(),
             }));
         }
         // Bare routeId: match by route alone.
@@ -1534,7 +1560,7 @@ fn parse_thread_selection(
             remote_model_id: String::new(),
             logical_model_id: None,
             route_id: Some(route),
-            mode_id: None,
+            mode_id: mode_id.clone(),
         }));
     }
     let parts: Vec<&str> = model.split('/').collect();
@@ -1546,7 +1572,7 @@ fn parse_thread_selection(
         remote_model_id: parts[1].to_owned(),
         logical_model_id: parts.get(2).map(|s| (*s).to_owned()),
         route_id: None,
-        mode_id: None,
+        mode_id: mode_id.clone(),
     }))
 }
 
@@ -1710,6 +1736,14 @@ pub fn send(b: &Arc<Broker>, client: &str, params: &Value) -> CmdResult {
         };
         (code, m)
     })?;
+    // Phase 2: the engine of this run. An explicit selection states it (absent = the default mode);
+    // otherwise the conversation keeps the engine it started with.
+    let chosen_mode: Option<String> = match &explicit {
+        Some(e) => e.mode_id.clone(),
+        None => th.target.as_ref().and_then(|t| t.mode_id.clone()),
+    };
+    let mode_switched =
+        th.target.is_some() && th.target.as_ref().and_then(|t| t.mode_id.clone()) != chosen_mode;
     let switched = match (&explicit, &conv_target) {
         (Some(_), Some(c)) => !resolved.matches_selection(&to_selection(c)),
         (Some(_), None) => th.target.is_some(),
@@ -1733,7 +1767,7 @@ pub fn send(b: &Arc<Broker>, client: &str, params: &Value) -> CmdResult {
             remote_model_id: resolved.remote_model_id.clone(),
             logical_model_id: Some(resolved.logical_model_id.clone()),
             route_id: Some(resolved.route_id.clone()),
-            mode_id: None,
+            mode_id: chosen_mode.clone(),
         }),
         workspace_id: Some(project.clone()),
         limits: b
@@ -1777,8 +1811,22 @@ pub fn send(b: &Arc<Broker>, client: &str, params: &Value) -> CmdResult {
         connection_id: resolved.connection_id.clone(),
         context_limit_tokens: Some(resolved.context_limit_tokens),
         output_limit_tokens: Some(resolved.output_limit_tokens),
+        mode_id: chosen_mode.clone(),
     });
     let user_seq = push_message(b, &mut th, "user", "request", Some(&run_id), &content);
+    if mode_switched {
+        push_message(
+            b,
+            &mut th,
+            "system",
+            "note",
+            Some(&run_id),
+            &format!(
+                "engine changed to {}",
+                chosen_mode.as_deref().unwrap_or("engineering-v2")
+            ),
+        );
+    }
     if switched {
         push_message(
             b,
@@ -1955,10 +2003,15 @@ pub fn context_for_run(b: &Broker, run_id: &str, reserve: usize) -> Option<Strin
 /// reference, no credential material, no path). Absent when unbound.
 fn bound_target_json(t: Option<&ThreadTarget>) -> Option<Value> {
     t.map(|t| {
-        json!({
+        let mut v = json!({
             "providerId": t.provider_id, "remoteModelId": t.remote_model_id,
             "logicalModelId": t.logical_model_id, "routeId": t.route_id,
-        })
+        });
+        // absent for the default mode: the wire shape of every earlier conversation is unchanged
+        if let Some(m) = &t.mode_id {
+            v["modeId"] = json!(m);
+        }
+        v
     })
 }
 
@@ -2539,6 +2592,7 @@ mod tests {
             connection_id: Some("conn-acme".into()),
             context_limit_tokens: Some(200_000),
             output_limit_tokens: Some(8_192),
+            mode_id: None,
         };
         assert_eq!(bound_target_json(Some(&t)).unwrap(), golden);
     }
@@ -2557,6 +2611,7 @@ mod tests {
             connection_id: Some("conn-acme".into()),
             context_limit_tokens: Some(200_000),
             output_limit_tokens: Some(8_192),
+            mode_id: None,
         };
         let v = bound_target_json(Some(&t)).expect("bound target renders");
         let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
@@ -2573,5 +2628,74 @@ mod tests {
         assert!(!flat.contains("conn-acme"), "{flat}");
         assert!(!flat.contains("connection"), "{flat}");
         assert!(!flat.contains("credential"), "{flat}");
+    }
+
+    fn target_with_mode(mode: Option<&str>) -> ThreadTarget {
+        ThreadTarget {
+            provider_id: "acme".into(),
+            logical_model_id: "acme/large".into(),
+            remote_model_id: "acme-large-1".into(),
+            route_id: "acme/large".into(),
+            connection_id: None,
+            context_limit_tokens: None,
+            output_limit_tokens: None,
+            mode_id: mode.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn the_engine_mode_appears_on_the_wire_only_when_the_conversation_has_one() {
+        let v =
+            bound_target_json(Some(&target_with_mode(Some("engineering-v2-adaptive")))).unwrap();
+        assert_eq!(v["modeId"], "engineering-v2-adaptive");
+        assert!(bound_target_json(Some(&target_with_mode(None)))
+            .unwrap()
+            .get("modeId")
+            .is_none());
+        // a stored target written before engine binding existed still loads, with no mode
+        let old: ThreadTarget = serde_json::from_value(serde_json::json!({
+            "providerId": "a", "logicalModelId": "a/b", "remoteModelId": "b", "routeId": "a/b"
+        }))
+        .or_else(|_| {
+            serde_json::from_value(serde_json::json!({
+                "provider_id": "a", "logical_model_id": "a/b", "remote_model_id": "b", "route_id": "a/b",
+                "connection_id": null, "context_limit_tokens": null, "output_limit_tokens": null
+            }))
+        })
+        .unwrap();
+        assert!(old.mode_id.is_none());
+    }
+
+    #[test]
+    fn a_thread_selection_carries_a_valid_engine_mode_and_refuses_the_rest() {
+        let ok = parse_thread_selection(&serde_json::json!({
+            "model": "p/remote", "route": "p/muse-adaptive", "modeId": "engineering-v2-adaptive"
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(ok.mode_id.as_deref(), Some("engineering-v2-adaptive"));
+        assert_eq!(ok.route_id.as_deref(), Some("p/muse-adaptive"));
+        // no mode: unchanged request shape, no mode
+        let plain =
+            parse_thread_selection(&serde_json::json!({ "model": "p/remote", "route": "r" }))
+                .unwrap()
+                .unwrap();
+        assert!(plain.mode_id.is_none());
+        // a mode alone, or an invalid one, is refused rather than guessed at
+        assert!(parse_thread_selection(
+            &serde_json::json!({ "modeId": "engineering-v2-adaptive" })
+        )
+        .is_err());
+        assert!(parse_thread_selection(
+            &serde_json::json!({ "model": "p/m", "modeId": "bad mode!" })
+        )
+        .is_err());
+        assert!(parse_thread_selection(
+            &serde_json::json!({ "model": "p/m", "modeId": "x".repeat(65) })
+        )
+        .is_err());
+        assert!(parse_thread_selection(&serde_json::json!({}))
+            .unwrap()
+            .is_none());
     }
 }

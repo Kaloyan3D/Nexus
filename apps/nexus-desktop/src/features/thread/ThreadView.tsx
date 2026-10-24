@@ -1,3 +1,4 @@
+import { EngineActivity } from "../engine/EngineActivity";
 import { Archive, CheckCircle2, ChevronDown, ChevronRight, CircleSlash, FileText, Loader2, Lock, Plus, TriangleAlert } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { IntentRun, ThreadDetail, ThreadFinding, ThreadMessage, ThreadRunView } from "../../lib/contracts";
@@ -88,7 +89,17 @@ function evidenceBadge(r: ThreadRunView): { label: string; tone: "success" | "wa
 }
 
 function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; detail: ThreadDetail }) {
-  const { openPanel } = useNexus();
+  const { openPanel, api, refreshThreads } = useNexus();
+  const [resumeError, setResumeError] = useState<string | null>(null);
+  const resumeRun = async (id: string) => {
+    setResumeError(null);
+    try {
+      await api.intentResume(id);
+      await refreshThreads();
+    } catch (e) {
+      setResumeError((e as { message?: string })?.message ?? "Could not resume.");
+    }
+  };
   const run = r.run;
   const now = useNow(1000);
   const [open, setOpen] = useState(false);
@@ -139,6 +150,15 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
           {note}
           {run?.workspaceNote ? ` — ${run.workspaceNote}` : ""}
         </p>
+      )}
+      {run && <EngineActivity runId={run.runId} live={live} />}
+      {isLast && !live && run && !r.readOnly && ["cancelled", "failed", "interrupted", "recovered"].includes(run.state) && (
+        <div className="nv-run__actions">
+          <Button size="sm" onClick={() => void resumeRun(run.runId)} title="Continue from this run's work in a new run (the broker refuses if the conversation moved on)">
+            Resume
+          </Button>
+          {resumeError && <span className="nv-note" role="alert">{resumeError}</span>}
+        </div>
       )}
       {live && run && (
         <section className="nv-runprogress" aria-label="Run progress" aria-live="polite">

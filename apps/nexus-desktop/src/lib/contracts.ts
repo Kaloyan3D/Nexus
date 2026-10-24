@@ -667,6 +667,8 @@ export interface ThreadTarget {
   remoteModelId: string;
   logicalModelId: string;
   routeId: string;
+  /** Phase 2: the engineering mode (engine) the conversation is bound to; absent for historical conversations. */
+  modeId?: string | null;
 }
 
 export interface IntentSubmitReply {
@@ -1002,6 +1004,42 @@ export interface ThreadSendReply {
 }
 
 export type ThreadMode = "auto" | "review" | "edit";
+
+/** Phase 2: which engine NEW tasks use. `adaptive` = Nexus Adaptive (recommended), `stable` = the historical muse-v0. */
+export type EngineKind = "adaptive" | "stable";
+/** The operator's engine choice and whether Nexus Adaptive can be used right now (read from the saved Registry configuration). */
+export interface EngineChoiceView {
+  preferred: EngineKind;
+  adaptiveAvailable: boolean;
+  /** Why adaptive cannot be used (actionable), when it cannot. */
+  adaptiveReason: string | null;
+  adaptiveModel: string | null;
+  adaptiveRoute: string | null;
+  /** The engine a new task would use right now; null = none until adaptive is set up or Stable is chosen. Never silently the other engine. */
+  effective: EngineKind | null;
+}
+/** The result of the explicit adaptive setup (the provider's answers; nothing is ever recorded as verified without them). */
+export interface AdaptiveSetupReport {
+  verified: boolean;
+  checks: string[];
+}
+/** What a run's engine DURABLY recorded (from the broker's authenticated engine-state record). */
+export interface RunEngineSummary {
+  run: string;
+  live: boolean;
+  bound: { engineId: string | null; modeId: string | null; route: string | null };
+  record: null | {
+    authenticated: boolean;
+    engineId: string;
+    modeId: string;
+    defaultEffort: string;
+    revision: number;
+    attempts: Array<{ ordinal: number; effort: string; state: string }>;
+    events: Array<{ kind: string; attempt: number | null; effort: string | null; detail: string | null }>;
+    lineage: string | null;
+    limiter: { droppedBefore?: boolean; rearmTokensUsed?: number } | null;
+  };
+}
 export interface ThreadSendInput {
   threadId: string | null;
   projectId: string;
@@ -1012,4 +1050,6 @@ export interface ThreadSendInput {
   idempotencyKey: string;
   /** R-NATIVE-3: optional identities-only selection. Absent = broker default. */
   model?: ModelSelection | null;
+  /** Phase 2: the engine for a NEW conversation (ignored for an existing one, which keeps its own). */
+  engine?: EngineKind | null;
 }

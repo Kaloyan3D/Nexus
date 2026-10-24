@@ -52,6 +52,11 @@
     "allow-thread-get",
     "allow-thread-send",
     "allow-thread-create",
-    "allow-thread-update"
+    "allow-thread-update",
+    "allow-engine-choice",
+    "allow-engine-prefer",
+    "allow-adaptive-setup",
+    "allow-run-engine",
+    "allow-intent-resume"
   ]
 }

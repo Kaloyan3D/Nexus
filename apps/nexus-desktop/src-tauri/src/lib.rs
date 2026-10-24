@@ -420,16 +420,25 @@ async fn intent_code_submit(
     prompt: String,
     source_id: String,
     idempotency_key: String,
+    engine: Option<String>,
 ) -> Result<nexus_client::intent_client::SubmitReply, UiError> {
     tauri::async_runtime::spawn_blocking(move || {
-        use nexus_client::intent_contract::{NexusIntentV1, ResponseMode};
+        use nexus_client::intent_contract::{ModelSelection, NexusIntentV1, ResponseMode};
+        // Phase 2: the same engine choice as threads and the CLI (preference, default Nexus Adaptive)
+        let model = interactive::new_task_selection(engine.as_deref())?.map(|s| ModelSelection {
+            provider_id: s.provider_id,
+            remote_model_id: s.remote_model_id,
+            logical_model_id: Some(s.logical_model_id),
+            route_id: Some(s.route_id),
+            mode_id: Some(s.mode_id),
+        });
         let intent = NexusIntentV1 {
             schema_version: 1,
             request_id: nexus_client::intent_client::fresh_key("gui"),
             idempotency_key,
             intent_type: "repo-code".to_owned(),
             content: prompt,
-            model: None,
+            model,
             workspace_id: Some(source_id),
             // The limits are the broker's (fixed maximums lowered by the operator, or the
             // interactive defaults); the renderer never states one.
@@ -508,6 +517,73 @@ async fn provider_connect(
         .await
         .map_err(|_| internal())?
         .map_err(|m| ui_msg("provider-connect", m))
+}
+
+/// Phase 2: the engine choice for NEW tasks (preference, whether Nexus Adaptive is usable now and why
+/// not). Read-only; the facts come from the saved Registry configuration and the broker's target list.
+#[tauri::command]
+async fn engine_choice(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+) -> Result<nexus_runtime::engine_choice::ChoiceView, UiError> {
+    let rt = rt.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = rt.engine_home().map_err(|m| ui_msg("engine", m))?;
+        let targets = nexus_client::intent_client::registry_targets(
+            &nexus_client::intent_client::default_broker_socket(),
+        )
+        .unwrap_or_default();
+        Ok(nexus_runtime::engine_choice::view(&home, &targets))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// Phase 2: remember the operator's preferred engine for new tasks (`adaptive` | `stable`).
+#[tauri::command]
+async fn engine_prefer(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    engine: String,
+) -> Result<nexus_runtime::engine_choice::Engine, UiError> {
+    let rt = rt.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let e = nexus_runtime::engine_choice::Engine::parse(&engine).ok_or(UiError {
+            code: "bad-usage".to_owned(),
+            message: "the engine must be adaptive or stable".to_owned(),
+        })?;
+        let home = rt.engine_home().map_err(|m| ui_msg("engine", m))?;
+        nexus_runtime::engine_choice::set_preferred(&home, e)
+            .map(|_| e)
+            .map_err(|e| ui_msg("engine", e.message))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// Phase 2: the one-time, explicitly confirmed Nexus Adaptive setup (native confirmation dialog).
+#[tauri::command]
+async fn adaptive_setup(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+) -> Result<nexus_runtime::ConnectReport, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || rt.adaptive_setup(d.as_ref()))
+        .await
+        .map_err(|_| internal())?
+        .map_err(|m| ui_msg("adaptive-setup", m))
+}
+
+/// Phase 2: what a run's engine durably recorded (engine, mode, per-attempt efforts, effort events).
+#[tauri::command]
+async fn run_engine(run_id: String) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::engine_summary(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
 }
 
 #[tauri::command]
@@ -695,6 +771,7 @@ async fn thread_send(
     logical_model_id: Option<String>,
     route_id: Option<String>,
     idempotency_key: String,
+    engine: Option<String>,
 ) -> Result<serde_json::Value, UiError> {
     // R-NATIVE-3: optional selection as identities only (default sends none,
     // byte-for-byte the same request as before). Rejected before the broker.
@@ -734,6 +811,22 @@ async fn thread_send(
         }
     };
     tauri::async_runtime::spawn_blocking(move || {
+        // Phase 2: a NEW conversation without an explicit model takes the chosen engine (default
+        // Nexus Adaptive); an existing conversation keeps the engine it started with.
+        let (model, route, engine_mode) =
+            if model.is_none() && route.is_none() && thread_id.is_none() {
+                match interactive::new_task_selection(engine.as_deref())? {
+                    Some(sel) => (
+                        // provider/remote only: a logical id may contain "/"; the exact route id carries the rest
+                        Some(format!("{}/{}", sel.provider_id, sel.remote_model_id)),
+                        Some(sel.route_id),
+                        Some(sel.mode_id),
+                    ),
+                    None => (None, None, None),
+                }
+            } else {
+                (model, route, None)
+            };
         interactive::guarded(|| {
             nexus_client::intent_client::thread_send(
                 &nexus_client::intent_client::default_broker_socket(),
@@ -746,6 +839,7 @@ async fn thread_send(
                     idempotency_key: &idempotency_key,
                     model: model.as_deref(),
                     route: route.as_deref(),
+                    mode_id: engine_mode.as_deref(),
                 },
             )
             .map_err(|e| backend::ui_error(&e))
@@ -825,6 +919,19 @@ async fn intent_result(run_id: String) -> Result<String, UiError> {
 async fn intent_status(run_id: String) -> Result<nexus_client::intent_client::IntentRun, UiError> {
     tauri::async_runtime::spawn_blocking(move || {
         nexus_client::intent_client::status(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+#[tauri::command]
+async fn intent_resume(run_id: String) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::resume(
             &nexus_client::intent_client::default_broker_socket(),
             &run_id,
         )
@@ -960,6 +1067,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_info,
+            engine_choice,
+            engine_prefer,
+            adaptive_setup,
+            run_engine,
             runtime_status,
             list_tasks,
             task_journal,
@@ -985,6 +1096,7 @@ pub fn run() {
             intent_status,
             intent_result,
             intent_cancel,
+            intent_resume,
             intent_list,
             tool_events,
             list_approvals,
@@ -1068,6 +1180,11 @@ mod authz_tests {
         "thread_send",
         "thread_create",
         "thread_update",
+        "engine_choice",
+        "engine_prefer",
+        "adaptive_setup",
+        "run_engine",
+        "intent_resume",
     ];
 
     #[test]
@@ -1418,6 +1535,7 @@ mod authz_tests {
             "fix the test".into(),
             "proj".into(),
             "gui-0123456789abcdef".into(),
+            Some("stable".to_owned()),
         ))
         .unwrap();
         assert!(!r.replay);
@@ -1491,7 +1609,12 @@ mod authz_tests {
                 "Tauri backend must not reference {forbidden}"
             );
         }
-        assert!(prod.contains("fn intent_code_submit(\n    prompt: String,\n    source_id: String,\n    idempotency_key: String,\n)"));
+        assert!(prod.contains("fn intent_code_submit(\n    prompt: String,\n    source_id: String,\n    idempotency_key: String,\n    engine: Option<String>,\n)"));
+        // Phase 2 (deliberate): the ONLY new input is `engine`, a closed two-value choice parsed by the
+        // backend (adaptive | stable); the model selection it implies is built by the backend from the
+        // operator's saved Registry configuration and the broker's own target list, never from the renderer
+        assert!(prod.contains("interactive::new_task_selection(engine.as_deref())"));
+        assert!(include_str!("interactive.rs").contains("Engine::parse(e)"));
     }
 
     /// A5.3: the Desktop's Send/cancel commands put exactly the documented
@@ -1752,6 +1875,187 @@ mod authz_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Phase 2 smoke (operator-run, real provider, NOT part of the offline battery): the Desktop BACKEND
+    /// commands (the very functions the window invokes) send a task to a running runtime and read what
+    /// its engine durably recorded.
+    ///   NEXUS_HOME=~/.nexus-interactive-dev NEXUS_BROKER_SOCKET=$NEXUS_HOME/broker.sock \
+    ///   NEXUS_DESKTOP_SMOKE_PROJECT=<project-id> NEXUS_DESKTOP_SMOKE_TASK='...' \
+    ///   cargo test --offline --lib live_desktop_backend_adaptive_smoke -- --ignored --nocapture
+    #[test]
+    #[ignore = "real provider; needs NEXUS_DESKTOP_SMOKE_PROJECT and NEXUS_DESKTOP_SMOKE_TASK"]
+    fn live_desktop_backend_adaptive_smoke() {
+        let (Ok(project), Ok(task)) = (
+            std::env::var("NEXUS_DESKTOP_SMOKE_PROJECT"),
+            std::env::var("NEXUS_DESKTOP_SMOKE_TASK"),
+        ) else {
+            panic!("set NEXUS_DESKTOP_SMOKE_PROJECT and NEXUS_DESKTOP_SMOKE_TASK");
+        };
+        let engine = std::env::var("NEXUS_DESKTOP_SMOKE_ENGINE").ok();
+        let sent = tauri::async_runtime::block_on(super::thread_send(
+            None,
+            project,
+            task,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            nexus_client::intent_client::fresh_key("gui"),
+            engine,
+        ))
+        .expect("thread_send");
+        let run_id = sent["run"]["runId"].as_str().unwrap().to_owned();
+        println!("submitted {run_id} in {}", sent["threadId"]);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(900);
+        loop {
+            let r = tauri::async_runtime::block_on(super::intent_status(run_id.clone()))
+                .expect("status");
+            if r.terminal {
+                println!("run ended: {} (turns {})", r.state, r.turn);
+                assert_eq!(r.state, "completed");
+                break;
+            }
+            assert!(std::time::Instant::now() < end, "never finished");
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        let e = tauri::async_runtime::block_on(super::run_engine(run_id)).expect("run_engine");
+        println!("{}", serde_json::to_string_pretty(&e["record"]).unwrap());
+        println!("bound: {}", e["bound"]);
+        assert_eq!(e["record"]["authenticated"], true);
+    }
+
+    /// Phase 2: a NEW conversation takes the chosen engine (default Nexus Adaptive) as an explicit,
+    /// Registry-checkable selection built from the SAVED adaptive configuration; Stable sends none of it;
+    /// adaptive that cannot be used is an actionable error and sends NOTHING (no silent Stable); an
+    /// existing conversation never gets a new engine from the client.
+    #[test]
+    fn desktop_new_conversations_use_the_chosen_engine_and_never_fall_back_silently() {
+        let _env = BROKER_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let dir =
+            std::env::temp_dir().join(format!("nexus-tauri-p2-engine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("broker.sock");
+        let l = UnixListener::bind(&sock).unwrap();
+        let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let f2 = frames.clone();
+        std::thread::spawn(move || {
+            for stream in l.incoming().take(5) {
+                let mut s = stream.unwrap();
+                let mut line = String::new();
+                BufReader::new(s.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let rid = v["id"].clone();
+                let cmd = v["cmd"].as_str().unwrap_or("").to_owned();
+                f2.lock().unwrap().push(v);
+                let result = if cmd == "intent-models" {
+                    serde_json::json!({"models": [], "targets": [{
+                        "providerId":"opencode-go-native","logicalModelId":"meta/adaptive","remoteModelId":"muse-spark-1.3-contributor",
+                        "routeId":"opencode-go-native/muse-adaptive","connectionId":"c","connectionStatus":"connected","protocol":"openai-responses",
+                        "contextLimitTokens":1,"outputLimitTokens":1,"billingTier":"","issuable":true}]})
+                } else {
+                    serde_json::json!({"threadId":"thr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","run":{"runId":"run_00000000000000000000000000000000","requestId":"r","clientId":"uid:1","state":"preparing","terminal":false,"intentType":"repo-code","responseMode":"stream","cancelRequested":false,"createdAtMs":0,"updatedAtMs":0},"replay":false})
+                };
+                let _ = s.write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::json!({"protocol":1,"id":rid,"ok":true,"result":result})
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        let home_with = |tag: &str, saved: bool| {
+            let h = dir.join(tag);
+            std::fs::create_dir_all(h.join("registry/registry")).unwrap();
+            std::fs::set_permissions(&h, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+                .unwrap();
+            if saved {
+                std::fs::write(
+                    h.join("registry/registry/mode-configurations.json"),
+                    serde_json::json!({"modes":{"engineering-v2-adaptive":{"config":{"slots":{"main":{"logicalModelId":"meta/adaptive","routeId":"opencode-go-native/muse-adaptive"}}}}}}).to_string(),
+                )
+                .unwrap();
+            }
+            h
+        };
+        let send = |thread: Option<&str>, engine: Option<&str>, key: &str| {
+            tauri::async_runtime::block_on(super::thread_send(
+                thread.map(str::to_owned),
+                "east-india".into(),
+                "hello".into(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                key.into(),
+                engine.map(str::to_owned),
+            ))
+        };
+        std::env::set_var("NEXUS_BROKER_SOCKET", &sock);
+        std::env::set_var("NEXUS_HOME", home_with("configured", true));
+        // (a) default preference = adaptive: an explicit selection with the engineering mode
+        send(None, None, "gui-0000000000000011").unwrap();
+        // (b) explicit stable: no selection, no mode, and the target list is not even fetched
+        send(None, Some("stable"), "gui-0000000000000012").unwrap();
+        // (c) an existing conversation keeps its engine: the client derives nothing for it
+        send(
+            Some("thr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            None,
+            "gui-0000000000000013",
+        )
+        .unwrap();
+        // (d) adaptive chosen but never set up: an actionable error; nothing is sent as stable
+        std::env::set_var("NEXUS_HOME", home_with("unconfigured", false));
+        let e = send(None, None, "gui-0000000000000014").unwrap_err();
+        assert_eq!(e.code, "adaptive-not-configured");
+        assert!(
+            e.message.contains("choose Stable explicitly"),
+            "{}",
+            e.message
+        );
+        std::env::remove_var("NEXUS_HOME");
+        let got = frames.lock().unwrap().clone();
+        let cmds: Vec<&str> = got.iter().map(|f| f["cmd"].as_str().unwrap()).collect();
+        assert_eq!(
+            cmds,
+            [
+                "intent-models",
+                "thread-send",
+                "thread-send",
+                "thread-send",
+                "intent-models"
+            ]
+        );
+        let ts: Vec<&serde_json::Value> =
+            got.iter().filter(|f| f["cmd"] == "thread-send").collect();
+        assert_eq!(
+            ts.len(),
+            3,
+            "the failed adaptive request sent no thread-send: {cmds:?}"
+        );
+        assert_eq!(ts[0]["params"]["modeId"], "engineering-v2-adaptive");
+        assert_eq!(ts[0]["params"]["route"], "opencode-go-native/muse-adaptive");
+        assert_eq!(
+            ts[0]["params"]["model"],
+            "opencode-go-native/muse-spark-1.3-contributor"
+        );
+        for stable in [ts[1], ts[2]] {
+            assert!(
+                stable["params"]["modeId"].is_null()
+                    && stable["params"]["model"].is_null()
+                    && stable["params"]["route"].is_null()
+            );
+        }
+    }
+
     /// R-NATIVE-3: `thread_send` with no selection puts `model: null` and
     /// `route: null` on the `thread-send` wire frame (byte-identical to the
     /// pre-R-NATIVE-3 request); a chosen model+route forwards the identities
@@ -1806,6 +2110,7 @@ mod authz_tests {
             None,
             None,
             "gui-0000000000000001".into(),
+            Some("stable".to_owned()),
         ))
         .unwrap();
         // Choice: identities only (logical id with a slash stays intact via route).
@@ -1820,6 +2125,7 @@ mod authz_tests {
             Some("acme/large".into()),
             Some("acme/large".into()),
             "gui-0000000000000002".into(),
+            Some("stable".to_owned()),
         ))
         .unwrap();
         let got = frames.lock().unwrap().clone();
@@ -1841,6 +2147,7 @@ mod authz_tests {
             None,
             None,
             "gui-0000000000000003".into(),
+            Some("stable".to_owned()),
         ));
         assert_eq!(bad.unwrap_err().code, "bad-usage");
         let lone = tauri::async_runtime::block_on(super::thread_send(
@@ -1854,6 +2161,7 @@ mod authz_tests {
             None,
             None,
             "gui-0000000000000004".into(),
+            Some("stable".to_owned()),
         ));
         assert_eq!(lone.unwrap_err().code, "bad-usage");
         assert_eq!(frames.lock().unwrap().len(), 2, "rejections send no frames");

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { EngineChoice } from "../engine/EngineChoice";
 import { useNexus } from "../../state/NexusContext";
 import { absoluteTime } from "../../lib/format";
 import { Alert, Badge, Button, KeyValue } from "../../components/ui/primitives";
@@ -93,6 +94,9 @@ export function SettingsPage() {
             </details>
           )}
           {setupError && <Alert tone="warning" title="That did not finish">{setupError.message}</Alert>}
+          <div style={{ marginTop: 12 }}>
+            <EngineChoice />
+          </div>
           <AdvancedLimits />
           <details className="nv-details" style={{ marginTop: 10 }}>
             <summary>Diagnostics</summary>

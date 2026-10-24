@@ -45,6 +45,7 @@ fn help_text() -> String {
     s.push_str("    project <add|list|show|remove|repin|set-scope|set-clients> ...   OPERATOR project registry (changes need ownership of the registry directory; the Desktop cannot register)\n");
     s.push_str("    runtime <status|start|stop>   A6.1.4: the native runtime for this user (starts nexusd + broker automatically)\n");
     s.push_str("    provider <connect|consent|revoke|status>   A6.1.4: one-time provider connection and consent\n");
+    s.push_str("    engine <status|prefer adaptive|stable|setup --acknowledge-billable>   Phase 2: which engine NEW coding tasks use (default: Nexus Adaptive); one-time adaptive setup\n");
     s.push_str("    code run <project> --input FILE|-   A6.1.4: run a coding task with the interactive limits (same path as the Desktop)\n");
     s.push_str("    approvals [--task <instance-id>]   read-only human-approval status (approve/deny only via the terminal approver)\n");
     s.push_str("    tools list            native read-only tools (fs.list, fs.read, fs.search)\n");
@@ -495,7 +496,7 @@ fn cmd_model(args: &[String], cfg: &ClientConfig) -> ExitCode {
     }
 }
 
-const INTENT_HELP: &str = "nexus intent <submit|status|result|follow|cancel|list|models|workspaces|code-sources|diff> [--json]\n\
+const INTENT_HELP: &str = "nexus intent <submit|status|result|follow|cancel|list|models|workspaces|code-sources|diff|engine> [--json]\n\
   submit  (--input FILE|- | --intent FILE|-) [--model provider/model] [--idempotency-key K]\n\
           [--request-id R] [--max-output-tokens N] [--follow | --wait]\n\
           [--engineering-mode ID]   repo-code only, with --model: e.g. engineering-v2-adaptive (opt-in beta; needs an\n\
@@ -946,8 +947,19 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
                     let project = nth(0);
                     let content = read_input(&flag_value(args, "--input").ok_or_else(|| nexus_client::ClientError::usage("--input FILE|- is required"))?)?;
                     let thread = flag_value(args, "--thread");
-                    let model = flag_value(args, "--model");
-                    let route = flag_value(args, "--route");
+                    let mut model = flag_value(args, "--model");
+                    let mut route = flag_value(args, "--route");
+                    let mut mode_flag = flag_value(args, "--engineering-mode");
+                    // Phase 2: a NEW conversation with no explicit selection uses the operator's engine
+                    // choice (default Nexus Adaptive); an existing conversation keeps its own engine
+                    if thread.is_none() && model.is_none() && route.is_none() && mode_flag.is_none() {
+                        if let Some(sel) = engine_selection(args, &sock).map_err(|e| nexus_client::ClientError::usage(e))? {
+                            // provider/remote only: a logical id may contain "/"; the exact route id disambiguates
+                            model = Some(format!("{}/{}", sel.provider_id, sel.remote_model_id));
+                            route = sel.route_id;
+                            mode_flag = sel.mode_id;
+                        }
+                    }
                     let key = ic::fresh_key("thr");
                     let v = ic::thread_send(
                         &sock,
@@ -960,6 +972,7 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
                             idempotency_key: &key,
                             model: model.as_deref(),
                             route: route.as_deref(),
+                            mode_id: mode_flag.as_deref(),
                         },
                     )?;
                     let human = format!("thread {} run {}", v["threadId"].as_str().unwrap_or("?"), v["run"]["runId"].as_str().unwrap_or("?"));
@@ -975,6 +988,23 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
             let run: ic::IntentRun = serde_json::from_value(v["run"].clone())
                 .map_err(|e| nexus_client::ClientError::internal(e.to_string()))?;
             intent_ok(cfg, v.clone(), &run_line(&run));
+            Ok(ExitCode::Ok)
+        }
+        "engine" => {
+            // Phase 2: what the run's engine durably recorded (authenticated record, never the model's words)
+            let v = ic::engine_summary(&sock, &pos())?;
+            let human = match v.get("record").filter(|r| !r.is_null()) {
+                Some(r) => format!(
+                    "engine {} mode {} default {}  efforts {}  events {}",
+                    r["engineId"].as_str().unwrap_or("?"),
+                    r["modeId"].as_str().unwrap_or("?"),
+                    r["defaultEffort"].as_str().unwrap_or("?"),
+                    r["attempts"].as_array().map(|a| a.iter().map(|x| format!("#{}:{}", x["ordinal"], x["effort"].as_str().unwrap_or("?"))).collect::<Vec<_>>().join(" ")).unwrap_or_default(),
+                    r["events"].as_array().map(|a| a.iter().map(|x| format!("{}@{}→{}", x["kind"].as_str().unwrap_or("?"), x["attempt"], x["effort"].as_str().unwrap_or("-"))).collect::<Vec<_>>().join("; ")).unwrap_or_default(),
+                ),
+                None => format!("engine {} (no engine record yet)", v["bound"]["engineId"].as_str().unwrap_or("none")),
+            };
+            intent_ok(cfg, v, &human);
             Ok(ExitCode::Ok)
         }
         "cancel" => {
@@ -1507,6 +1537,7 @@ fn main() {
         "tools" => cmd_tools(&args, &cfg),
         "project" => cmd_project(&args, &cfg),
         "runtime" => cmd_runtime(&args, &cfg),
+        "engine" => cmd_engine(&args, &cfg),
         "provider" => cmd_provider(&args, &cfg),
         "code" => cmd_code(&args, &cfg),
         "approvals" => cmd_approvals(&args, &cfg),
@@ -1858,6 +1889,108 @@ fn cmd_project(args: &[String], cfg: &ClientConfig) -> ExitCode {
     }
 }
 
+/// Phase 2: the model selection for a NEW task from `--engine` / the operator preference.
+fn engine_selection(
+    args: &[String],
+    sock: &std::path::Path,
+) -> Result<Option<nexus_client::intent_contract::ModelSelection>, String> {
+    use nexus_runtime::engine_choice as ec;
+    let requested = match flag_value(args, "--engine") {
+        Some(v) => Some(ec::Engine::parse(&v).ok_or("--engine must be adaptive or stable")?),
+        None => None,
+    };
+    let home = nexus_runtime::Home::resolve()?;
+    // Stable asks nothing of the Registry: no target list is needed (and none is fetched)
+    if requested.unwrap_or_else(|| ec::preferred(&home)) == ec::Engine::Stable {
+        return Ok(None);
+    }
+    let targets = nexus_client::intent_client::registry_targets(sock)
+        .map_err(|e| format!("{}: {}", e.code, e.message))?;
+    ec::selection_for(&home, requested, &targets)
+        .map_err(|e| e.message)
+        .map(|s| {
+            s.map(|s| nexus_client::intent_contract::ModelSelection {
+                provider_id: s.provider_id,
+                remote_model_id: s.remote_model_id,
+                logical_model_id: Some(s.logical_model_id),
+                route_id: Some(s.route_id),
+                mode_id: Some(s.mode_id),
+            })
+        })
+}
+
+/// `nexus engine <status|prefer|setup>` (Phase 2).
+fn cmd_engine(args: &[String], cfg: &ClientConfig) -> ExitCode {
+    use nexus_runtime::engine_choice as ec;
+    let home = match nexus_runtime::Home::resolve() {
+        Ok(h) => h,
+        Err(e) => return fail(cfg, &e),
+    };
+    let sock = home.broker_socket();
+    match args.first().map(String::as_str).unwrap_or("status") {
+        "status" => {
+            let targets = nexus_client::intent_client::registry_targets(&sock).unwrap_or_default();
+            let v = ec::view(&home, &targets);
+            let human = format!(
+                "preferred: {}   adaptive usable: {}{}   new tasks use: {}",
+                v.preferred.as_str(),
+                v.adaptive_available,
+                v.adaptive_reason
+                    .as_deref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default(),
+                v.effective
+                    .map(|e| e.as_str())
+                    .unwrap_or("NOTHING until adaptive is set up or Stable is chosen"),
+            );
+            emit(cfg, &serde_json::to_value(&v).unwrap_or_default(), &human);
+            ExitCode::Ok
+        }
+        "prefer" => {
+            let Some(e) = args.get(1).and_then(|a| ec::Engine::parse(a)) else {
+                return fail(cfg, "usage: nexus engine prefer adaptive|stable");
+            };
+            match ec::set_preferred(&home, e) {
+                Ok(()) => {
+                    emit(
+                        cfg,
+                        &serde_json::json!({"preferred": e.as_str()}),
+                        &format!("new tasks will use: {}", e.as_str()),
+                    );
+                    ExitCode::Ok
+                }
+                Err(e) => fail(cfg, &e.message),
+            }
+        }
+        "setup" => {
+            if !args.iter().any(|a| a == "--acknowledge-billable") {
+                return fail(cfg, "this verifies the adaptive route against the provider: 8 small billable requests (1 models call, a text probe at each of low/medium/high/xhigh, streaming, a tool call and its continuation) and then saves the adaptive configuration. Re-run with --acknowledge-billable to proceed");
+            }
+            match nexus_runtime::Tools::discover()
+                .and_then(|t| nexus_runtime::enable_adaptive(&home, &t))
+            {
+                Ok(r) => {
+                    emit(
+                        cfg,
+                        &serde_json::to_value(&r).unwrap_or_default(),
+                        &r.checks.join("\n"),
+                    );
+                    if r.verified {
+                        ExitCode::Ok
+                    } else {
+                        ExitCode::Internal
+                    }
+                }
+                Err(e) => fail(cfg, &e),
+            }
+        }
+        _ => fail(
+            cfg,
+            "usage: nexus engine <status|prefer adaptive|stable|setup --acknowledge-billable>",
+        ),
+    }
+}
+
 /// `nexus runtime <status|start|stop>` (A6.1.4).
 fn cmd_runtime(args: &[String], cfg: &ClientConfig) -> ExitCode {
     let home = match nexus_runtime::Home::resolve() {
@@ -2032,13 +2165,19 @@ fn cmd_code(args: &[String], cfg: &ClientConfig) -> ExitCode {
         Ok(c) => c,
         Err(e) => return emit_err(cfg.json, &e),
     };
+    // Phase 2: the same engine choice as the Desktop (preference, default Nexus Adaptive; `--engine`
+    // overrides explicitly). Adaptive that cannot be used is an ERROR, never a silent Stable.
+    let model = match engine_selection(args, &sock) {
+        Ok(m) => m,
+        Err(e) => return fail(cfg, &e),
+    };
     let intent = nexus_client::intent_contract::NexusIntentV1 {
         schema_version: 1,
         request_id: ic::fresh_key("code"),
         idempotency_key: ic::fresh_key("idem"),
         intent_type: "repo-code".to_owned(),
         content,
-        model: None,
+        model,
         workspace_id: Some(project.clone()),
         limits: conf.limits.to_intent_limits(),
         response_mode: nexus_client::intent_contract::ResponseMode::Stream,

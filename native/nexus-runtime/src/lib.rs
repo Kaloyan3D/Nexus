@@ -12,6 +12,8 @@
 //! current user. OS peer-credential checks inside the daemon and broker are
 //! unchanged: they still accept only this user's uid.
 
+pub mod engine_choice;
+
 use serde_json::json;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -700,6 +702,104 @@ pub fn connect_provider(
     }
     Ok(ConnectReport {
         verified: true,
+        checks,
+    })
+}
+
+/// Phase 2: the explicit one-time setup of Nexus Adaptive for an installation whose provider is already
+/// connected: (1) offline, idempotent: the adaptive model/route records; (2) a single-use authorization
+/// record for exactly the stated list of billable requests; (3) the REAL Registry route verification
+/// (every authorized effort is probed and must be acknowledged by the provider); (4) the explicit,
+/// authorized save of the adaptive ModeConfiguration - only if the route verified. The key is read only
+/// by the verification script from the private credentials file; it is never printed or passed on a
+/// command line. Nothing is ever recorded as verified without the provider's answers.
+pub fn enable_adaptive(home: &Home, tools: &Tools) -> Result<ConnectReport, String> {
+    bootstrap(home)?;
+    if !provider_connected(home) {
+        return Err(
+            "the provider is not connected yet: connect it first (one-time provider connection)"
+                .into(),
+        );
+    }
+    let reg = home.registry_data();
+    let regs = reg.to_string_lossy().into_owned();
+    let creds = home.credentials().to_string_lossy().into_owned();
+    let run = |args: &[&str]| -> Result<(bool, String), String> {
+        let o = Command::new(&tools.node)
+            .current_dir(&tools.repo_root)
+            .args(args)
+            .env_remove("OPENCODE_API_KEY")
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("cannot run node: {e}"))?;
+        Ok((
+            o.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+        ))
+    };
+    let script = |n: &str| {
+        tools
+            .repo_root
+            .join("scripts")
+            .join(n)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let (ok, out) = run(&[
+        &script("Setup-NativeOpenCodeGo.cjs"),
+        "--data-root",
+        &regs,
+        "--apply",
+        "--adaptive",
+    ])?;
+    if !ok {
+        return Err(format!(
+            "adaptive setup failed: {}",
+            out.lines().last().unwrap_or("")
+        ));
+    }
+    let (ok, out) = run(&[
+        &script("Verify-NativeOpenCodeGoRoute.cjs"),
+        "authorize",
+        "--data-root",
+        &regs,
+        "--acknowledge-billable",
+        "--adaptive",
+    ])?;
+    if !ok {
+        return Err(format!(
+            "could not start the adaptive route verification: {}",
+            out.lines().last().unwrap_or("")
+        ));
+    }
+    let (ok, out) = run(&[
+        &script("Verify-NativeOpenCodeGoRoute.cjs"),
+        "verify",
+        "--data-root",
+        &regs,
+        "--credentials",
+        &creds,
+        "--adaptive",
+        "--save-adaptive-config",
+    ])?;
+    let checks: Vec<String> = out
+        .lines()
+        .filter(|l| {
+            l.starts_with("PASS")
+                || l.starts_with("FAIL")
+                || l.starts_with("route")
+                || l.starts_with("engineering")
+                || l.starts_with("credential_present")
+                || l.starts_with("adaptive")
+        })
+        .map(str::to_owned)
+        .collect();
+    Ok(ConnectReport {
+        verified: ok,
         checks,
     })
 }

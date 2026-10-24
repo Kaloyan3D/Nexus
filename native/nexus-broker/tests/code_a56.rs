@@ -5681,6 +5681,7 @@ fn tsend(
             idempotency_key: key,
             model: None,
             route: None,
+            mode_id: None,
         },
     )
 }
@@ -8260,6 +8261,7 @@ fn tsend_m(
             idempotency_key: key,
             model,
             route,
+            mode_id: None,
         },
     )
 }
@@ -11401,6 +11403,57 @@ fn em04b_production_and_shadow_runs_never_offer_or_accept_the_signals_tool() {
         );
         b.shutdown();
     }
+}
+
+/// Phase 2: the Desktop's engine panel reads `intent-engine`. It reports the engine and the per-attempt
+/// efforts only from the HMAC-authenticated engine record; a run with no engine has no record to show,
+/// and a tampered record is refused rather than shown.
+#[test]
+fn p2_intent_engine_reports_only_the_authenticated_record() {
+    if !sandbox_ready() {
+        return;
+    }
+    let calls = || {
+        script(
+            vec![("fs_read", r#"{"path":"src/lib.rs"}"#.into())],
+            "Done.",
+        )
+    };
+    // an engine-bound run: the summary comes from the authenticated record
+    let fx = fixture_engine(calls(), "muse-v1-shadow");
+    let b = em04a_broker(&fx, "p2-engine", None, None);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read src/lib.rs", "p2-engine-0000001", |_| {}),
+        180,
+    );
+    assert!(run.terminal, "{run:?}");
+    let _ = em03_state_settled(&fx, "p2-engine", &run.task_instance_id.clone().unwrap());
+    let v = ic::engine_summary(b.socket_path(), &run.run_id).expect("summary");
+    assert_eq!(v["record"]["authenticated"], true, "{v}");
+    assert_eq!(v["bound"]["engineId"], v["record"]["engineId"], "{v}");
+    assert!(
+        v["record"]["attempts"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()),
+        "{v}"
+    );
+    // a client that does not own the run, or an unknown run, learns nothing
+    assert!(ic::engine_summary(b.socket_path(), &format!("run_{}", "0".repeat(32))).is_err());
+    // tamper with the record: it is refused, never shown
+    let task = run.task_instance_id.clone().unwrap();
+    let _ = em03_state_settled(&fx, "p2-engine", &task);
+    let rec = fx
+        .config("p2-engine")
+        .state_dir
+        .join("engine")
+        .join(format!("{task}.json"));
+    let mut tampered: Value = serde_json::from_slice(&std::fs::read(&rec).unwrap()).unwrap();
+    tampered["effort"] = json!({"effort": "high", "fromAttempt": 1, "proposalId": 1});
+    std::fs::write(&rec, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    let e = ic::engine_summary(b.socket_path(), &run.run_id).expect_err("tampered");
+    assert!(format!("{e:?}").contains("failed authentication"), "{e:?}");
+    b.shutdown();
 }
 
 /// Crash immediately before / after the durable acceptance of a signal, restart, continue. Before:
