@@ -1005,6 +1005,13 @@ export interface ThreadSendReply {
 
 export type ThreadMode = "auto" | "review" | "edit";
 
+/** The broker's own answer to "may this run be resumed now?" (never decided by the Desktop). */
+export interface RunResumable {
+  run: string;
+  resumable: boolean;
+  code: string | null;
+  reason: string | null;
+}
 /** Phase 2: which engine NEW tasks use. `adaptive` = Nexus Adaptive (recommended), `stable` = the historical muse-v0. */
 export type EngineKind = "adaptive" | "stable";
 /** The operator's engine choice and whether Nexus Adaptive can be used right now (read from the saved Registry configuration). */

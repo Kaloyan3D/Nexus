@@ -321,4 +321,48 @@ describe("Persistent conversations (A7.1)", () => {
     expect(send.mock.calls[0]![0].threadId).toBeNull();
     expect(send.mock.calls[0]![0].projectId).toBe("east-india");
   });
+
+  it("a cancelled last run offers a real Resume that calls the native resume for THAT run (not a chat message)", async () => {
+    const cancelled = detail({
+      thread: summary({ lastState: "cancelled", runCount: 3 }),
+      messages: [...detail().messages, msg(5, "user", "request", R("3"), "Fix the failing tests")],
+      runs: [...detail().runs, runView(3, { state: "cancelled", assistantSeq: null, userSeq: 5 }, { state: "cancelled", terminal: true, cancelRequested: true, errorCode: "cancelled" })],
+    });
+    const resumable = vi.fn(async (id: string) => ({ run: id, resumable: true, code: null, reason: null }));
+    const resume = vi.fn(async (id: string) => ({ run: fakeRun({ runId: R("4"), requestId: id, threadId: T1, state: "preparing", terminal: false }) }));
+    const send = vi.fn();
+    const user = userEvent.setup();
+    mount(base({ threadGet: async () => cancelled, runResumable: resumable as NativeApi["runResumable"], intentResume: resume as NativeApi["intentResume"], threadSend: send as NativeApi["threadSend"] }), `#/workspace/c/${T1}`);
+    const run3 = await screen.findByRole("region", { name: "Run 3" });
+    await user.click(await within(run3).findByRole("button", { name: /Resume this run/ }));
+    await waitFor(() => expect(resume).toHaveBeenCalledWith(R("3")));
+    expect(send).not.toHaveBeenCalled();
+    expect(resumable).toHaveBeenCalledWith(R("3"));
+  });
+
+  it("shows the broker's reason, and no Resume button, when the broker says the run cannot be resumed", async () => {
+    const cancelled = detail({
+      thread: summary({ lastState: "cancelled", runCount: 3 }),
+      messages: [...detail().messages, msg(5, "user", "request", R("3"), "Fix the failing tests")],
+      runs: [...detail().runs, runView(3, { state: "cancelled", assistantSeq: null, userSeq: 5 }, { state: "cancelled", terminal: true, cancelRequested: true, errorCode: "cancelled" })],
+    });
+    const resumable = vi.fn(async (id: string) => ({ run: id, resumable: false, code: "already-continued", reason: "this run was already continued as run_x" }));
+    mount(base({ threadGet: async () => cancelled, runResumable: resumable as NativeApi["runResumable"] }), `#/workspace/c/${T1}`);
+    const run3 = await screen.findByRole("region", { name: "Run 3" });
+    expect(await within(run3).findByText(/Cannot be resumed: this run was already continued/)).toBeInTheDocument();
+    expect(within(run3).queryByRole("button", { name: /Resume/ })).toBeNull();
+  });
+
+  it("a cancelled run keeps its recorded test result but is not labelled as a completed 'Tests passed'", async () => {
+    const outcome = { verification: "verified-passed", change: "applied", editsApplied: 2, editsNotApplied: 0, testsExecuted: 2, testsNotExecuted: 0, blockedByApproval: 0, lastExitCode: 0, staleAfterEdit: false, uncertainOperations: 0 };
+    const cancelled = detail({
+      runs: [...detail().runs, runView(3, { state: "cancelled", assistantSeq: null, userSeq: 5 }, { state: "cancelled", terminal: true, codingOutcome: outcome as never })],
+      messages: [...detail().messages, msg(5, "user", "request", R("3"), "go")],
+    });
+    mount(base({ threadGet: async () => cancelled }), `#/workspace/c/${T1}`);
+    const run3 = await screen.findByRole("region", { name: "Run 3" });
+    expect(within(run3).getByText(/Last test command passed · exit 0/)).toBeInTheDocument();
+    expect(within(run3).queryByText(/^Tests passed/)).toBeNull();
+    expect(within(run3).getByText("Cancelled")).toBeInTheDocument();
+  });
 });

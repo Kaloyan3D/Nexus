@@ -11405,6 +11405,91 @@ fn em04b_production_and_shadow_runs_never_offer_or_accept_the_signals_tool() {
     }
 }
 
+/// Owner finding A: a CANCELLED adaptive run is resumed through the native `intent-resume` (not a chat
+/// message). The broker's own answer (`intent-resumable`) decides whether Resume is offered; the
+/// continuation keeps the engine and route, inherits the AUTHENTICATED engine state of the cancelled
+/// run, and the cancelled run then reports why it can no longer be resumed.
+#[test]
+fn p2_a_cancelled_adaptive_run_is_resumed_natively_with_inherited_engine_state() {
+    if !sandbox_ready() {
+        return;
+    }
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        if body.to_string().contains("CONTINUED") {
+            return Answer::Frames(text_frames(&resp, "Checked; the task is done."));
+        }
+        Answer::Slow {
+            frames: text_frames(&resp, "thinking"),
+            gap_ms: 100,
+            hold_ms: 120_000,
+        }
+    });
+    let fx = s6_fixture(responder, Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "p2-resume", None, None);
+    let sock = b.socket_path().to_owned();
+    // a run that is still going is not resumable, and says so
+    let first = ic::submit(&sock, &s4_intent("p2-resume-0000001", Some(ADAPTIVE_MODE)))
+        .expect("submit")
+        .run;
+    let end = Instant::now() + Duration::from_secs(60);
+    loop {
+        let st = fx.config("p2-resume").state_dir.join("engine");
+        let has = std::fs::read_dir(&st)
+            .map(|d| {
+                d.flatten()
+                    .any(|e| e.path().extension().is_some_and(|x| x == "json"))
+            })
+            .unwrap_or(false);
+        if has {
+            break;
+        }
+        assert!(
+            Instant::now() < end,
+            "the adaptive run never recorded engine state"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let live = ic::resumable(&sock, &first.run_id).expect("answer");
+    assert_eq!(live["resumable"], false, "{live}");
+    assert_eq!(live["code"], "not-terminal", "{live}");
+    ic::cancel(&sock, &first.run_id).unwrap();
+    let first = wait_terminal(&sock, &first.run_id, 60);
+    assert_eq!(first.state, "cancelled", "{first:?}");
+    // the broker says yes (the Desktop offers Resume only on this answer)
+    let yes = ic::resumable(&sock, &first.run_id).expect("answer");
+    assert_eq!(yes["resumable"], true, "{yes}");
+    // the genuine native resume
+    let v = ic::resume(&sock, &first.run_id).expect("resume");
+    let second_id = v["run"]["runId"].as_str().unwrap().to_owned();
+    let second = wait_terminal(&sock, &second_id, 120);
+    assert_eq!(second.state, "completed", "{second:?}");
+    assert_eq!(second.route_id, first.route_id, "same route, no fallback");
+    assert_eq!(second.remote_model_id, first.remote_model_id);
+    // the engine is the same, and its state came from the authenticated predecessor
+    let es = ic::engine_summary(&sock, &second_id).expect("summary");
+    assert_eq!(es["bound"]["engineId"], "nexus-adaptive-v1", "{es}");
+    assert_eq!(es["bound"]["modeId"], ADAPTIVE_MODE, "{es}");
+    assert_eq!(es["record"]["authenticated"], true, "{es}");
+    let st = em03_state(&fx, "p2-resume", &second.task_instance_id.clone().unwrap());
+    assert_eq!(st["lineage"]["inherited"], true, "{st}");
+    assert_eq!(st["lineage"]["rule"], "inherited", "{st}");
+    assert_eq!(
+        st["lineage"]["predecessorRun"],
+        first.run_id.as_str(),
+        "{st}"
+    );
+    // the cancelled run can no longer be resumed twice, and the reason is the broker's
+    let no = ic::resumable(&sock, &first.run_id).expect("answer");
+    assert_eq!(no["resumable"], false, "{no}");
+    assert_eq!(no["code"], "already-continued", "{no}");
+    assert!(ic::resume(&sock, &first.run_id).is_err());
+    // a completed run is never offered
+    let done = ic::resumable(&sock, &second_id).expect("answer");
+    assert_eq!(done["resumable"], false, "{done}");
+    b.shutdown();
+}
+
 /// Phase 2: the Desktop's engine panel reads `intent-engine`. It reports the engine and the per-attempt
 /// efforts only from the HMAC-authenticated engine record; a run with no engine has no record to show,
 /// and a tampered record is refused rather than shown.

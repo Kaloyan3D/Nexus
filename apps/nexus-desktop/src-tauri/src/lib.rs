@@ -586,6 +586,20 @@ async fn run_engine(run_id: String) -> Result<serde_json::Value, UiError> {
     .map_err(|_| internal())?
 }
 
+/// Whether a run may be resumed now, decided by the broker (the Desktop never decides eligibility).
+#[tauri::command]
+async fn run_resumable(run_id: String) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::resumable(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
 #[tauri::command]
 async fn provider_consent(
     rt: tauri::State<'_, Arc<interactive::Runtime>>,
@@ -1097,6 +1111,7 @@ pub fn run() {
             intent_result,
             intent_cancel,
             intent_resume,
+            run_resumable,
             intent_list,
             tool_events,
             list_approvals,
@@ -1185,6 +1200,7 @@ mod authz_tests {
         "adaptive_setup",
         "run_engine",
         "intent_resume",
+        "run_resumable",
     ];
 
     #[test]

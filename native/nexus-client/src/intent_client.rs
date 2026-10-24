@@ -880,6 +880,16 @@ pub fn engine_summary(socket: &Path, run_id: &str) -> Result<serde_json::Value, 
     )
 }
 
+/// Whether the broker would accept `intent-resume` for this run right now, with the broker's own reason when not.
+pub fn resumable(socket: &Path, run_id: &str) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "intent-resumable",
+        serde_json::json!({ "runId": run_id }),
+        10_000,
+    )
+}
+
 pub fn diff(socket: &Path, run_id: &str) -> Result<DiffReply, ClientError> {
     decode(call(
         socket,

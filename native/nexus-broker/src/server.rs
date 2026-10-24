@@ -666,16 +666,11 @@ impl Broker {
         Ok(json!({ "run": run, "replay": false }))
     }
 
-    /// Continue an interrupted coding task: a NEW run on the same project whose working
-    /// copy already holds the earlier run's changes, told what was done and asked to carry
-    /// on. Never a replay: nothing the earlier run did is executed again.
-    pub(crate) fn resume_run(
-        self: &Arc<Self>,
-        client: &str,
-        old_id: &str,
-        auto: bool,
-    ) -> CmdResult {
-        let old = self.owned(client, old_id)?;
+    /// Why a run cannot be continued (`None` = it can). The ONE rule set behind both `intent-resume`
+    /// and the `intent-resumable` answer the Desktop uses to decide whether to offer Resume; the
+    /// Desktop never decides eligibility itself.
+    fn resume_blocker(&self, old: &RunRecord, auto: bool) -> Result<(), (&'static str, String)> {
+        let old_id = old.run.run_id.as_str();
         let r = &old.run;
         if !self.cfg.interactive || r.intent_type != nexus_contracts::intent::INTENT_REPO_CODE {
             return Err((
@@ -692,10 +687,10 @@ impl Broker {
                 format!("this run was already continued as {n}"),
             ));
         }
-        let (Some(task), Some(project), Some(_)) = (
-            old.prompt.clone(),
-            r.workspace_id.clone(),
-            r.task_instance_id.clone(),
+        let (Some(_), Some(_), Some(_)) = (
+            old.prompt.as_ref(),
+            r.workspace_id.as_ref(),
+            r.task_instance_id.as_ref(),
         ) else {
             return Err((
                 "not-available",
@@ -726,6 +721,48 @@ impl Broker {
                 ));
             }
         }
+        if r.provider_id.is_none()
+            || r.remote_model_id.is_none()
+            || r.logical_model_id.is_none()
+            || r.route_id.is_none()
+        {
+            return Err((
+                "not-available",
+                "the interrupted run's model and route are not recorded; it cannot be continued on the same target".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The Desktop's question: may this run be resumed right now, and if not, why.
+    fn resumable(&self, client: &str, run_id: &str) -> CmdResult {
+        let rec = self.owned(client, run_id)?;
+        Ok(match self.resume_blocker(&rec, false) {
+            Ok(()) => json!({ "run": run_id, "resumable": true, "code": null, "reason": null }),
+            Err((code, reason)) => {
+                json!({ "run": run_id, "resumable": false, "code": code, "reason": reason })
+            }
+        })
+    }
+
+    /// Continue an interrupted coding task: a NEW run on the same project whose working
+    /// copy already holds the earlier run's changes, told what was done and asked to carry
+    /// on. Never a replay: nothing the earlier run did is executed again.
+    pub(crate) fn resume_run(
+        self: &Arc<Self>,
+        client: &str,
+        old_id: &str,
+        auto: bool,
+    ) -> CmdResult {
+        let old = self.owned(client, old_id)?;
+        let r = &old.run;
+        self.resume_blocker(&old, auto)?;
+        let (Some(task), Some(project)) = (old.prompt.clone(), r.workspace_id.clone()) else {
+            return Err((
+                "not-available",
+                "this run kept no task text or working copy".into(),
+            ));
+        };
         // EM-02: the continuation runs on the SAME model and route as the interrupted run, never on
         // whatever the Registry's default is now; the new task's binding is then checked against
         // the interrupted run's (model, route, connection, endpoint, credential, default effort).
@@ -1281,6 +1318,7 @@ impl Broker {
             "intent-diff" => self.diff(client, run_id),
             "intent-copy" => self.copy_info(client, run_id),
             "intent-engine" => self.engine_summary(client, run_id),
+            "intent-resumable" => self.resumable(client, run_id),
             "project-open" | "project-list" | "project-forget" | "project-refresh"
             | "project-policy" => self.project_verb(cmd, params),
             "project-adopt" => self.project_adopt(client, run_id),

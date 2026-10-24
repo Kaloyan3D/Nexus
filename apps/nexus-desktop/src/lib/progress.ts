@@ -39,6 +39,13 @@ export function describeStep(a: ToolActivity): Step {
     if (blocked) return { key, tone: "blocked", text: `Command not run (approval ${a.approvalOutcome}): ${a.argsSummary}` };
     return { key, tone: "failed", text: `Command not run${a.errorCode ? ` (${a.errorCode})` : ""}: ${a.argsSummary}` };
   }
+  if (a.tool === "muse_update_reasoning_state") {
+    // A control-plane CLAIM from the model (phase, findings). It changes no file and never sets an effort: the host's
+    // limiter owns the reasoning effort. Executed means the claim was accepted and recorded, not that anything ran.
+    if (a.status === "executed") return { key, tone: "done", text: `Reported reasoning state${a.argsSummary ? ` (${a.argsSummary})` : ""}` };
+    return { key, tone: "blocked", text: `Reasoning-state report not accepted${a.errorCode ? ` (${a.errorCode})` : ""}` };
+  }
+  if (a.status === "executed") return { key, tone: "done", text: `Used ${a.tool}` };
   return { key, tone: "failed", text: `${a.tool} refused${a.errorCode ? ` (${a.errorCode})` : ""}` };
 }
 

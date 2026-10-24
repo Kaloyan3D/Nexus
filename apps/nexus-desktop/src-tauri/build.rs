@@ -53,6 +53,7 @@ const COMMANDS: &[&str] = &[
     "adaptive_setup",
     "run_engine",
     "intent_resume",
+    "run_resumable",
 ];
 
 fn main() {

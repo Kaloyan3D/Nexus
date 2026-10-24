@@ -301,6 +301,7 @@ export function fakeApi(over: Partial<NativeApi> = {}): NativeApi {
     enginePrefer: async (e) => e,
     adaptiveSetup: async () => ({ verified: true, checks: [] }),
     runEngine: async (id: string) => ({ run: id, live: false, bound: { engineId: null, modeId: null, route: null }, record: null }),
+    runResumable: async (id: string) => ({ run: id, resumable: false, code: "not-terminal", reason: "this run is not an interrupted one" }),
     intentResume: async (id: string) => ({ run: fakeRun({ runId: id }) }),
     threadCreate: async (projectId: string) => ({ thread: { threadId: "thr_" + "b".repeat(32), projectId, title: "", createdAtMs: 1, updatedAtMs: 1, archived: false, legacy: false, runCount: 0, messageCount: 0, lastPreview: "", lastState: "", active: false, activeRunId: null, findingCount: 0 } }),
     threadUpdate: async () => { throw { code: "not-found", message: "n/a", class: "refused", retryable: false }; },

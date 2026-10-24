@@ -1,3 +1,4 @@
+import { ResumeControl } from "../engine/ResumeControl";
 import { EngineActivity } from "../engine/EngineActivity";
 import { Archive, CheckCircle2, ChevronDown, ChevronRight, CircleSlash, FileText, Loader2, Lock, Plus, TriangleAlert } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -85,21 +86,19 @@ function evidenceBadge(r: ThreadRunView): { label: string; tone: "success" | "wa
     return { label: "No change needed · checks passed", tone: "success", detail: "Nothing was changed; the relevant check passed (a verified no-op)." };
   }
   const v = outcomeView(run);
+  if (v && run.state === "cancelled") {
+    // The recorded result stays as it is; only the wording stops implying the task was finished.
+    return {
+      label: v.label.replace(/^Tests passed/, "Last test command passed").replace(/^Tests failed/, "Last test command failed"),
+      tone: v.tone,
+      detail: `${v.detail} The run was cancelled before it finished: this is the last test command's result, not a completed task.`,
+    };
+  }
   return v ? { label: v.label, tone: v.tone, detail: v.detail } : null;
 }
 
 function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; detail: ThreadDetail }) {
-  const { openPanel, api, refreshThreads } = useNexus();
-  const [resumeError, setResumeError] = useState<string | null>(null);
-  const resumeRun = async (id: string) => {
-    setResumeError(null);
-    try {
-      await api.intentResume(id);
-      await refreshThreads();
-    } catch (e) {
-      setResumeError((e as { message?: string })?.message ?? "Could not resume.");
-    }
-  };
+  const { openPanel } = useNexus();
   const run = r.run;
   const now = useNow(1000);
   const [open, setOpen] = useState(false);
@@ -151,15 +150,8 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
           {run?.workspaceNote ? ` — ${run.workspaceNote}` : ""}
         </p>
       )}
+      {isLast && !live && run && run.state !== "completed" && <ResumeControl runId={run.runId} />}
       {run && <EngineActivity runId={run.runId} live={live} />}
-      {isLast && !live && run && !r.readOnly && ["cancelled", "failed", "interrupted", "recovered"].includes(run.state) && (
-        <div className="nv-run__actions">
-          <Button size="sm" onClick={() => void resumeRun(run.runId)} title="Continue from this run's work in a new run (the broker refuses if the conversation moved on)">
-            Resume
-          </Button>
-          {resumeError && <span className="nv-note" role="alert">{resumeError}</span>}
-        </div>
-      )}
       {live && run && (
         <section className="nv-runprogress" aria-label="Run progress" aria-live="polite">
           <div className="nv-runprogress__now">

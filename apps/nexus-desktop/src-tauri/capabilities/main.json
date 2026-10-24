@@ -57,6 +57,7 @@
     "allow-engine-prefer",
     "allow-adaptive-setup",
     "allow-run-engine",
-    "allow-intent-resume"
+    "allow-intent-resume",
+    "allow-run-resumable"
   ]
 }

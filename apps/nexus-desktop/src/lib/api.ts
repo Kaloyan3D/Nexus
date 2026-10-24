@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
+  RunResumable,
   AdaptiveSetupReport,
   EngineChoiceView,
   EngineKind,
@@ -115,6 +116,8 @@ export interface NativeApi {
   adaptiveSetup(): Promise<AdaptiveSetupReport>;
   /** Phase 2: what a run's engine durably recorded (engine, per-attempt efforts, effort events). */
   runEngine(runId: string): Promise<RunEngineSummary>;
+  /** Whether the broker would accept a resume of this run now, with its reason when not. */
+  runResumable(runId: string): Promise<RunResumable>;
   /** Phase 2: continue an interrupted run in a new run from its work (the broker decides whether it may). */
   intentResume(runId: string): Promise<{ run: IntentRun }>;
   threadUpdate(threadId: string, patch: { title?: string | null; archived?: boolean | null }): Promise<{ thread: ThreadSummary }>;
@@ -221,6 +224,7 @@ export const tauriApi: NativeApi = {
   enginePrefer: (engine) => invoke<EngineKind>("engine_prefer", { engine }),
   adaptiveSetup: () => invoke<AdaptiveSetupReport>("adaptive_setup"),
   runEngine: (runId) => invoke<RunEngineSummary>("run_engine", { runId }),
+  runResumable: (runId) => invoke<RunResumable>("run_resumable", { runId }),
   intentResume: (runId) => invoke<{ run: IntentRun }>("intent_resume", { runId }),
   threadCreate: (projectId, title) => invoke<{ thread: ThreadSummary }>("thread_create", { projectId, title: title ?? null }),
   threadUpdate: (threadId, patch) => invoke<{ thread: ThreadSummary }>("thread_update", { threadId, title: patch.title ?? null, archived: patch.archived ?? null }),
@@ -307,6 +311,7 @@ export const unavailableApi: NativeApi = {
   enginePrefer: () => Promise.reject(notInShell),
   adaptiveSetup: () => Promise.reject(notInShell),
   runEngine: () => Promise.reject(notInShell),
+  runResumable: () => Promise.reject(notInShell),
   intentResume: () => Promise.reject(notInShell),
   threadCreate: () => Promise.reject(notInShell),
   threadUpdate: () => Promise.reject(notInShell),
