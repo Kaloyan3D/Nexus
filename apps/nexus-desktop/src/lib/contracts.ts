@@ -468,6 +468,8 @@ export interface CodingOutcome {
   checksFailedUnresolved?: number;
   /** Commands whose verdict proved nothing (a pipeline cut off or without pipefail). */
   checksUnverified?: number;
+  /** Files the last passing check wrote only into its own throw-away copy (not saved to the project). */
+  lastCheckUnsavedFiles?: number;
 }
 
 /** An operation waiting for an independent approval (A5.6). Desktop only shows it. */
@@ -598,6 +600,8 @@ export interface DiffReply {
 
 /** One model-proposed read-only tool call and what became of it (A5.5). */
 export interface ToolActivity {
+  /** Process: files the command created/changed/deleted in its throw-away copy that were NOT saved to the project. */
+  unsavedFiles?: number;
   index: number;
   turn: number;
   callId: string;

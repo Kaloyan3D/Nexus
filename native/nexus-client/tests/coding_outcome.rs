@@ -357,3 +357,58 @@ fn a_plain_pass_or_fail_is_unchanged() {
     .unwrap();
     assert_eq!(o.verification, "verified-failed");
 }
+
+#[test]
+fn a_request_refused_before_any_approval_is_a_failed_operation_not_an_approval_decision() {
+    // Direct Workspace smoke: `fs_write` into a missing folder came back `not-found` from the pre-check;
+    // it was shown as "approval refused". It is an unapplied edit with its own code, not a refusal at approval.
+    let mut e = act(2, "fs_write", "refused", Some("refused"));
+    e.error_code = Some("not-found".into());
+    let o = derive_coding_outcome(&run(
+        "completed",
+        vec![act(1, "fs_read", "executed", None), e],
+    ))
+    .unwrap();
+    assert_eq!((o.edits_not_applied, o.blocked_by_approval), (1, 0));
+    // the automated policy saying no IS a decision at the boundary
+    let mut p = act(3, "fs_write", "refused", Some("refused"));
+    p.error_code = Some("policy-refused".into());
+    let o = derive_coding_outcome(&run("completed", vec![p])).unwrap();
+    assert_eq!((o.edits_not_applied, o.blocked_by_approval), (1, 1));
+    // an approver's or a timeout's no is too
+    let o = derive_coding_outcome(&run(
+        "completed",
+        vec![act(4, "fs_write", "refused", Some("denied"))],
+    ))
+    .unwrap();
+    assert_eq!(o.blocked_by_approval, 1);
+}
+
+#[test]
+fn a_check_that_passed_over_files_that_exist_only_in_its_scratch_copy_is_not_a_verified_pass() {
+    let edit = applied_edit(1);
+    let mut scratch = test_run(2, "pass", 0);
+    scratch.unsaved_files = Some(2);
+    let o = derive_coding_outcome(&run("completed", vec![edit.clone(), scratch])).unwrap();
+    assert_eq!(o.verification, "verified-scratch");
+    assert_eq!((o.last_check_unsaved_files, o.last_exit_code), (2, Some(0)));
+    // the same check over the project as it really is verifies it
+    let o = derive_coding_outcome(&run(
+        "completed",
+        vec![edit.clone(), test_run(2, "pass", 0)],
+    ))
+    .unwrap();
+    assert_eq!(
+        (o.verification.as_str(), o.last_check_unsaved_files),
+        ("verified-passed", 0)
+    );
+    // an earlier scratch-only pass does not taint a later clean one
+    let mut scratch = test_run(2, "pass", 0);
+    scratch.unsaved_files = Some(1);
+    let o = derive_coding_outcome(&run(
+        "completed",
+        vec![edit, scratch, test_run(3, "pass", 0)],
+    ))
+    .unwrap();
+    assert_eq!(o.verification, "verified-passed");
+}

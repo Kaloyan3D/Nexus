@@ -41,10 +41,31 @@ fn create_replace_and_edit_publish_atomically_and_verify() {
             json!({"path": "src/new.txt", "content": "hello\n", "mode": "create"}),
         )
         .map_err(|e| e.to_string());
-    // parent must exist (no implicit mkdir)
+    // creating a file below folders that do not exist yet makes them (see the nested-creation tests);
+    // here the folder is made by the create itself
     assert!(r.is_ok());
-    assert_eq!(wcode(&Ok(r.unwrap())), "not-found");
-    std::fs::create_dir_all(fx.ws.join("src")).unwrap();
+    let r = r.unwrap();
+    assert!(r.result.error.is_none(), "{:?}", r.result.error);
+    assert_eq!(
+        r.result.output.as_ref().unwrap()["createdDirs"],
+        json!(["src"])
+    );
+    // a second file in the now-existing folder creates nothing and reports no folders
+    let r = fx
+        .run_write(
+            "fs.write",
+            json!({"path": "src/new2.txt", "content": "x\n", "mode": "create"}),
+        )
+        .unwrap();
+    assert!(r
+        .result
+        .output
+        .as_ref()
+        .unwrap()
+        .get("createdDirs")
+        .is_none());
+    std::fs::remove_file(fx.ws.join("src/new2.txt")).unwrap();
+    std::fs::remove_file(fx.ws.join("src/new.txt")).unwrap();
     let r = fx
         .run_write(
             "fs.write",
@@ -257,7 +278,8 @@ fn forbidden_targets_are_refused_with_zero_mutation() {
             "special-file-refused",
         ),
         (
-            json!({"path": "no/such/dir/f.txt", "content": "x", "mode": "create"}),
+            // only `create` makes folders; replacing a file that is not there is still not-found
+            json!({"path": "no/such/dir/f.txt", "content": "x", "mode": "replace", "expectedSha256": sha("x")}),
             "not-found",
         ),
         (
@@ -1454,4 +1476,275 @@ fn delete_removes_exactly_the_expected_file_and_refuses_anything_else() {
         r.result.error.as_ref().map(|e| e.code.as_str()),
         Some("conflict")
     );
+}
+
+// ------------------------------------------------ nested creation (Direct Workspace smoke finding)
+
+struct Cap<'a> {
+    planned: Option<serde_json::Value>,
+    verified: Option<serde_json::Value>,
+    dirs: Vec<Vec<String>>,
+    seen: Vec<String>,
+    fail_dirs: bool,
+    on_point: Box<dyn FnMut(&str) + 'a>,
+}
+
+impl<'a> Cap<'a> {
+    fn new(on_point: impl FnMut(&str) + 'a) -> Self {
+        Cap {
+            planned: None,
+            verified: None,
+            dirs: vec![],
+            seen: vec![],
+            fail_dirs: false,
+            on_point: Box::new(on_point),
+        }
+    }
+}
+
+impl WriteHooks for Cap<'_> {
+    fn journal(&mut self, phase: &str, p: serde_json::Value) -> Result<(), nexus_tools::ToolError> {
+        self.seen.push(phase.to_owned());
+        match phase {
+            "planned" => self.planned = Some(p),
+            "verified" => self.verified = Some(p),
+            _ => {}
+        }
+        (self.on_point)(phase);
+        Ok(())
+    }
+    fn fence(&mut self) -> Result<(), nexus_tools::ToolError> {
+        Ok(())
+    }
+    fn at(&mut self, point: &str) {
+        (self.on_point)(&format!("@{point}"));
+    }
+    fn dirs_created(&mut self, dirs: &[String]) -> Result<(), nexus_tools::ToolError> {
+        if self.fail_dirs {
+            return Err(nexus_tools::ToolError::new(
+                ToolErrorCode::IoError,
+                "store down",
+            ));
+        }
+        self.dirs.push(dirs.to_vec());
+        Ok(())
+    }
+}
+
+fn entries(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn a_new_file_below_missing_folders_makes_them_journals_them_and_verifies() {
+    let mut fx = fixture("w-nested");
+    fx.approve_write(64 * 1024);
+    let mut h = Cap::new(|_| {});
+    let cancel = CancellationToken::new("n");
+    let res = direct(
+        &mut fx,
+        json!({"path": "src/a/b/new.txt", "content": "hi\n", "mode": "create"}),
+        "fs.write",
+        &cancel,
+        &mut h,
+    );
+    assert!(res.error.is_none(), "{:?}", res.error);
+    assert_eq!(fx.disk("src/a/b/new.txt").unwrap(), "hi\n");
+    // the intent names the folders BEFORE anything is made; the outcome names what was made
+    assert_eq!(
+        h.planned.as_ref().unwrap()["createDirs"],
+        json!(["src", "src/a", "src/a/b"])
+    );
+    assert_eq!(
+        h.verified.as_ref().unwrap()["createdDirs"],
+        json!(["src", "src/a", "src/a/b"])
+    );
+    assert_eq!(
+        h.dirs,
+        vec![vec!["src".to_owned(), "src/a".into(), "src/a/b".into()]]
+    );
+    assert_eq!(
+        res.output.as_ref().unwrap()["createdDirs"],
+        json!(["src", "src/a", "src/a/b"])
+    );
+    // owned by this identity, ordinary directory permissions, no artifacts
+    for d in ["src", "src/a", "src/a/b"] {
+        let m = std::fs::metadata(fx.ws.join(d)).unwrap();
+        assert!(m.is_dir());
+        assert_eq!(m.permissions().mode() & 0o700, 0o700, "{d}");
+    }
+    assert!(fx.tmp_leftovers().is_empty());
+    assert!(fx.ws.join("src/a/b").read_dir().unwrap().all(|e| !e
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".nexus-")));
+}
+
+#[test]
+fn replace_edit_and_delete_never_make_folders() {
+    let mut fx = fixture("w-nomk");
+    fx.approve_write(64 * 1024);
+    let before = entries(&fx.ws);
+    for (tool, args) in [
+        (
+            "fs.write",
+            json!({"path": "x/y/z.txt", "content": "n", "mode": "replace", "expectedSha256": sha("o")}),
+        ),
+        (
+            "fs.write",
+            json!({"path": "x/y/z.txt", "content": "", "mode": "delete", "expectedSha256": sha("o")}),
+        ),
+        (
+            "fs.edit",
+            json!({"path": "x/y/z.txt", "expectedSha256": sha("o"), "edits": [{"oldText": "a", "newText": "b"}]}),
+        ),
+    ] {
+        let r = fx.run_write(tool, args);
+        assert_eq!(wcode(&r), "not-found", "{tool}");
+    }
+    assert_eq!(entries(&fx.ws), before, "nothing was created");
+}
+
+#[test]
+fn folder_creation_never_escapes_or_touches_protected_names_and_creates_nothing_when_refused() {
+    let mut fx = fixture("w-nomk-escape");
+    fx.approve_write(64 * 1024);
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), fx.ws.join("link")).unwrap();
+    let before = entries(&fx.ws);
+    let cases = [
+        ("../x/y.txt", "path-invalid"),
+        ("a/../b/c.txt", "path-invalid"),
+        ("/abs/x/y.txt", "path-invalid"),
+        (".git/hooks/x/y", "hidden-path-refused"),
+        (".hidden/x.txt", "hidden-path-refused"),
+        ("node_modules/pkg/i.js", "hidden-path-refused"),
+        ("target/debug/x.rs", "hidden-path-refused"),
+        ("link/sub/f.txt", "symlink-refused"),
+        ("link/f.txt", "symlink-refused"),
+        ("a/b/c/d/e/f/g/h/i/j.txt", "invalid-arguments"),
+    ];
+    for (path, want) in cases {
+        let r = fx.run_write(
+            "fs.write",
+            json!({"path": path, "content": "x", "mode": "create"}),
+        );
+        let got = wcode(&r);
+        // path syntax is refused before any request can exist
+        let ok = got == want
+            || (want == "path-invalid" && (got.contains("invalid") || got.contains("path")));
+        assert!(ok, "{path}: wanted {want}, got {got}");
+    }
+    assert_eq!(
+        entries(&fx.ws),
+        before,
+        "no folder was made inside the workspace"
+    );
+    assert!(
+        entries(outside.path()).is_empty(),
+        "nothing was made outside"
+    );
+}
+
+#[test]
+fn a_symlink_planted_in_the_race_window_is_never_followed_and_nothing_is_left_behind() {
+    let mut fx = fixture("w-nomk-race");
+    fx.approve_write(64 * 1024);
+    let outside = tempfile::tempdir().unwrap();
+    let ws = fx.ws.clone();
+    let out = outside.path().to_path_buf();
+    let mut planted = false;
+    let mut h = Cap::new(move |p| {
+        if p == "@before-mkdir" && !planted {
+            planted = true;
+            std::os::unix::fs::symlink(&out, ws.join("src")).unwrap();
+        }
+    });
+    let res = direct(
+        &mut fx,
+        json!({"path": "src/deep/new.txt", "content": "x", "mode": "create"}),
+        "fs.write",
+        &CancellationToken::new("r"),
+        &mut h,
+    );
+    assert_eq!(
+        res.error.as_ref().unwrap().code,
+        ToolErrorCode::SymlinkRefused
+    );
+    assert!(entries(outside.path()).is_empty(), "the link was followed");
+    assert!(fx.tmp_leftovers().is_empty());
+}
+
+#[test]
+fn a_folder_someone_else_made_meanwhile_is_used_but_never_claimed_or_removed() {
+    let mut fx = fixture("w-nomk-concurrent");
+    fx.approve_write(64 * 1024);
+    let ws = fx.ws.clone();
+    let mut done = false;
+    let mut h = Cap::new(move |p| {
+        if p == "@before-mkdir" && !done {
+            done = true;
+            std::fs::create_dir(ws.join("src")).unwrap(); // the user's editor made it first
+        }
+    });
+    let res = direct(
+        &mut fx,
+        json!({"path": "src/a/new.txt", "content": "x", "mode": "create"}),
+        "fs.write",
+        &CancellationToken::new("c"),
+        &mut h,
+    );
+    assert!(res.error.is_none(), "{:?}", res.error);
+    assert_eq!(fx.disk("src/a/new.txt").unwrap(), "x");
+    assert_eq!(
+        h.dirs,
+        vec![vec!["src/a".to_owned()]],
+        "only what this call made is claimed"
+    );
+}
+
+#[test]
+fn folders_made_for_a_file_that_is_never_published_are_removed_again() {
+    let mut fx = fixture("w-nomk-rollback");
+    fx.approve_write(64 * 1024);
+    let cancel = CancellationToken::new("rb");
+    let c2 = cancel.clone();
+    let mut h = Cap::new(move |p| {
+        if p == "prepared" {
+            c2.cancel();
+        }
+    });
+    let before = entries(&fx.ws);
+    let res = direct(
+        &mut fx,
+        json!({"path": "src/a/new.txt", "content": "x", "mode": "create"}),
+        "fs.write",
+        &cancel,
+        &mut h,
+    );
+    assert_eq!(res.error.as_ref().unwrap().code, ToolErrorCode::Cancelled);
+    assert_eq!(
+        entries(&fx.ws),
+        before,
+        "the folders made for it are gone again"
+    );
+    // a store that cannot record the folders refuses the operation and leaves nothing
+    let mut h = Cap::new(|_| {});
+    h.fail_dirs = true;
+    let res = direct(
+        &mut fx,
+        json!({"path": "src/a/new.txt", "content": "x", "mode": "create"}),
+        "fs.write",
+        &CancellationToken::new("rb2"),
+        &mut h,
+    );
+    assert!(res.error.is_some());
+    assert_eq!(entries(&fx.ws), before);
 }

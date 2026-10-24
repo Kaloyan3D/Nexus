@@ -55,6 +55,34 @@ pub trait WriteHooks {
     ) -> Result<(), ToolError> {
         Ok(())
     }
+    /// Folders this operation just brought into existence (workspace-relative, outermost first), so a
+    /// store that tracks what a task changed can record them. An `Err` refuses the operation; the folders
+    /// are removed again (they are empty).
+    fn dirs_created(&mut self, _dirs: &[String]) -> Result<(), ToolError> {
+        Ok(())
+    }
+}
+
+/// Folders created for one file creation, removed again (deepest first, only when empty) if the file
+/// never got published. Disarmed once the file is in place.
+struct MadeDirs {
+    /// (parent directory, name of the child this call created)
+    chain: Vec<(std::os::fd::OwnedFd, String)>,
+    armed: bool,
+}
+
+impl Drop for MadeDirs {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for (parent, name) in self.chain.iter().rev() {
+            if let Ok(c) = std::ffi::CString::new(name.as_str()) {
+                // rmdir only: a directory that is not empty (someone put something in) stays
+                unsafe { libc::unlinkat(parent.as_raw_fd(), c.as_ptr(), libc::AT_REMOVEDIR) };
+            }
+        }
+    }
 }
 
 pub fn sha256_bytes_hex(b: &[u8]) -> String {
@@ -172,9 +200,25 @@ pub fn run_write(
         Ok(r) => r,
         Err(e) => refuse_none!(e.code, e.message),
     };
-    let (dir, name) = match ws.open_parent_for_write(&rel) {
-        Ok(v) => v,
+    // A new file may be created in folders that do not exist yet (`create` only): the missing folders are
+    // planned here without creating anything, journaled with the intent, and made just before the file is.
+    let is_create = matches!(&op, Op::Write(a) if a.mode == "create");
+    let (mut dir, name, missing) = match ws.open_parent_for_write(&rel) {
+        Ok((d, n)) => (d, n, Vec::<String>::new()),
+        Err(e) if is_create && e.code == ToolErrorCode::NotFound => {
+            match ws.plan_parents_for_create(&rel) {
+                Ok((d, m, n)) => (d, n, m),
+                Err(e) => refuse_none!(e.code, e.message),
+            }
+        }
         Err(e) => refuse_none!(e.code, e.message),
+    };
+    let new_dir_paths: Vec<String> = {
+        let comps = rel.components();
+        let parents = comps.len().saturating_sub(1);
+        (parents - missing.len()..parents)
+            .map(|i| comps[..=i].join("/"))
+            .collect()
     };
     let max_write = budgets.max_write_bytes;
     let new_len_hint = match &op {
@@ -188,10 +232,14 @@ pub fn run_write(
         );
     }
 
-    // 1. Observe the target (no mutation yet).
-    let existing = match ws.stat_in_dir(&dir.fd, &name) {
-        Ok(v) => v,
-        Err(e) => refuse_none!(e.code, e.message),
+    // 1. Observe the target (no mutation yet). A target below folders that do not exist cannot exist.
+    let existing = if missing.is_empty() {
+        match ws.stat_in_dir(&dir.fd, &name) {
+            Ok(v) => v,
+            Err(e) => refuse_none!(e.code, e.message),
+        }
+    } else {
+        None
     };
     let (pre_bytes, pre_sha, pre_mode): (Option<Vec<u8>>, Option<String>, Option<u32>) =
         match existing {
@@ -356,9 +404,38 @@ pub fn run_write(
             "preSha256": pre_sha, "preBytes": pre_bytes.as_ref().map(|b| b.len()),
             "postSha256": post_sha, "postBytes": post.len(), "fileMode": file_mode,
             "tmpName": tmp, "stageName": stage,
+            "createDirs": new_dir_paths,
         }),
     )?;
     crash_point("after-planned");
+
+    // 3b. Make the planned folders, one descriptor-relative step at a time (no symlink, no mount
+    //     crossing, owner checked); undone again if the file is never published.
+    let mut made = MadeDirs {
+        chain: Vec::new(),
+        armed: true,
+    };
+    let mut created_dirs: Vec<String> = Vec::new();
+    for (i, n) in missing.iter().enumerate() {
+        hooks.at("before-mkdir");
+        match ws.create_dir_in(&dir.fd, n) {
+            Ok((child, created)) => {
+                if created {
+                    created_dirs.push(new_dir_paths[i].clone());
+                    let parent = std::mem::replace(&mut dir, child);
+                    made.chain.push((parent.fd, n.clone()));
+                } else {
+                    dir = child;
+                }
+            }
+            Err(e) => refuse_none!(e.code, e.message),
+        }
+    }
+    if !created_dirs.is_empty() {
+        if let Err(e) = hooks.dirs_created(&created_dirs) {
+            refuse_none!(e.code, e.message);
+        }
+    }
 
     // 4. Prepare: a protected staging directory (0700, created by us), and
     //    inside it a private temp file, fsynced. Nothing Nexus will later
@@ -539,6 +616,8 @@ pub fn run_write(
     if pre_sha.is_none() {
         crash_point("after-rename");
     }
+    // the file is in place: the folders made for it stay
+    made.armed = false;
     let sync = mutate::fsync(dfd);
 
     // 7. From here the bytes ARE published: never abort, record truth.
@@ -566,17 +645,23 @@ pub fn run_write(
             serde_json::json!({
                 "toolId": tool, "operation": op_name, "path": path_s,
                 "preSha256": pre_sha, "postSha256": post_sha, "postBytes": post.len(),
-                "mutation": "applied",
+                "mutation": "applied", "createdDirs": created_dirs,
             }),
         )?;
-        Ok(out_ok(
+        let mut res = out_ok(
             tool,
             path_s,
             op_name,
             pre_sha.as_deref(),
             &post_sha,
             post.len() as u64,
-        ))
+        );
+        if !created_dirs.is_empty() {
+            if let Some(o) = res.output.as_mut().and_then(|v| v.as_object_mut()) {
+                o.insert("createdDirs".into(), serde_json::json!(created_dirs));
+            }
+        }
+        Ok(res)
     } else {
         hooks.journal(
             PH_FAILED,
@@ -994,6 +1079,8 @@ pub struct WritePreview {
     pub pre_text: Option<String>,
     pub post_text: String,
     pub file_mode: u32,
+    /// Folders this operation would create (workspace-relative, outermost first); empty for most.
+    pub creates_dirs: Vec<String>,
 }
 
 /// Compute the pre-image/post-image without mutating anything. Refuses (as
@@ -1017,8 +1104,27 @@ pub fn preview_write(
         }
     };
     let rel = RelPath::parse(path_s)?;
-    let (dir, name) = ws.open_parent_for_write(&rel)?;
-    let existing = ws.stat_in_dir(&dir.fd, &name)?;
+    let is_create = wa.is_some_and(|a| a.mode == "create");
+    let (dir, name, missing) = match ws.open_parent_for_write(&rel) {
+        Ok((d, n)) => (d, n, Vec::<String>::new()),
+        Err(e) if is_create && e.code == ToolErrorCode::NotFound => {
+            let (d, m, n) = ws.plan_parents_for_create(&rel)?;
+            (d, n, m)
+        }
+        Err(e) => return Err(e),
+    };
+    let creates_dirs: Vec<String> = {
+        let comps = rel.components();
+        let parents = comps.len().saturating_sub(1);
+        (parents - missing.len()..parents)
+            .map(|i| comps[..=i].join("/"))
+            .collect()
+    };
+    let existing = if missing.is_empty() {
+        ws.stat_in_dir(&dir.fd, &name)?
+    } else {
+        None
+    };
     let (pre_bytes, pre_sha, pre_mode) = match existing {
         None => (None, None, None),
         Some(_) => {
@@ -1111,6 +1217,7 @@ pub fn preview_write(
         pre_text: pre_bytes.map(|b| String::from_utf8_lossy(&b).into_owned()),
         post_text: String::from_utf8_lossy(&post).into_owned(),
         file_mode,
+        creates_dirs,
     })
 }
 

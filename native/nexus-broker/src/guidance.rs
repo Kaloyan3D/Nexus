@@ -46,7 +46,7 @@ pub fn code_preamble_body_for(kind_ids: &[String], interactive: bool, direct: bo
             )
             .replace(
                 "proc_run runs in a sandbox over a throw-away copy:",
-                "proc_run runs in a sandbox over a throw-away snapshot of the project's current files (including your edits so far):",
+                "proc_run runs in a sandbox over a throw-away snapshot of the project's current files (including your edits so far). Whatever a command creates, changes or deletes there (mkdir, echo > file, formatters, generators) is DISCARDED when it ends and the result lists it: put files into the project with fs_write (it also creates missing folders), then run the check over what is really there. Also:",
             );
     }
     if interactive {

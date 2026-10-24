@@ -1553,13 +1553,20 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "write",
             &prepared,
             vec![pv.path.clone()],
-            serde_json::json!({
-                "kind": request.tool_id, "operation": pv.operation, "path": pv.path,
-                "preImageSha256": pv.pre_sha256, "preImageBytes": pv.pre_bytes,
-                "postImageSha256": pv.post_sha256, "postImageBytes": pv.post_bytes,
-                "fileMode": format!("{:o}", pv.file_mode),
-                "expectedPreImage": pv.pre_sha256,
-            }),
+            {
+                let mut op = serde_json::json!({
+                    "kind": request.tool_id, "operation": pv.operation, "path": pv.path,
+                    "preImageSha256": pv.pre_sha256, "preImageBytes": pv.pre_bytes,
+                    "postImageSha256": pv.post_sha256, "postImageBytes": pv.post_bytes,
+                    "fileMode": format!("{:o}", pv.file_mode),
+                    "expectedPreImage": pv.pre_sha256,
+                });
+                // present only when the operation makes folders: the approver/policy sees exactly that
+                if !pv.creates_dirs.is_empty() {
+                    op["createsDirs"] = serde_json::json!(pv.creates_dirs);
+                }
+                op
+            },
             preview,
             serde_json::json!({
                 "maxWriteBytes": prepared.budgets().max_write_bytes,
@@ -2042,6 +2049,20 @@ impl nexus_tools::WriteHooks for DaemonWriteHooks<'_> {
                 format!("authority revoked ({})", e.code.as_str()),
             )
         })
+    }
+    fn dirs_created(&mut self, dirs: &[String]) -> Result<(), nexus_tools::ToolError> {
+        match &self.direct {
+            None => Ok(()),
+            Some(store) => store.record_dirs(dirs).map_err(|e| {
+                nexus_tools::ToolError::new(
+                    nexus_tools::ToolErrorCode::IoError,
+                    format!(
+                        "the new folders could not be recorded ({}); nothing was changed",
+                        e.message
+                    ),
+                )
+            }),
+        }
     }
     fn preimage(
         &mut self,
@@ -2843,6 +2864,7 @@ fn do_worktree_diff(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                         "diff": d.diff,
                         "diffDigest": d.diff_digest,
                         "diffTruncated": d.diff_truncated,
+                        "createdDirs": d.created_dirs,
                     },
                     "direct": true,
                 }),

@@ -16146,3 +16146,429 @@ fn direct_survives_a_broker_restart_without_losing_the_edit_or_the_writer_slot()
     );
     b2.shutdown();
 }
+
+// ------------------------------------------------------------------------------------------------
+// Direct Workspace live-smoke findings: nested files, command effects, honest evidence
+// ------------------------------------------------------------------------------------------------
+
+fn direct_env_empty(name: &str, mode: &str, make: impl Fn(FolderCell) -> Responder) -> DirectEnv {
+    let cell: FolderCell = Arc::new(Mutex::new(None));
+    let fx = fixture_autonomous(make(cell.clone()));
+    let b = managed_broker(&fx, name);
+    let sock = b.socket_path().to_owned();
+    let folder = fx.work.join("managed-empty");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("README.md"), "# demo\n").unwrap();
+    let v = ic::project_open(&sock, folder.to_str().unwrap()).expect("project-open");
+    let pid = v["project"]["projectId"].as_str().unwrap().to_owned();
+    *cell.lock().unwrap() = Some(std::fs::canonicalize(&folder).unwrap());
+    if mode != "isolated" {
+        ic::project_set_workspace(&sock, &pid, mode).expect("mode");
+    }
+    DirectEnv {
+        fx,
+        b,
+        sock,
+        folder,
+        pid,
+    }
+}
+
+const PKG: &str =
+    r#"{"name":"demo","version":"1.0.0","scripts":{"test":"node tests/add.test.js"}}"#;
+const INDEX_JS: &str = "exports.add = (a, b) => a + b;\n";
+const TEST_JS: &str = "const { add } = require('../src/index.js');\nif (add(2, 3) !== 5) { throw new Error('add is wrong'); }\nconsole.log('add ok');\n";
+
+/// The owner's smoke: one command that makes the test file inside its own scratch copy and runs the tests there.
+fn scratch_script() -> String {
+    format!(
+        "mkdir -p tests && printf '%b' \"{}\" > tests/add.test.js && npm test",
+        TEST_JS.replace('\n', "\\n")
+    )
+}
+
+fn fs_create(path: &str, content: &str) -> String {
+    json!({"path": path, "mode": "create", "content": content}).to_string()
+}
+
+/// A1-A3: the owner's live smoke. A fresh empty project receives package.json, src/index.js and
+/// tests/add.test.js (folders made as needed), they physically exist in the real folder, and the tests run
+/// against that persisted state and pass - verified by the harness AND by running them on the host afterwards.
+#[test]
+fn direct_a_fresh_project_receives_nested_files_and_the_tests_pass_over_the_persisted_state() {
+    if !sandbox_ready() {
+        return;
+    }
+    let env = direct_env_empty("direct-nested", "direct", |_| {
+        script(
+            vec![
+                ("fs_write", fs_create("package.json", PKG)),
+                ("fs_write", fs_create("src/index.js", INDEX_JS)),
+                ("fs_write", fs_create("tests/add.test.js", TEST_JS)),
+                ("proc_run", r#"{"program":"npm","args":["test"]}"#.into()),
+            ],
+            "Created the project layout and the tests pass.",
+        )
+    });
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(
+            &env,
+            "Create package.json, src/index.js and tests/add.test.js; npm test must pass.",
+            "direct-nested-0001",
+        ),
+        300,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    // the files are physically in the project folder, nested as asked
+    assert_eq!(
+        std::fs::read_to_string(env.folder.join("src/index.js")).unwrap(),
+        INDEX_JS
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.folder.join("tests/add.test.js")).unwrap(),
+        TEST_JS
+    );
+    assert!(env.folder.join("src").is_dir() && env.folder.join("tests").is_dir());
+    // every file operation succeeded (the first write that makes a folder reports it)
+    for a in run.tool_activity.iter().filter(|a| a.tool == "fs_write") {
+        assert_eq!(a.status, "executed", "{a:?}");
+    }
+    // the command ran over the persisted project and passed; nothing was left unsaved
+    let cmd = run
+        .tool_activity
+        .iter()
+        .find(|a| a.tool == "proc_run")
+        .unwrap();
+    assert_eq!(
+        (
+            cmd.exit_code,
+            cmd.verification.as_deref(),
+            cmd.unsaved_files
+        ),
+        (Some(0), Some("pass"), None),
+        "{cmd:?}"
+    );
+    let o = run.coding_outcome.as_ref().unwrap();
+    assert_eq!(
+        (o.verification.as_str(), o.last_check_unsaved_files),
+        ("verified-passed", 0),
+        "{o:?}"
+    );
+    // independent proof, on the host, against the real folder
+    let host = Command::new("node")
+        .arg("tests/add.test.js")
+        .current_dir(&env.folder)
+        .output()
+        .expect("node");
+    assert!(
+        host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&host.stderr)
+    );
+    // evidence: the changed files are exactly the three, and the kept originals say "did not exist"
+    let paths: Vec<String> = run.changed_files.iter().map(|f| f.path.clone()).collect();
+    assert_eq!(paths.len(), 3, "{paths:?}");
+    assert!(
+        run.changed_files.iter().all(|f| f.status == "added"),
+        "{:?}",
+        run.changed_files
+    );
+    // the folders it made are in the run's evidence
+    let store = std::fs::read_to_string(pre_store(&env, &run).join("manifest.json")).unwrap();
+    let m: Value = serde_json::from_str(&store).unwrap();
+    assert_eq!(m["dirs"], json!(["src", "tests"]), "{m}");
+    env.b.shutdown();
+}
+
+/// A4 + 8: folder creation is not a way out of the project, and each refusal says exactly why (a code the
+/// model and the person can act on), never "approval refused".
+#[test]
+fn direct_folder_creation_cannot_escape_and_every_refusal_has_an_accurate_code() {
+    if !sandbox_ready() {
+        return;
+    }
+    let env = direct_env_empty("direct-mkdir-escape", "direct", |_| {
+        script(
+            vec![
+                ("fs_write", fs_create("link/new/x.txt", "x")),
+                ("fs_write", fs_create("../escape/x.txt", "x")),
+                ("fs_write", fs_create(".git/hooks/pre-commit", "x")),
+                ("fs_write", fs_create("node_modules/pkg/index.js", "x")),
+                ("fs_write", fs_create("a/b/c/d/e/f/g/h/i/j.txt", "x")),
+                ("fs_write", fs_create("ok/dir/fine.txt", "fine\n")),
+            ],
+            "Tried several layouts.",
+        )
+    });
+    let outside = env.fx.work.join("outside-mkdir");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, env.folder.join("link")).unwrap();
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(&env, "Create some files.", "direct-mkdir-esc-001"),
+        300,
+    );
+    assert!(run.terminal, "{run:?}");
+    let codes: Vec<(String, Option<String>)> = run
+        .tool_activity
+        .iter()
+        .filter(|a| a.tool == "fs_write")
+        .map(|a| (a.status.clone(), a.error_code.clone()))
+        .collect();
+    let code = |i: usize| codes[i].1.clone().unwrap_or_default();
+    assert_eq!(code(0), "symlink-refused", "{codes:?}");
+    assert!(
+        ["path-invalid", "invalid-arguments"].contains(&code(1).as_str()),
+        "{codes:?}"
+    );
+    assert_eq!(code(2), "protected-path", "{codes:?}");
+    assert_eq!(code(3), "protected-path", "{codes:?}");
+    assert_eq!(code(4), "invalid-arguments", "{codes:?}");
+    assert_eq!(
+        codes[5].0, "executed",
+        "an ordinary nested file is fine: {codes:?}"
+    );
+    assert!(std::fs::read_to_string(env.folder.join("ok/dir/fine.txt")).unwrap() == "fine\n");
+    // nothing outside, nothing hidden, no folder left behind by a refusal
+    assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+    assert!(!env.folder.parent().unwrap().join("escape").exists());
+    assert!(
+        !env.folder.join(".git").exists()
+            && !env.folder.join("node_modules").exists()
+            && !env.folder.join("a").exists()
+    );
+    // none of these refusals is a decision at the approval boundary
+    let o = run.coding_outcome.as_ref().unwrap();
+    assert_eq!(o.blocked_by_approval, 0, "{o:?}");
+    assert!(o.edits_not_applied >= 5, "{o:?}");
+    env.b.shutdown();
+}
+
+/// A5: a competing user edit cannot be overwritten, including when it arrives while the model is creating the layout.
+#[test]
+fn direct_a_competing_user_file_in_a_new_folder_is_never_overwritten() {
+    if !sandbox_ready() {
+        return;
+    }
+    let env = direct_env_empty("direct-mkdir-user", "direct", |cell| {
+        Arc::new(move |n, body| {
+            let resp = format!("resp_{n}");
+            let f = folder_of(&cell);
+            match tool_calls_done(body) {
+                0 => {
+                    // while the model plans, the user creates the very file it is about to create
+                    std::fs::create_dir_all(f.join("src")).unwrap();
+                    std::fs::write(f.join("src/index.js"), "// the user's own file\n").unwrap();
+                    Answer::Frames(call_frames(
+                        &resp,
+                        n,
+                        "c0",
+                        "fs_write",
+                        &fs_create("src/index.js", INDEX_JS),
+                    ))
+                }
+                1 => Answer::Frames(call_frames(
+                    &resp,
+                    n,
+                    "c1",
+                    "fs_write",
+                    &fs_create("src/other.js", "// new\n"),
+                )),
+                _ => Answer::Frames(text_frames(&resp, "Done.")),
+            }
+        })
+    });
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(&env, "Create src/index.js.", "direct-mkdir-user-01"),
+        240,
+    );
+    assert!(run.terminal, "{run:?}");
+    assert_eq!(
+        std::fs::read_to_string(env.folder.join("src/index.js")).unwrap(),
+        "// the user's own file\n"
+    );
+    let first = run
+        .tool_activity
+        .iter()
+        .find(|a| a.tool == "fs_write")
+        .unwrap();
+    assert_ne!(first.status, "executed", "{first:?}");
+    assert_eq!(first.error_code.as_deref(), Some("conflict"), "{first:?}");
+    // the folder the user made is theirs: the next file goes into it, and the user's file is intact
+    assert_eq!(
+        std::fs::read_to_string(env.folder.join("src/other.js")).unwrap(),
+        "// new\n"
+    );
+    env.b.shutdown();
+}
+
+/// 7: what a command does to its throw-away copy is neither silently discarded nor reported as persistent. The
+/// model is told, the evidence says "passed in a scratch copy", and once the files are really saved the same
+/// check verifies the project.
+#[test]
+fn direct_command_effects_are_reported_as_unsaved_and_a_pass_over_them_is_not_a_project_pass() {
+    if !sandbox_ready() {
+        return;
+    }
+    let saw_note = Arc::new(AtomicUsize::new(0));
+    let sn = saw_note.clone();
+    let env = direct_env_empty("direct-scratch", "direct", move |cell| {
+        let sn = sn.clone();
+        Arc::new(move |n, body| {
+            let resp = format!("resp_{n}");
+            let f = folder_of(&cell);
+            let call = |id: &str, name: &str, args: String| {
+                Answer::Frames(call_frames(&resp, n, id, name, &args))
+            };
+            match tool_calls_done(body) {
+                0 => call("c0", "fs_write", fs_create("package.json", PKG)),
+                1 => call("c1", "fs_write", fs_create("src/index.js", INDEX_JS)),
+                // the owner's smoke: the command itself makes the test file and runs it - in its scratch copy
+                2 => call(
+                    "c2",
+                    "proc_run",
+                    json!({"program":"sh","args":["-c", scratch_script()]}).to_string(),
+                ),
+                3 => {
+                    let out = body.to_string();
+                    if out.contains("savedToProject") && out.contains("tests/add.test.js") {
+                        sn.fetch_or(1, Ordering::SeqCst);
+                    }
+                    if !f.join("tests/add.test.js").exists() {
+                        sn.fetch_or(2, Ordering::SeqCst); // not persisted behind the model's back
+                    }
+                    // the model reacts to the note: it saves the file for real and checks again
+                    call("c3", "fs_write", fs_create("tests/add.test.js", TEST_JS))
+                }
+                4 => call(
+                    "c4",
+                    "proc_run",
+                    r#"{"program":"npm","args":["test"]}"#.into(),
+                ),
+                _ => Answer::Frames(text_frames(
+                    &resp,
+                    "Saved the test file and the check passes.",
+                )),
+            }
+        })
+    });
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(
+            &env,
+            "Create the layout and make npm test pass.",
+            "direct-scratch-0001",
+        ),
+        300,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(
+        saw_note.load(Ordering::SeqCst),
+        3,
+        "the model was told, and nothing was persisted behind its back"
+    );
+    // the first command passed but left files only in its scratch copy: recorded as such
+    let cmds: Vec<&ic::ToolActivity> = run
+        .tool_activity
+        .iter()
+        .filter(|a| a.tool == "proc_run")
+        .collect();
+    assert_eq!(cmds.len(), 2, "{cmds:?}");
+    assert_eq!(
+        (cmds[0].verification.as_deref(), cmds[0].unsaved_files),
+        (Some("pass"), Some(1)),
+        "{:?}",
+        cmds[0]
+    );
+    assert_eq!(
+        (cmds[1].verification.as_deref(), cmds[1].unsaved_files),
+        (Some("pass"), None),
+        "{:?}",
+        cmds[1]
+    );
+    // once saved for real, the last check verifies the project
+    assert_eq!(
+        std::fs::read_to_string(env.folder.join("tests/add.test.js")).unwrap(),
+        TEST_JS
+    );
+    let o = run.coding_outcome.as_ref().unwrap();
+    assert_eq!(
+        (o.verification.as_str(), o.last_check_unsaved_files),
+        ("verified-passed", 0),
+        "{o:?}"
+    );
+    env.b.shutdown();
+}
+
+#[test]
+fn direct_a_pass_over_scratch_only_files_is_not_reported_as_a_project_pass() {
+    if !sandbox_ready() {
+        return;
+    }
+    // the model never saves the file: the run ends after the scratch-only pass (the owner's smoke)
+    let env = direct_env_empty("direct-scratch-only", "direct", |_| {
+        script(
+            vec![
+                ("fs_write", fs_create("package.json", PKG)),
+                ("fs_write", fs_create("src/index.js", INDEX_JS)),
+                (
+                    "proc_run",
+                    json!({"program":"sh","args":["-c", scratch_script()]}).to_string(),
+                ),
+            ],
+            "All tests pass.",
+        )
+    });
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(
+            &env,
+            "Create the layout and make npm test pass.",
+            "direct-scratch-0002",
+        ),
+        300,
+    );
+    assert!(run.terminal, "{run:?}");
+    assert!(
+        !env.folder.join("tests/add.test.js").exists(),
+        "nothing may appear in the project that was not saved"
+    );
+    let o = run.coding_outcome.as_ref().unwrap();
+    assert_eq!(o.verification, "verified-scratch", "{o:?}");
+    assert_eq!(o.last_check_unsaved_files, 1);
+    assert_ne!(o.verification, "verified-passed");
+    env.b.shutdown();
+}
+
+/// 6: the isolated workspace keeps its semantics; nested files there land in the copy, never in the folder.
+#[test]
+fn isolated_nested_files_land_in_the_copy_and_never_in_the_folder() {
+    if !sandbox_ready() {
+        return;
+    }
+    let env = direct_env_empty("iso-nested", "isolated", |_| {
+        script(
+            vec![("fs_write", fs_create("lib/util/x.js", INDEX_JS))],
+            "Created lib/util/x.js.",
+        )
+    });
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(&env, "Create lib/util/x.js.", "iso-nested-00001"),
+        240,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.workspace_kind, None);
+    let copy = env.fx.worktrees.join(run.task_instance_id.clone().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(copy.join("lib/util/x.js")).unwrap(),
+        INDEX_JS
+    );
+    assert!(
+        !env.folder.join("lib").exists(),
+        "the isolated run never touches the folder"
+    );
+    env.b.shutdown();
+}

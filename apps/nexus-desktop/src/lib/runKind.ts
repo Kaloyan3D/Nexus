@@ -63,6 +63,14 @@ export function outcomeView(run: IntentRun | null | undefined): OutcomeView | nu
         tone: o.change === "not-applied" || o.change === "none-proposed" ? "warning" : "success",
         detail: `${applied} edit(s) applied and ${o.testsExecuted} command(s) executed; the last command exited ${o.lastExitCode ?? "without a code"}. This verifies the command, not that every requirement is met.`,
       };
+    case "verified-scratch": {
+      const n = o.lastCheckUnsavedFiles ?? 0;
+      return {
+        label: `Check passed in a scratch copy · ${n} file${n === 1 ? "" : "s"} it wrote ${n === 1 ? "was" : "were"} not saved`,
+        tone: "warning",
+        detail: `The last command exited ${o.lastExitCode ?? "without a code"}, but it created or changed ${n} file${n === 1 ? "" : "s"} only in its own throw-away copy of the project, and ${n === 1 ? "that file is" : "those files are"} not in your project. So it verified that copy, not your project: save the files with the editing tools and run the check again. This also says nothing about whether the requested outcome was met.`,
+      };
+    }
     case "verified-mixed": {
       const n = o.checksFailedUnresolved ?? 0;
       return {

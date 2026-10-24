@@ -68,6 +68,13 @@ pub struct StageReport {
     pub skipped_non_utf8_names: u64,
     /// sha256 over the sorted `(path, content sha256)` list.
     pub digest: String,
+    /// What was staged, file by file: `(path, content sha256)`, sorted. Lets the caller tell afterwards
+    /// what a command changed in its scratch copy.
+    #[serde(skip)]
+    pub manifest: Vec<(String, String)>,
+    /// Every directory that was staged (workspace-relative, excluding the root).
+    #[serde(skip)]
+    pub dir_paths: Vec<String>,
 }
 
 fn fail(msg: impl Into<String>) -> ToolError {
@@ -93,6 +100,9 @@ pub fn stage_workspace(
             return Err(fail("snapshot exceeds the directory-count limit"));
         }
         rep.dirs += 1;
+        if !dir.is_root() {
+            rep.dir_paths.push(dir.display());
+        }
         let opened = ws
             .open_dir(&dir)
             .map_err(|e| fail(format!("snapshot walk failed ({})", e.code.as_str())))?;
@@ -274,5 +284,6 @@ pub fn stage_workspace(
         h.update(b"\n");
     }
     rep.digest = hex::encode(h.finalize());
+    rep.manifest = entries;
     Ok(rep)
 }

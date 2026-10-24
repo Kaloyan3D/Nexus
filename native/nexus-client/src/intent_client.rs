@@ -273,6 +273,10 @@ pub struct ToolActivity {
     pub exit_code: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<String>,
+    /// Process: files the command created, changed or deleted in its throw-away copy of the project
+    /// (lock files excepted) that were NOT saved to the project. Absent when there were none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsaved_files: Option<u32>,
 }
 
 /// An operation waiting for an independent human approval (A5.6). The
@@ -348,6 +352,10 @@ pub struct CodingOutcome {
     /// by SIGPIPE): neither passed nor failed.
     #[serde(default)]
     pub checks_unverified: u32,
+    /// Files the last passing check wrote into ITS OWN throw-away copy of the project that were not saved
+    /// to the project: what it verified is then not the project as it is. 0 = none.
+    #[serde(default)]
+    pub last_check_unsaved_files: u32,
 }
 
 /// Derive the verified coding outcome of a `repo-code` run from its receipts.
@@ -357,7 +365,7 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
         return None;
     }
     let mut o = CodingOutcome::default();
-    let mut last_test: Option<(u32, bool, Option<i64>)> = None; // (index, passed, exit)
+    let mut last_test: Option<(u32, bool, Option<i64>, u32)> = None; // (index, passed, exit, unsaved files)
     let mut failed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut last_applied_edit: Option<u32> = None;
     let mut cmd_blocked = false;
@@ -378,10 +386,14 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
             continue;
         }
         let executed = a.status == "executed";
+        // Stopped AT the approval boundary: an approver or the policy said no (or the approval timed out). A
+        // request refused BEFORE any approval existed (the folder is missing, the file changed, a protected
+        // path) is a failed operation with its own error code, not a decision about approval.
         let stopped_by_approval = !executed
-            && a.approval_outcome
-                .as_deref()
-                .is_some_and(|x| x != "approved");
+            && a.approval_outcome.as_deref().is_some_and(|x| {
+                x != "approved"
+                    && (x != "refused" || a.error_code.as_deref() == Some("policy-refused"))
+            });
         if stopped_by_approval {
             o.blocked_by_approval += 1;
         }
@@ -409,7 +421,8 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
                 match a.verification.as_deref() {
                     Some("pass") => {
                         o.tests_executed += 1;
-                        last_test = Some((a.index, true, a.exit_code));
+                        last_test =
+                            Some((a.index, true, a.exit_code, a.unsaved_files.unwrap_or(0)));
                         failed.remove(
                             &a.args_digest
                                 .clone()
@@ -418,7 +431,8 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
                     }
                     Some("fail") => {
                         o.tests_executed += 1;
-                        last_test = Some((a.index, false, a.exit_code));
+                        last_test =
+                            Some((a.index, false, a.exit_code, a.unsaved_files.unwrap_or(0)));
                         failed.insert(
                             a.args_digest
                                 .clone()
@@ -440,13 +454,14 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
         }
     }
     o.last_exit_code = last_test.and_then(|t| t.2);
+    o.last_check_unsaved_files = last_test.map(|t| t.3).unwrap_or(0);
     // the run's own count covers failures that left the bounded activity list
     o.checks_failed_unresolved = (failed.len() as u32).max(run.unresolved_failed_checks);
     let run_uncertain =
         run.state == "uncertain" || run.error_code.as_deref() == Some("tool-outcome-uncertain");
     let uncertain = run_uncertain || o.uncertain_operations > 0;
     o.stale_after_edit = match (last_test, last_applied_edit) {
-        (Some((ti, _, _)), Some(ei)) => ei > ti,
+        (Some((ti, _, _, _)), Some(ei)) => ei > ti,
         _ => false,
     };
     o.change = if uncertain {
@@ -473,11 +488,14 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
     .to_owned();
     o.verification = if uncertain {
         "uncertain"
-    } else if let Some((_, passed, _)) = last_test {
+    } else if let Some((_, passed, _, _)) = last_test {
         if o.stale_after_edit {
             "not-yet-verified"
         } else if passed && o.checks_failed_unresolved > 0 {
             "verified-mixed"
+        } else if passed && o.last_check_unsaved_files > 0 {
+            // it passed, but over files that exist only in its own scratch copy
+            "verified-scratch"
         } else if passed {
             "verified-passed"
         } else {

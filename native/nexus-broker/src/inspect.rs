@@ -3385,6 +3385,11 @@ fn record_receipts(ls: &mut LoopState, act: &mut ToolActivity, cp: &CodeProposal
         }
         "proc_run" => {
             act.exit_code = out.get("exitCode").and_then(|v| v.as_i64());
+            act.unsaved_files = out
+                .pointer("/scratchEffects/unsavedFiles")
+                .and_then(|v| v.as_u64())
+                .filter(|n| *n > 0)
+                .map(|n| n as u32);
             act.verification = out
                 .get("verification")
                 .and_then(|v| v.as_str())
@@ -3592,6 +3597,28 @@ pub fn render_process(result: &Value, cap: usize) -> Rendered {
             "stdoutTail": tail(out.get("stdout").and_then(|v| v.as_str()).unwrap_or(""), keep),
             "stderrTail": tail(out.get("stderr").and_then(|v| v.as_str()).unwrap_or(""), keep),
         });
+        let mut env = env;
+        // what the command did to ITS scratch copy: shown to the model so a pass over files that exist only
+        // there is never taken for a pass of the project
+        if let (Some(se), Some(o)) = (out.get("scratchEffects"), env.as_object_mut()) {
+            let short = |k: &str| -> Value {
+                Value::Array(
+                    se.get(k)
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.iter().take(20).cloned().collect())
+                        .unwrap_or_default(),
+                )
+            };
+            o.insert(
+                "scratchEffects".into(),
+                serde_json::json!({
+                    "savedToProject": false,
+                    "note": "These changes exist ONLY in this command's throw-away copy and were NOT saved to the project: they are gone now. Make real changes with fs_write/fs_edit (fs_write create also makes missing folders), then run the check again so it runs over what is really in the project.",
+                    "created": short("created"), "modified": short("modified"),
+                    "deleted": short("deleted"), "createdFolders": short("createdDirs"),
+                }),
+            );
+        }
         let text = nexus_contracts::canonical_json(&env);
         if text.len() <= cap || keep < 256 {
             let truncated = out.get("stdoutTruncated") == Some(&Value::Bool(true))

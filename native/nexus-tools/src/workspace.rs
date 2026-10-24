@@ -32,6 +32,8 @@ pub const POLICY_VERSION: u32 = 1;
 pub const MAX_PATH_BYTES: usize = 4096;
 pub const MAX_COMPONENT_BYTES: usize = 255;
 pub const MAX_PATH_DEPTH: usize = 64;
+/// Most folders one file creation may bring into existence at once.
+pub const MAX_NEW_DIRS: usize = 8;
 
 /// Explicit, testable path policy. Fixed at build time; not model-tunable.
 #[derive(Debug, Clone)]
@@ -830,6 +832,71 @@ impl Workspace {
         };
         let dir = self.open_dir(&parent_rel)?;
         Ok((dir, name.clone()))
+    }
+
+    /// The parent chain of a file about to be CREATED, when some of it may not exist yet: the deepest
+    /// existing directory (opened with every read-side protection: no symlinks, no mount crossing,
+    /// identity re-checked) plus the names of the directories that would have to be made below it, and
+    /// the file name. Nothing is created. More than [`MAX_NEW_DIRS`] missing levels is refused.
+    pub fn plan_parents_for_create(
+        &self,
+        rel: &RelPath,
+    ) -> Result<(Opened, Vec<String>, String), ToolError> {
+        self.check_write_names(rel)?;
+        let comps = rel.components();
+        let (name, parents) = comps.split_last().ok_or_else(|| pe("empty path"))?;
+        let mut cur = self.open_path(&RelPath::root())?;
+        for (i, c) in parents.iter().enumerate() {
+            if self.stat_in_dir(&cur.fd, c)?.is_none() {
+                let missing: Vec<String> = parents[i..].to_vec();
+                if missing.len() > MAX_NEW_DIRS {
+                    return Err(ToolError::new(
+                        ToolErrorCode::InvalidArguments,
+                        format!(
+                            "a file may need at most {MAX_NEW_DIRS} new folders created at once"
+                        ),
+                    ));
+                }
+                return Ok((cur, missing, name.clone()));
+            }
+            cur = self.open_one(cur.fd.as_raw_fd(), c, true)?;
+        }
+        Ok((cur, Vec::new(), name.clone()))
+    }
+
+    /// Make ONE directory below an open directory, descriptor-relative, and return it opened with the
+    /// same protections as any directory (a planted symlink or another mount is refused). The flag says
+    /// whether THIS call created it (a concurrently created directory is accepted as it is, but is never
+    /// ours to remove). New directories belong to the identity running Nexus.
+    pub fn create_dir_in(&self, parent: &OwnedFd, name: &str) -> Result<(Opened, bool), ToolError> {
+        let c = CString::new(name).map_err(|_| pe("component contains NUL"))?;
+        self.accesses.fetch_add(1, Ordering::SeqCst);
+        let created = if unsafe { libc::mkdirat(parent.as_raw_fd(), c.as_ptr(), 0o777) } == 0 {
+            true
+        } else {
+            let e = last_errno();
+            if e != libc::EEXIST {
+                return Err(io_err("mkdir", e));
+            }
+            false
+        };
+        let opened = match self.open_one(parent.as_raw_fd(), name, true) {
+            Ok(o) => o,
+            Err(e) => {
+                if created {
+                    unsafe { libc::unlinkat(parent.as_raw_fd(), c.as_ptr(), libc::AT_REMOVEDIR) };
+                }
+                return Err(e);
+            }
+        };
+        if created && opened.identity.uid != unsafe { libc::geteuid() } {
+            unsafe { libc::unlinkat(parent.as_raw_fd(), c.as_ptr(), libc::AT_REMOVEDIR) };
+            return Err(ToolError::new(
+                ToolErrorCode::RaceDetected,
+                "a new directory is not owned by this identity",
+            ));
+        }
+        Ok((opened, created))
     }
 
     /// `None` when the entry does not exist; otherwise its identity

@@ -137,6 +137,9 @@ struct Manifest {
     task: String,
     root: String,
     entries: Vec<Entry>,
+    /// Folders this task created (workspace-relative, in creation order).
+    #[serde(default)]
+    dirs: Vec<String>,
 }
 
 fn now_ms() -> u64 {
@@ -204,6 +207,7 @@ impl Store {
             task: task.to_owned(),
             root: root.to_owned(),
             entries: Vec::new(),
+            dirs: Vec::new(),
         })?;
         Ok(s)
     }
@@ -274,6 +278,23 @@ impl Store {
         let mut e = self.read_manifest()?.entries;
         e.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(e)
+    }
+
+    /// Folders this task created, in creation order.
+    pub fn dirs(&self) -> Result<Vec<String>, DirectError> {
+        Ok(self.read_manifest()?.dirs)
+    }
+
+    /// Remember folders the task created (bounded; duplicates ignored).
+    pub fn record_dirs(&self, dirs: &[String]) -> Result<(), DirectError> {
+        let _g = self.lock()?;
+        let mut m = self.read_manifest()?;
+        for d in dirs {
+            if !m.dirs.contains(d) && m.dirs.len() < MAX_TOUCHED {
+                m.dirs.push(d.clone());
+            }
+        }
+        self.write_manifest(&m)
     }
 
     /// First touch wins: keep the exact pre-image of `path` the first time it is planned over.
@@ -472,6 +493,8 @@ pub struct DirectDiff {
     pub diff: String,
     pub diff_digest: String,
     pub diff_truncated: bool,
+    /// Folders the task created that exist now.
+    pub created_dirs: Vec<String>,
 }
 
 /// What this task changed: pre-image vs the current file, for the paths it touched only.
@@ -524,6 +547,16 @@ pub fn diff(store: &Store, root: &str) -> Result<DirectDiff, DirectError> {
     }
     let files_truncated = files.len() > MAX_DIFF_FILES;
     files.truncate(MAX_DIFF_FILES);
+    let created_dirs: Vec<String> = store
+        .dirs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|d| {
+            std::fs::symlink_metadata(Path::new(root).join(d))
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+        })
+        .collect();
     if files.is_empty() {
         return Ok(DirectDiff {
             files,
@@ -531,6 +564,7 @@ pub fn diff(store: &Store, root: &str) -> Result<DirectDiff, DirectError> {
             diff: String::new(),
             diff_digest: sha_hex(b""),
             diff_truncated: false,
+            created_dirs,
         });
     }
     let (status, out) = crate::gitwt::run_git(
@@ -631,6 +665,7 @@ pub fn diff(store: &Store, root: &str) -> Result<DirectDiff, DirectError> {
         diff: text,
         diff_digest,
         diff_truncated,
+        created_dirs,
     })
 }
 

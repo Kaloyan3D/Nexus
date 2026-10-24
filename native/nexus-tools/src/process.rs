@@ -835,6 +835,153 @@ pub fn verdict(exit_code: Option<i64>, pipefail: Pipefail) -> &'static str {
     }
 }
 
+/// What a command changed in its throw-away copy of the project. The copy is staged read-from-the-project
+/// and discarded when the command ends; nothing here is ever applied to the project. Reporting it is what
+/// keeps "the command passed" from being read as "the project now has these files".
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScratchEffects {
+    pub created: Vec<String>,
+    pub modified: Vec<String>,
+    pub deleted: Vec<String>,
+    pub created_dirs: Vec<String>,
+    /// Files among the above that matter to the project (everything except lock files the agent may
+    /// not write anyway): created + modified + deleted.
+    pub unsaved_files: u32,
+    pub truncated: bool,
+}
+
+impl ScratchEffects {
+    pub fn is_empty(&self) -> bool {
+        self.created.is_empty()
+            && self.modified.is_empty()
+            && self.deleted.is_empty()
+            && self.created_dirs.is_empty()
+    }
+}
+
+const EFFECTS_MAX_ENTRIES: usize = 60_000;
+const EFFECTS_LIST_CAP: usize = 40;
+
+/// Compare the staged tree (after the command) with what was staged (before it). Host-side, never
+/// following symlinks; toolchain caches, hidden names and dependency/build directories are not reported
+/// (they are not project files and the agent could not write them anyway).
+pub fn scratch_effects(src: &Path, staged: &crate::stage::StageReport) -> ScratchEffects {
+    use std::collections::{BTreeSet, HashMap};
+    use std::io::Read;
+    let policy = crate::workspace::WorkspacePolicy::default();
+    let before: HashMap<&str, &str> = staged
+        .manifest
+        .iter()
+        .map(|(p, h)| (p.as_str(), h.as_str()))
+        .collect();
+    let before_dirs: BTreeSet<&str> = staged.dir_paths.iter().map(String::as_str).collect();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let (mut created, mut modified, mut created_dirs) = (Vec::new(), Vec::new(), Vec::new());
+    let mut entries = 0usize;
+    let mut truncated = false;
+    let mut stack: Vec<(PathBuf, String, u32)> = vec![(src.to_path_buf(), String::new(), 0)];
+    let skip_name = |n: &str| {
+        n.starts_with('.')
+            || policy.classify_name(n) != crate::workspace::NameClass::Allowed
+            || policy.is_ignored_dir(n)
+    };
+    while let Some((dir, rel, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut names: Vec<_> = rd.flatten().collect();
+        names.sort_by_key(|e| e.file_name());
+        for e in names {
+            entries += 1;
+            if entries > EFFECTS_MAX_ENTRIES {
+                truncated = true;
+                break;
+            }
+            let Ok(name) = e.file_name().into_string() else {
+                continue;
+            };
+            if skip_name(&name) {
+                continue;
+            }
+            let Ok(md) = std::fs::symlink_metadata(e.path()) else {
+                continue;
+            };
+            let rel_path = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            let ft = md.file_type();
+            if ft.is_dir() {
+                if depth >= 32 {
+                    truncated = true;
+                    continue;
+                }
+                if !before_dirs.contains(rel_path.as_str()) {
+                    created_dirs.push(rel_path.clone());
+                }
+                stack.push((e.path(), rel_path, depth + 1));
+            } else if ft.is_file() {
+                seen.insert(rel_path.clone());
+                match before.get(rel_path.as_str()) {
+                    None => created.push(rel_path),
+                    Some(h) => {
+                        // unchanged size + hash = unchanged; bounded read
+                        let mut buf = Vec::new();
+                        let same = md.len() <= 16 * 1024 * 1024
+                            && std::fs::File::open(e.path())
+                                .and_then(|f| f.take(16 * 1024 * 1024 + 1).read_to_end(&mut buf))
+                                .is_ok()
+                            && hex::encode(Sha256::digest(&buf)) == **h;
+                        if !same {
+                            modified.push(rel_path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut deleted: Vec<String> = staged
+        .manifest
+        .iter()
+        .filter(|(p, _)| !seen.contains(p))
+        .map(|(p, _)| p.clone())
+        .collect();
+    created.sort();
+    modified.sort();
+    deleted.sort();
+    created_dirs.sort();
+    let protected = |p: &String| {
+        let base = p.rsplit('/').next().unwrap_or(p).to_ascii_lowercase();
+        crate::protect::PROTECTED_NAMES.contains(&base.as_str())
+    };
+    let unsaved_files = created
+        .iter()
+        .chain(&modified)
+        .chain(&deleted)
+        .filter(|p| !protected(p))
+        .count() as u32;
+    let cap = |v: &mut Vec<String>, t: &mut bool| {
+        if v.len() > EFFECTS_LIST_CAP {
+            v.truncate(EFFECTS_LIST_CAP);
+            *t = true;
+        }
+    };
+    cap(&mut created, &mut truncated);
+    cap(&mut modified, &mut truncated);
+    cap(&mut deleted, &mut truncated);
+    cap(&mut created_dirs, &mut truncated);
+    ScratchEffects {
+        created,
+        modified,
+        deleted,
+        created_dirs,
+        unsaved_files,
+        truncated,
+    }
+}
+
 /// Run one process request to a terminal lifecycle state.
 pub fn run_process(
     ctx: &ProcessContext<'_>,
@@ -1090,6 +1237,10 @@ pub fn run_process(
             };
         }
     }
+    // What the command did to its scratch copy (never applied to the project), read before the copy goes.
+    let effects = (ctx.policy.is_workbench() && outcome.is_ok())
+        .then(|| scratch_effects(&src, &report))
+        .filter(|e| !e.is_empty());
     let _ = std::fs::remove_dir_all(&run_dir);
     let out = match outcome {
         Ok(o) => o,
@@ -1145,6 +1296,18 @@ pub fn run_process(
         "snapshotDigest": report.digest,
         "sandboxDigest": sbx_digest,
     });
+    let mut record = record;
+    if let (Some(e), Some(o)) = (&effects, record.as_object_mut()) {
+        // audit: the command changed its scratch copy and none of it reached the project
+        o.insert(
+            "scratchEffects".into(),
+            serde_json::json!({
+                "persisted": false, "created": e.created.len(), "modified": e.modified.len(),
+                "deleted": e.deleted.len(), "createdDirs": e.created_dirs.len(),
+                "unsavedFiles": e.unsaved_files,
+            }),
+        );
+    }
     hooks.journal(phase, record)?;
     let output = serde_json::json!({
         "reason": reason, "exitCode": code, "signal": signal,
@@ -1159,6 +1322,12 @@ pub fn run_process(
         "network": if cmd.install { "install" } else { "none" }, "writeBack": "none",
         "environment": env_note,
     });
+    let mut output = output;
+    if let (Some(e), Some(o)) = (&effects, output.as_object_mut()) {
+        let mut v = serde_json::to_value(e).unwrap_or_default();
+        v["persisted"] = serde_json::json!(false);
+        o.insert("scratchEffects".into(), v);
+    }
     let mut trunc = Truncation::default();
     if out.stdout_truncated {
         trunc.add("stdout-cap");
