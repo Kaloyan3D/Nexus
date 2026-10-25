@@ -150,6 +150,8 @@ struct Manifest {
 
 /// Cap on remembered command observations per task (oldest dropped, said so in `observedDropped`).
 pub const MAX_OBSERVED: usize = 64;
+/// Paths remembered per observed command (more are counted by the ledger but not repeated here).
+pub const MAX_OBSERVED_PATHS: usize = 2_000;
 
 /// One path a command was observed to change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +162,10 @@ pub struct ObservedPath {
     pub kind: String,
     /// sha256 of the post-image when the observer hashed it (absent = not hashed or deleted).
     pub post_sha: Option<String>,
+    /// M3B: `available` when the checkpoint holds the original of a modified/deleted file, otherwise
+    /// `unavailable:<reason>`; empty for created paths and for records without a checkpoint.
+    #[serde(default)]
+    pub pre_image: String,
     /// A tool write (fs_write) on this path completed inside the command's window: whose change this is
     /// cannot be told apart.
     pub ambiguous: bool,
@@ -178,6 +184,9 @@ pub struct Observed {
     /// The lists below name every change (observation complete, nothing truncated).
     pub complete: bool,
     pub paths: Vec<ObservedPath>,
+    /// M3B: where the pre-images of this execution are (`<store>`, execution id).
+    #[serde(default)]
+    pub checkpoint: Option<(String, String)>,
 }
 
 fn now_ms() -> u64 {
@@ -418,6 +427,16 @@ impl Store {
         &self,
         rec: &crate::observe::EffectsRecord,
     ) -> Result<(), DirectError> {
+        self.record_command_effects_in(rec, None)
+    }
+
+    /// As `record_command_effects`, remembering where the execution's checkpoint lives so a diff can use
+    /// its pre-images.
+    pub fn record_command_effects_in(
+        &self,
+        rec: &crate::observe::EffectsRecord,
+        checkpoint_store: Option<&Path>,
+    ) -> Result<(), DirectError> {
         let _g = self.lock()?;
         let mut m = self.read_manifest()?;
         if m.observed
@@ -443,13 +462,20 @@ impl Store {
                     path: p.clone(),
                     kind: kind.to_owned(),
                     post_sha: fx.post_sha256.get(p).cloned(),
+                    pre_image: rec
+                        .recoverability
+                        .as_ref()
+                        .and_then(|r| r.pre_images.get(p).cloned())
+                        .unwrap_or_default(),
                     ambiguous,
                 });
             }
         }
         let complete = rec.outcome == "observed"
             && !fx.lists_may_be_incomplete
-            && fx.created.count + fx.modified.count + fx.deleted.count == paths.len() as u64;
+            && fx.created.count + fx.modified.count + fx.deleted.count == paths.len() as u64
+            && paths.len() <= MAX_OBSERVED_PATHS;
+        paths.truncate(MAX_OBSERVED_PATHS);
         m.observed.push(Observed {
             execution_id: rec.execution_id.clone(),
             command_id: rec.command_id.clone(),
@@ -458,6 +484,13 @@ impl Store {
             outcome: rec.outcome.clone(),
             complete,
             paths,
+            checkpoint: checkpoint_store.and_then(|s| {
+                rec.checkpoint
+                    .as_ref()
+                    .and_then(|c| c.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(|id| (s.to_string_lossy().into_owned(), id.to_owned()))
+            }),
         });
         let over = m.observed.len().saturating_sub(MAX_OBSERVED);
         if over > 0 {
@@ -704,7 +737,9 @@ pub fn diff(store: &Store, root: &str) -> Result<DirectDiff, DirectError> {
         executions: observed.len() as u64,
         ..Default::default()
     };
-    let mut latest: std::collections::BTreeMap<String, (ObservedPath, bool)> = Default::default();
+    type Latest =
+        std::collections::BTreeMap<String, (ObservedPath, bool, Option<(String, String)>)>;
+    let mut latest: Latest = Default::default();
     for o in &observed {
         if !o.complete {
             evidence.incomplete = true;
@@ -713,10 +748,13 @@ pub fn diff(store: &Store, root: &str) -> Result<DirectDiff, DirectError> {
             if p.ambiguous {
                 evidence.incomplete = true;
             }
-            latest.insert(p.path.clone(), (p.clone(), o.complete));
+            latest.insert(
+                p.path.clone(),
+                (p.clone(), o.complete, o.checkpoint.clone()),
+            );
         }
     }
-    for (path, (o, complete)) in latest {
+    for (path, (o, complete, ck)) in latest {
         if known.contains(&path) || all_known.contains(&path) {
             continue;
         }
@@ -735,13 +773,26 @@ pub fn diff(store: &Store, root: &str) -> Result<DirectDiff, DirectError> {
             (Some(sha), Some(b)) => &sha_hex(b) != sha,
             _ => false,
         };
+        // M3B: a modification or deletion is diffable when the checkpoint holds the original.
+        let stored = if !with_pre && o.pre_image == "available" {
+            ck.as_ref().and_then(|(s, id)| {
+                crate::checkpoint::read_preimage(Path::new(s), id, &path, MAX_PRE_BYTES)
+                    .ok()
+                    .flatten()
+            })
+        } else {
+            None
+        };
+        let with_pre = with_pre || stored.is_some();
         if with_pre {
-            if let Some(bytes) = &cur {
-                let p = b_dir.join(&path);
-                if let Some(parent) = p.parent() {
-                    std::fs::create_dir_all(parent).map_err(io)?;
+            for (dir, content) in [(&a_dir, &stored), (&b_dir, &cur)] {
+                if let Some(bytes) = content {
+                    let p = dir.join(&path);
+                    if let Some(parent) = p.parent() {
+                        std::fs::create_dir_all(parent).map_err(io)?;
+                    }
+                    std::fs::write(&p, bytes).map_err(io)?;
                 }
-                std::fs::write(&p, bytes).map_err(io)?;
             }
         }
         files.push(FileDiff {

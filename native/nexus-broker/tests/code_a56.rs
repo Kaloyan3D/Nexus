@@ -17156,6 +17156,290 @@ fn m3a_killing_the_daemon_mid_command_records_what_the_recovery_saw_as_uncertain
     b.shutdown();
 }
 
+// ------------------------------------------------ M3B: checkpoints and guarded restore
+
+fn checkpoint_dirs(fx: &Fx) -> Vec<String> {
+    std::fs::read_dir(fx.ddir.join("exec").join("_checkpoints"))
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn exec_restore(fx: &Fx, exec: &str, dry: bool) -> Value {
+    let icap = std::fs::read_to_string(&fx.cap).unwrap().trim().to_owned();
+    nexus_client::issuer::issuer_call(
+        &fx.daemon_socket,
+        &icap,
+        "exec-restore",
+        json!({"executionId": exec, "dryRun": dry}),
+    )
+    .expect("exec-restore")
+}
+
+const M3B_CMD: &str = r#"{"program":"sh","args":["-c","echo a > c1.txt && echo b > c2.txt && sed -i 's/calc/CALC/' Cargo.toml; rm -f README.md"]}"#;
+
+#[test]
+fn m3b_each_checkpoint_and_observation_boundary_crash_never_reruns_and_never_rolls_back() {
+    if !sandbox_ready() {
+        return;
+    }
+    // (crash point, did the command start?)
+    for (point, ran) in [
+        ("checkpoint-before", false),
+        ("checkpoint-during", false),
+        ("proc-after-prepared", false),
+        ("proc-before-observation", true),
+        ("proc-during-observation", true),
+    ] {
+        let mut fx = fixture_in_place(
+            script(vec![("proc_run", M3B_CMD.to_owned())], "never reached"),
+            &[("NEXUS_TEST_WRITE_CRASH_AT", point)],
+        );
+        let b = start_interactive(&fx, "m3b1");
+        let r = ic::submit(
+            b.socket_path(),
+            &code_intent_for("other", "go", "m3b-crash-0000001", |_| {}),
+        )
+        .unwrap()
+        .run;
+        let end = Instant::now() + Duration::from_secs(90);
+        while !matches!(fx.daemon.try_wait(), Ok(Some(_))) {
+            assert!(Instant::now() < end, "{point}: the crash point never fired");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        b.shutdown();
+        fx.restart_daemon();
+        let b = start_interactive(&fx, "m3b1");
+        let st = wait_terminal(b.socket_path(), &r.run_id, 90);
+        assert!(st.terminal && st.state != "completed", "{point}: {st:?}");
+        let all = proc_events_of(&fx, &st);
+        let execs: std::collections::HashSet<String> = all
+            .iter()
+            .filter(|r| r["toolId"] == "proc.run")
+            .filter_map(|r| r["executionId"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            execs.len() <= 1,
+            "{point}: the command was started again: {execs:?}"
+        );
+        let phases: Vec<&str> = all.iter().filter_map(|r| r["phase"].as_str()).collect();
+        assert!(
+            !phases.contains(&"exited") && !phases.contains(&"completed"),
+            "{point}: {phases:?}"
+        );
+        let wc = working_copy(&fx).expect("working copy");
+        // no checkpoint is ever left half-written
+        assert!(
+            checkpoint_dirs(&fx)
+                .iter()
+                .all(|d| !d.ends_with(".partial")),
+            "{point}: {:?}",
+            checkpoint_dirs(&fx)
+        );
+        if ran {
+            // the command's changes stay (no automatic rollback) and the evidence says "uncertain"
+            assert!(
+                wc.join("c1.txt").exists() && !wc.join("README.md").exists(),
+                "{point}: recovery rolled back"
+            );
+            let intr = all
+                .iter()
+                .find(|r| r["phase"] == "interrupted")
+                .expect("interrupted");
+            assert_eq!(
+                intr["process"]["effects"]["outcome"], "uncertain",
+                "{point}: {intr}"
+            );
+            assert_eq!(
+                intr["process"]["effects"]["checkpoint"]["status"], "complete",
+                "{point}: {intr}"
+            );
+            let recs = effects_records(&fx);
+            assert_eq!(recs.len(), 1, "{point}");
+            let exec = recs[0]["executionId"].as_str().unwrap().to_owned();
+            // an explicit, guarded restore afterwards works from the recovered record
+            let dry = exec_restore(&fx, &exec, true);
+            assert_eq!(dry["restore"]["outcome"], "completed", "{point}: {dry}");
+            assert!(
+                wc.join("c1.txt").exists(),
+                "{point}: a dry run changed the folder"
+            );
+            let rep = exec_restore(&fx, &exec, false);
+            assert_eq!(rep["restore"]["outcome"], "completed", "{point}: {rep}");
+            assert!(
+                !wc.join("c1.txt").exists() && wc.join("README.md").exists(),
+                "{point}: {rep}"
+            );
+        } else {
+            assert!(!wc.join("c1.txt").exists(), "{point}: the command ran");
+            assert!(effects_records(&fx).is_empty(), "{point}");
+            if point == "proc-after-prepared" {
+                // the persisted checkpoint is kept as evidence, complete and readable, but unused
+                let dirs = checkpoint_dirs(&fx);
+                assert_eq!(dirs.len(), 1, "{dirs:?}");
+                let idx = std::fs::read_to_string(
+                    fx.ddir
+                        .join("exec/_checkpoints")
+                        .join(&dirs[0])
+                        .join("index.json"),
+                )
+                .unwrap();
+                assert!(idx.contains("\"status\":\"complete\""));
+                assert!(!fx
+                    .ddir
+                    .join("exec/_checkpoints")
+                    .join(&dirs[0])
+                    .join("ACTIVE")
+                    .exists());
+            }
+        }
+        b.shutdown();
+    }
+}
+
+#[test]
+fn m3b_exhausted_checkpoint_storage_is_explicit_and_required_mode_refuses_to_run() {
+    if !sandbox_ready() {
+        return;
+    }
+    let env = [("NEXUS_TEST_CHECKPOINT_ENOSPC_AFTER_BYTES", "10")];
+    // best effort (owner decision D4): the command runs, the record says there is no checkpoint
+    let fx = fixture_full(
+        script(vec![("proc_run", M3B_CMD.to_owned())], "Done."),
+        Box::new(|_| {}),
+        &env,
+        true,
+        true,
+        None,
+        &[
+            "--isolated-exec-scope".to_owned(),
+            "workspace".to_owned(),
+            "--checkpoint-force-copy".to_owned(),
+        ],
+    );
+    let b = start_interactive(&fx, "m3b2");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "m3b-nospace-000001", |_| {}),
+        150,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let recs = effects_records(&fx);
+    assert_eq!(recs.len(), 1);
+    assert_eq!(
+        recs[0]["checkpoint"]["status"], "unavailable",
+        "{}",
+        recs[0]
+    );
+    assert!(recs[0]["checkpoint"]["reasons"]
+        .to_string()
+        .contains("storage-exhausted"));
+    assert_eq!(recs[0]["recoverability"]["complete"], false);
+    assert!(
+        checkpoint_dirs(&fx).is_empty(),
+        "{:?}",
+        checkpoint_dirs(&fx)
+    );
+    let exec = recs[0]["executionId"].as_str().unwrap().to_owned();
+    let rep = exec_restore(&fx, &exec, false);
+    assert_eq!(rep["restore"]["outcome"], "refused", "{rep}");
+    assert_eq!(rep["restore"]["refused"], "no-checkpoint");
+    assert!(
+        working_copy(&fx).unwrap().join("c1.txt").exists(),
+        "a refused restore changed files"
+    );
+    b.shutdown();
+    drop(fx);
+    // required: nothing runs
+    let fx = fixture_full(
+        script(vec![("proc_run", M3B_CMD.to_owned())], "Done."),
+        Box::new(|_| {}),
+        &env,
+        true,
+        true,
+        None,
+        &[
+            "--isolated-exec-scope".to_owned(),
+            "workspace".to_owned(),
+            "--checkpoint-force-copy".to_owned(),
+            "--checkpoint".to_owned(),
+            "required".to_owned(),
+        ],
+    );
+    let b = start_interactive(&fx, "m3b3");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "m3b-required-000001", |_| {}),
+        150,
+    );
+    let wc = working_copy(&fx).unwrap();
+    assert!(
+        !wc.join("c1.txt").exists() && wc.join("README.md").exists(),
+        "the command ran without a complete checkpoint: {run:?}"
+    );
+    assert!(effects_records(&fx).is_empty());
+    let all = proc_events_of(&fx, &run);
+    assert!(
+        serde_json::to_string(&all)
+            .unwrap()
+            .contains("checkpoint-required"),
+        "the refusal is not in the evidence: {all:?}"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn m3b_restore_is_an_operator_verb_the_model_and_an_unauthenticated_caller_cannot_use() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_in_place(script(vec![("proc_run", M3B_CMD.to_owned())], "Done."), &[]);
+    let b = start_interactive(&fx, "m3b4");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "m3b-verb-00000001", |_| {}),
+        150,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let recs = effects_records(&fx);
+    assert_eq!(recs[0]["checkpoint"]["status"], "complete", "{}", recs[0]);
+    let exec = recs[0]["executionId"].as_str().unwrap().to_owned();
+    // no credential / a wrong credential: refused, nothing changes
+    let bad = nexus_client::issuer::issuer_call(
+        &fx.daemon_socket,
+        "not-the-issuer-cap",
+        "exec-restore",
+        json!({"executionId": exec, "dryRun": false}),
+    );
+    assert!(
+        bad.is_err() || bad.as_ref().is_ok_and(|v| v["restore"].is_null()),
+        "{bad:?}"
+    );
+    let wc = working_copy(&fx).unwrap();
+    assert!(wc.join("c1.txt").exists());
+    // the model cannot name it as a tool
+    let (st, _) = (run.clone(), 0);
+    assert!(!serde_json::to_string(&proc_events_of(&fx, &st))
+        .unwrap()
+        .contains("exec-restore"));
+    // the operator can: dry run first, then the real restore; the project diff then shows nothing
+    let rep = exec_restore(&fx, &exec, false);
+    assert_eq!(rep["restore"]["outcome"], "completed", "{rep}");
+    assert!(!wc.join("c1.txt").exists() && wc.join("README.md").exists());
+    assert!(std::fs::read_to_string(wc.join("Cargo.toml"))
+        .unwrap()
+        .contains("calc"));
+    let again = exec_restore(&fx, &exec, false);
+    assert!(
+        again["restore"]["restored"].as_array().unwrap().is_empty(),
+        "{again}"
+    );
+    b.shutdown();
+}
+
 // ------------------------------------------------ Standing grants (permissions milestone)
 
 /// The interactive profile with standing grants AND the independent approver channel (test topology:

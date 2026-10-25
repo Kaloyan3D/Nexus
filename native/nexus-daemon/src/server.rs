@@ -2317,7 +2317,10 @@ impl nexus_tools::process::ProcessHooks for DaemonProcessHooks<'_> {
         // A task that edits its real folder keeps the observation next to its pre-images, so its diff
         // and its outside-change check can include what commands did.
         if let Some((store, _)) = direct_store(self.daemon, &self.task) {
-            let _ = store.record_command_effects(record);
+            let _ = store.record_command_effects_in(
+                record,
+                Some(&nexus_tools::checkpoint::store_dir(&self.daemon.run_root)),
+            );
         }
     }
     fn fence(&mut self) -> Result<(), nexus_tools::ToolError> {
@@ -3420,6 +3423,76 @@ fn do_exec_effects(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     }
 }
 
+/// Guarded restoration of the files an observed in-place command changed (operator action; the model has no
+/// path to it). Refused while the task still has a process open. Never invoked by recovery.
+fn do_exec_restore(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    if let Err(r) = only_keys(&req.params, &["executionId", "dryRun"], &req.id) {
+        return r;
+    }
+    let id = match get_string(&req.params, "executionId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let dry = req
+        .params
+        .get("dryRun")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let eff = nexus_tools::observe::effects_dir(&daemon.run_root);
+    let Some(rec) = nexus_tools::observe::read_record(&eff, &id) else {
+        return fail(
+            &req.id,
+            "not-found",
+            "not-found: no effects record for that execution",
+        );
+    };
+    let task = rec.task_instance_id.clone();
+    {
+        let Ok(k) = daemon.kernel.lock() else {
+            return fail(&req.id, "internal", "internal: kernel unavailable");
+        };
+        match k.open_processes() {
+            Ok(open) if open.iter().any(|o| o.task_instance_id == task) => {
+                return fail(
+                    &req.id,
+                    "busy",
+                    "busy: the task still has a command in progress",
+                );
+            }
+            Ok(_) => {}
+            Err(_) => return fail(&req.id, "internal", "internal: process journal unreadable"),
+        }
+    }
+    let Some(dir) = task_workspace_dir(daemon, &task) else {
+        return fail(
+            &req.id,
+            "not-found",
+            "not-found: the task's workspace is unknown",
+        );
+    };
+    let Ok(ws) = nexus_tools::workspace::Workspace::open_root(
+        &dir.to_string_lossy(),
+        nexus_tools::workspace::WorkspacePolicy::default(),
+    ) else {
+        return fail(
+            &req.id,
+            "scope-refused",
+            "scope-refused: the workspace cannot be opened",
+        );
+    };
+    let report = nexus_tools::restore::restore(
+        &ws,
+        &nexus_tools::checkpoint::store_dir(&daemon.run_root),
+        &eff,
+        &id,
+        nexus_tools::restore::RestoreOptions {
+            dry_run: dry,
+            max_operations: None,
+        },
+    );
+    ok(&req.id, serde_json::json!({ "restore": report }))
+}
+
 fn do_worktree_stat(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     if let Err(r) = only_keys(&req.params, &["taskInstanceId"], &req.id) {
         return r;
@@ -4377,6 +4450,7 @@ pub fn dispatch(
             "worktree-list" => do_worktree_list(daemon, req),
             "worktree-stat" => do_worktree_stat(daemon, req),
             "exec-effects" => do_exec_effects(daemon, req),
+            "exec-restore" => do_exec_restore(daemon, req),
             "seal" => do_seal(daemon, req),
             "accept" => do_accept(daemon, req),
             _ => unreachable!("privileged set is fixed"),

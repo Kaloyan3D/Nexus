@@ -1072,6 +1072,25 @@ fn run(args: &[String]) -> i32 {
             );
         }
     }
+    // Checkpoints: unpublished ones are partial leftovers, ACTIVE markers are stale, retention applies.
+    {
+        let pol = nexus_tools::checkpoint::CheckpointBudget::default();
+        let retention = flag_str(args, "--checkpoint-retention-days")
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|d| d * 24 * 3600)
+            .unwrap_or(pol.retention_secs);
+        let quota = flag_str(args, "--checkpoint-quota-bytes")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(pol.store_quota_bytes);
+        let _ = nexus_tools::checkpoint::startup_sweep(
+            &nexus_tools::checkpoint::store_dir(&layout.dir.join("exec")),
+            &nexus_tools::checkpoint::CheckpointBudget {
+                retention_secs: retention,
+                store_quota_bytes: quota,
+                ..pol
+            },
+        );
+    }
     // Effects ledger files are bounded evidence, not an archive: drop the old ones (30 days).
     let _ = nexus_tools::observe::sweep(
         &nexus_tools::observe::effects_dir(&layout.dir.join("exec")),
@@ -1259,6 +1278,37 @@ fn run(args: &[String]) -> i32 {
                 budget.max_wall_ms = n;
             }
             let p = p.with_observe_budget(budget);
+            // M3B (owner decision D4): a command may run without a complete checkpoint, and the record says
+            // so, unless the operator opts into `required`.
+            let mut ck = nexus_tools::checkpoint::CheckpointPolicy {
+                mode: nexus_tools::checkpoint::Mode::BestEffort,
+                ..Default::default()
+            };
+            if let Some(m) = flag_str(args, "--checkpoint") {
+                match nexus_tools::checkpoint::Mode::parse(&m) {
+                    Some(m) => ck.mode = m,
+                    None => {
+                        eprintln!(
+                            "--checkpoint must be off, best-effort or required (failing closed)"
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
+            if let Some(n) = flag_str(args, "--checkpoint-max-bytes").and_then(|v| v.parse().ok()) {
+                ck.budget.max_bytes = n;
+            }
+            if let Some(n) = flag_str(args, "--checkpoint-quota-bytes").and_then(|v| v.parse().ok())
+            {
+                ck.budget.store_quota_bytes = n;
+            }
+            if let Some(n) =
+                flag_str(args, "--checkpoint-retention-days").and_then(|v| v.parse::<u64>().ok())
+            {
+                ck.budget.retention_secs = n * 24 * 3600;
+            }
+            ck.force_copy = args.iter().any(|a| a == "--checkpoint-force-copy");
+            let p = p.with_checkpoint(ck);
             match flag(args, "--dep-cache") {
                 Some(d) => p.with_dep_cache(d),
                 None => p,

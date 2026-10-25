@@ -140,6 +140,8 @@ pub struct CommandPolicy {
     workbench: bool,
     /// Resource budget of the filesystem observation of in-place commands (daemon configuration).
     observe: crate::observe::ObserveBudget,
+    /// Checkpoint policy of in-place commands (daemon configuration; default off).
+    checkpoint: crate::checkpoint::CheckpointPolicy,
 }
 
 fn arg_ok(a: &str) -> bool {
@@ -162,6 +164,7 @@ impl CommandPolicy {
             test_programs: Vec::new(),
             workbench: false,
             observe: Default::default(),
+            checkpoint: Default::default(),
         }
     }
 
@@ -186,6 +189,16 @@ impl CommandPolicy {
         &self.observe
     }
 
+    /// Set the checkpoint policy (a daemon setting; no tool argument can reach it).
+    pub fn with_checkpoint(mut self, p: crate::checkpoint::CheckpointPolicy) -> Self {
+        self.checkpoint = p;
+        self
+    }
+
+    pub fn checkpoint_policy(&self) -> &crate::checkpoint::CheckpointPolicy {
+        &self.checkpoint
+    }
+
     pub(crate) fn toolchain_has_cargo(&self) -> bool {
         self.toolchain.cargo_home_bin.is_some()
     }
@@ -208,6 +221,7 @@ impl CommandPolicy {
             test_programs: programs.iter().map(|s| s.to_string()).collect(),
             workbench: false,
             observe: Default::default(),
+            checkpoint: Default::default(),
         }
     }
 
@@ -1259,11 +1273,35 @@ pub fn run_process(
     let eff_dir = crate::observe::effects_dir(ctx.run_root);
     let obs_budget = ctx.policy.observe_budget().clone();
     let mut observation: Option<(crate::observe::Manifest, bool, bool, u64)> = None;
+    let ck_pol = ctx.policy.checkpoint_policy().clone();
+    let ck_store = crate::checkpoint::store_dir(ctx.run_root);
+    let mut ck: Option<Result<crate::checkpoint::Index, crate::checkpoint::Failure>> = None;
     if in_place {
         let started = crate::observe::now_ms();
         let pre = crate::observe::observe(ctx.ws, &obs_budget);
         let persisted = crate::observe::write_pre(&eff_dir, ctx.execution_id, &pre).is_ok();
         let leads = crate::observe::path_still_leads_to(ctx.ws);
+        // 2c. Preserve what the command could change, outside its writable view, before it exists.
+        if ck_pol.mode != crate::checkpoint::Mode::Off {
+            crash_point("checkpoint-before");
+            let r = crate::checkpoint::create(ctx.ws, &ck_store, ctx.execution_id, &pre, &ck_pol);
+            let complete = matches!(&r, Ok(i) if i.status == "complete");
+            if ck_pol.mode == crate::checkpoint::Mode::Required && !complete {
+                let why = match &r {
+                    Ok(i) => i.reasons.join(","),
+                    Err(f) => f.reasons.join(","),
+                };
+                crate::checkpoint::remove(&ck_store, ctx.execution_id);
+                crate::observe::remove_pre(&eff_dir, ctx.execution_id);
+                return failed(
+                    hooks,
+                    &run_dir,
+                    ToolErrorCode::CommandRefused,
+                    format!("checkpoint-required: no complete checkpoint ({why}); nothing ran"),
+                );
+            }
+            ck = Some(r);
+        }
         observation = Some((pre, persisted, leads, started));
     }
     // 3. Durable intent BEFORE spawn: identity, digests, limits, cgroup
@@ -1316,6 +1354,9 @@ pub fn run_process(
             }),
         );
     }
+    if let (Some(r), Some(o)) = (&ck, prepared_record.as_object_mut()) {
+        o.insert("checkpoint".into(), checkpoint_brief(r, &ck_pol));
+    }
     if let (Some(g), Some(o)) = (ctx.grant, prepared_record.as_object_mut()) {
         // Audit: under which permissions this command was allowed to run (sealed by the Kernel).
         o.insert("grant".into(), serde_json::to_value(g).unwrap_or_default());
@@ -1343,6 +1384,7 @@ pub fn run_process(
     if cancel.is_cancelled() {
         let _ = std::fs::remove_dir_all(&run_dir);
         crate::observe::remove_pre(&eff_dir, ctx.execution_id);
+        crate::checkpoint::remove(&ck_store, ctx.execution_id);
         hooks.journal(
             PH_CANCELLED,
             serde_json::json!({"reason": "cancelled", "processStarted": false}),
@@ -1352,6 +1394,7 @@ pub fn run_process(
     if let Err(e) = hooks.fence() {
         let _ = std::fs::remove_dir_all(&run_dir);
         crate::observe::remove_pre(&eff_dir, ctx.execution_id);
+        crate::checkpoint::remove(&ck_store, ctx.execution_id);
         hooks.journal(
             PH_CANCELLED,
             serde_json::json!({"reason": "revoked", "detail": e.message, "processStarted": false}),
@@ -1380,6 +1423,9 @@ pub fn run_process(
     // In place: observe what the workspace looks like now and record the difference. `run_sandboxed` returns
     // Ok only after the execution cgroup was emptied; an error means the tree may not have settled.
     let mut ledger: Option<crate::observe::EffectsRecord> = None;
+    if observation.is_some() {
+        crash_point("proc-before-observation");
+    }
     if let Some((pre, _, _, started)) = observation.take() {
         if outcome.is_err() {
             kill_and_remove_cgroup(&cgroup_path);
@@ -1408,6 +1454,9 @@ pub fn run_process(
             pre,
             started,
             state,
+            ck.as_ref(),
+            &ck_store,
+            &ck_pol,
         ));
     }
     let out = match outcome {
@@ -1548,6 +1597,7 @@ pub fn run_process(
 }
 
 /// Post-state observation, comparison, outcome and durable ledger write for one in-place execution.
+#[allow(clippy::too_many_arguments)]
 fn finish_observation(
     ctx: &ProcessContext<'_>,
     dir: &Path,
@@ -1555,11 +1605,23 @@ fn finish_observation(
     pre: crate::observe::Manifest,
     started: u64,
     state: crate::observe::ProcessState,
+    ck: Option<&Result<crate::checkpoint::Index, crate::checkpoint::Failure>>,
+    ck_store: &Path,
+    ck_pol: &crate::checkpoint::CheckpointPolicy,
 ) -> crate::observe::EffectsRecord {
     use crate::observe as ob;
     let post = ob::observe(ctx.ws, budget);
+    crash_point("proc-during-observation");
     let (mut fx, changed) = ob::diff(&pre, &post, budget);
     ob::hash_changed(ctx.ws, &changed, &mut fx, budget);
+    let (ck_value, recov) = match ck {
+        Some(r) => (
+            Some(checkpoint_brief(r, ck_pol)),
+            Some(crate::checkpoint::assess(r.as_ref().ok(), &fx)),
+        ),
+        None => (None, None),
+    };
+    let post_state = ob::post_state_of(&post, &fx);
     let identity_ok = ob::root_identity(ctx.ws).is_some_and(|r| r == pre.root);
     let (mut outcome, mut reasons) = ob::judge(&pre, Some(&post), &state, identity_ok);
     let mut rec = ob::EffectsRecord {
@@ -1578,6 +1640,9 @@ fn finish_observation(
         effects: fx,
         outcome: outcome.clone(),
         outcome_reasons: reasons.clone(),
+        checkpoint: ck_value,
+        recoverability: recov,
+        post_state,
         attribution: "temporal".into(),
         note: ob::ATTRIBUTION_NOTE.into(),
         digest: String::new(),
@@ -1592,7 +1657,25 @@ fn finish_observation(
         rec.digest = rec.compute_digest();
     }
     ob::remove_pre(dir, ctx.execution_id);
+    if ck.is_some() {
+        crate::checkpoint::finish(ck_store, ctx.execution_id);
+    }
     rec
+}
+
+/// Bounded description of a checkpoint attempt for the journal and the effects record.
+fn checkpoint_brief(
+    r: &Result<crate::checkpoint::Index, crate::checkpoint::Failure>,
+    pol: &crate::checkpoint::CheckpointPolicy,
+) -> serde_json::Value {
+    let mut v = match r {
+        Ok(i) => i.brief(),
+        Err(f) => serde_json::json!({
+            "status": "unavailable", "reasons": f.reasons, "consistency": "non-atomic",
+        }),
+    };
+    v["policy"] = serde_json::to_value(pol.mode).unwrap_or_default();
+    v
 }
 
 fn cancelled_result() -> ToolResultV1 {
@@ -1712,6 +1795,27 @@ fn recover_effects(
         exit_code: None,
         settled: true,
     };
+    // The checkpoint the execution made before it started (evidence only: recovery never rolls back).
+    let ck_store = crate::checkpoint::store_dir(run_dir.parent()?);
+    let (ck_value, recov) = match prepared.get("checkpoint") {
+        Some(c) if c.get("id").is_some() => {
+            let id = c["id"].as_str().unwrap_or_default();
+            let idx = crate::checkpoint::read_index(&ck_store, id);
+            let v = match &idx {
+                Ok(i) => {
+                    let mut b = i.brief();
+                    b["policy"] = c.get("policy").cloned().unwrap_or_default();
+                    b
+                }
+                Err(e) => serde_json::json!({"id": id, "status": "unreadable", "reasons": [e]}),
+            };
+            let rc = crate::checkpoint::assess(idx.as_ref().ok(), &fx);
+            crate::checkpoint::finish(&ck_store, id);
+            (Some(v), Some(rc))
+        }
+        Some(c) => (Some(c.clone()), Some(crate::checkpoint::assess(None, &fx))),
+        None => (None, None),
+    };
     let (_, mut reasons) = ob::judge(&pre, Some(&post), &state, identity_ok);
     reasons.push("recovered-after-crash".into());
     let mut rec = ob::EffectsRecord {
@@ -1727,6 +1831,9 @@ fn recover_effects(
         pre: ob::ManifestBrief::of(&pre),
         post: Some(ob::ManifestBrief::of(&post)),
         process: state,
+        post_state: ob::post_state_of(&post, &fx),
+        checkpoint: ck_value,
+        recoverability: recov,
         effects: fx,
         outcome: "uncertain".into(),
         outcome_reasons: reasons,

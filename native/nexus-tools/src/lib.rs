@@ -16,6 +16,7 @@
 //! no shell, no subprocess, no write path and no network in this crate.
 
 pub mod authorization;
+pub mod checkpoint;
 pub mod contract;
 pub mod depcache;
 pub mod detect;
@@ -35,6 +36,7 @@ pub mod protect;
 pub mod read;
 pub mod redact;
 pub mod registry;
+pub mod restore;
 pub mod result;
 pub mod sandbox;
 pub mod search;
