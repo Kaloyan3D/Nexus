@@ -41,6 +41,7 @@ fn rig() -> Rig {
         broker: bin.join("nexus-broker"),
         node,
         repo_root: repo,
+        approver: None,
     };
     Rig {
         _tmp: tmp,
