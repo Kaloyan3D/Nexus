@@ -28,6 +28,7 @@ pub mod grant;
 pub mod inplace;
 pub mod list;
 pub mod mutate;
+pub mod observe;
 pub mod offline;
 pub mod process;
 pub mod protect;

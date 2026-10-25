@@ -177,6 +177,9 @@ pub fn record_from_entry(e: &ToolJournalEntry) -> ToolRecordV1 {
                 // standing grant / filesystem scope the command ran under (absent for legacy runs)
                 "grant",
                 "fsScope",
+                // M3A: observation boundary (prepared) and bounded effects summary (exited/cancelled/recovered)
+                "observation",
+                "effects",
             ] {
                 if let Some(v) = p.get(k) {
                     m.insert(k.to_owned(), v.clone());

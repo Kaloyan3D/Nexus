@@ -278,6 +278,7 @@ pub fn is_privileged(cmd: &str) -> bool {
             | "worktree-remove"
             | "worktree-list"
             | "worktree-stat"
+            | "exec-effects"
     )
 }
 
