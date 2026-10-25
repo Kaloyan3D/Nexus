@@ -17950,3 +17950,61 @@ fn perm_the_real_terminal_approver_approves_and_denies_an_ask_operation() {
         b.shutdown();
     }
 }
+
+#[test]
+fn perm_expiry_ends_a_command_in_progress() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_unified(
+        script(
+            vec![(
+                "proc_run",
+                r#"{"program":"sh","args":["-c","echo e > e.txt; sleep 79"]}"#.to_owned(),
+            )],
+            "Done.",
+        ),
+        &[],
+    );
+    let b = start_interactive(&fx, "pe");
+    user_sets_grant(
+        b.socket_path(),
+        "other",
+        "workspace",
+        "offline",
+        "auto",
+        Some(6),
+    );
+    let sock = b.socket_path().to_owned();
+    let r = ic::submit(
+        &sock,
+        &code_intent_for("other", "go", "perm-expire-00000001", |_| {}),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(40);
+    while !running_cmd("sleep\x0079") {
+        assert!(
+            Instant::now() < end,
+            "the command never started (or the grant expired first)"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // nobody touches anything: the grant simply runs out while the command is running
+    let t0 = Instant::now();
+    while running_cmd("sleep\x0079") && t0.elapsed() < Duration::from_secs(40) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !running_cmd("sleep\x0079"),
+        "the command outlived its permissions"
+    );
+    assert!(
+        t0.elapsed() < Duration::from_secs(20),
+        "expiry took too long to end the command: {:?}",
+        t0.elapsed()
+    );
+    let run = wait_terminal(&sock, &r.run_id, 90);
+    assert!(run.terminal);
+    b.shutdown();
+}
