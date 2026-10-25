@@ -75,7 +75,8 @@ pub struct ObserveBudget {
     pub hash_file_max: u64,
     /// Bytes hashed after one command.
     pub hash_total_max: u64,
-    /// Longest path list kept per category in a record (counts stay exact).
+    /// Longest path list kept per category in a record (counts stay exact). The record FILE holds the full
+    /// lists a guarded restore needs; journals and tool results carry only short summaries of them.
     pub list_cap: usize,
 }
 
@@ -88,7 +89,7 @@ impl Default for ObserveBudget {
             max_wall_ms: 20_000,
             hash_file_max: 1024 * 1024,
             hash_total_max: 64 * 1024 * 1024,
-            list_cap: 500,
+            list_cap: 20_000,
         }
     }
 }
@@ -984,7 +985,7 @@ pub fn hash_changed(ws: &Workspace, paths: &[String], fx: &mut EffectSet, budget
 }
 
 /// Open `rel` (a normalized relative path) under `root` one component at a time with `RESOLVE_NO_SYMLINKS`.
-fn open_rel_path(root: RawFd, rel: &str) -> Option<OwnedFd> {
+pub(crate) fn open_rel_path(root: RawFd, rel: &str) -> Option<OwnedFd> {
     let comps: Vec<&str> = rel.split('/').collect();
     let mut cur = unsafe { libc::fcntl(root, libc::F_DUPFD_CLOEXEC, 3) };
     if cur < 0 {
@@ -1007,6 +1008,62 @@ fn open_rel_path(root: RawFd, rel: &str) -> Option<OwnedFd> {
         cur = next.ok()?;
     }
     Some(unsafe { OwnedFd::from_raw_fd(cur) })
+}
+
+/// Open a directory below the pinned root (`""` = the root itself), never following a symlink.
+pub(crate) fn open_dir_rel(root: RawFd, rel: &str) -> Option<OwnedFd> {
+    let mut cur = unsafe { libc::fcntl(root, libc::F_DUPFD_CLOEXEC, 3) };
+    if cur < 0 {
+        return None;
+    }
+    if !rel.is_empty() {
+        for c in rel.split('/') {
+            if c.is_empty() || c == "." || c == ".." {
+                unsafe { libc::close(cur) };
+                return None;
+            }
+            let cs = CString::new(c).ok()?;
+            let next = open_rel(
+                cur,
+                &cs,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            );
+            unsafe { libc::close(cur) };
+            cur = next.ok()?;
+        }
+    }
+    Some(unsafe { OwnedFd::from_raw_fd(cur) })
+}
+
+/// The current state of one entry (`name` inside `dirfd`) in manifest form; `None` when it does not exist.
+pub(crate) fn rec_at(dirfd: RawFd, name: &str) -> Result<Option<Rec>, i32> {
+    let c = CString::new(name).map_err(|_| libc::EINVAL)?;
+    let st = match fstatat_nofollow(dirfd, &c) {
+        Ok(s) => s,
+        Err(libc::ENOENT) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut rec = Rec {
+        kind: kind_char(st.kind).into(),
+        size: st.size,
+        mode: st.mode,
+        uid: st.uid,
+        gid: st.gid,
+        nlink: st.nlink,
+        ino: st.ino,
+        mtime_ns: ns(st.mtime_ns),
+        ctime_ns: ns(st.ctime_ns),
+        target: None,
+    };
+    if st.kind == Kind::Symlink {
+        let mut buf = vec![0u8; 4096];
+        let n = unsafe { libc::readlinkat(dirfd, c.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+        if n >= 0 {
+            buf.truncate(n as usize);
+            rec.target = Some(String::from_utf8_lossy(&buf).into_owned());
+        }
+    }
+    Ok(Some(rec))
 }
 
 // ----------------------------------------------------------------------------- the ledger record
@@ -1070,6 +1127,16 @@ pub struct EffectsRecord {
     /// evidence of a command that did not finish normally) | `uncertain` (incomplete, unsettled, or recovered).
     pub outcome: String,
     pub outcome_reasons: Vec<String>,
+    /// M3B: the checkpoint taken before the command (bounded description; the index is the authority).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<serde_json::Value>,
+    /// M3B: for every observed modification/deletion, whether its original is recoverable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recoverability: Option<crate::checkpoint::Recoverability>,
+    /// M3B: the observed post state of created/modified/changed entries (the guarded restore compares
+    /// the current filesystem with it to find later edits).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub post_state: BTreeMap<String, Rec>,
     /// Always `temporal`.
     pub attribution: String,
     pub note: String,
@@ -1082,6 +1149,24 @@ impl EffectsRecord {
         c.digest = String::new();
         hex::encode(Sha256::digest(serde_json::to_vec(&c).unwrap_or_default()))
     }
+}
+
+/// The observed post state of the entries a restore will look at.
+pub fn post_state_of(post: &Manifest, fx: &EffectSet) -> BTreeMap<String, Rec> {
+    let mut out = BTreeMap::new();
+    for p in fx
+        .created
+        .paths
+        .iter()
+        .chain(fx.modified.paths.iter())
+        .chain(fx.metadata_changed.iter().map(|m| &m.path))
+        .chain(fx.symlinks.iter().map(|l| &l.path))
+    {
+        if let Some(r) = post.entries.get(p) {
+            out.insert(p.clone(), r.clone());
+        }
+    }
+    out
 }
 
 /// Decide the outcome of an observed execution.
@@ -1142,6 +1227,13 @@ pub fn summary(rec: &EffectsRecord, list_max: usize) -> serde_json::Value {
         "bulkChanged": e.bulk_changed.iter().take(list_max).collect::<Vec<_>>(),
         "likelyRenames": e.likely_renames.iter().take(list_max).collect::<Vec<_>>(),
         "listsMayBeIncomplete": e.lists_may_be_incomplete,
+        "checkpoint": rec.checkpoint,
+        "recoverability": rec.recoverability.as_ref().map(|r| serde_json::json!({
+            "complete": r.complete, "available": r.available, "unavailable": r.unavailable,
+            "new": r.new_paths, "bulkNotCaptured": r.bulk_not_captured,
+            "unavailablePaths": r.pre_images.iter().filter(|(_, v)| *v != "available").take(list_max)
+                .map(|(k, v)| serde_json::json!({"path": k, "reason": v})).collect::<Vec<_>>(),
+        })),
         "digest": rec.digest, "executionId": rec.execution_id,
     })
 }
@@ -1688,6 +1780,9 @@ mod tests {
             post: Some(ManifestBrief::of(&post)),
             process: done,
             effects: EffectSet::default(),
+            checkpoint: None,
+            recoverability: None,
+            post_state: Default::default(),
             outcome: "observed".into(),
             outcome_reasons: vec![],
             attribution: "temporal".into(),
