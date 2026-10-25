@@ -41,6 +41,7 @@ const REQUIRED_BOOL: &[&str] = &[
 /// Flags that are never valid under the profile.
 const FORBIDDEN: &[&str] = &[
     "--allow-nonindependent-approver-test-only",
+    "--approver-same-user",
     "--witness-adopt-legacy",
     // A5.1 development pilot: model inference is never part of the
     // production-v1 contract; it needs its own reviewed profile.

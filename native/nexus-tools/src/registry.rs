@@ -1160,14 +1160,15 @@ pub fn resolve_permissions(rec: &ProjectRecord, now_ms: i64) -> Result<Resolved,
     }
 }
 
-/// May a task that froze `frozen` still act? Only while its grant lineage is current, not revoked and not
-/// expired (by the frozen expiry or a shorter one set later). A newer version of the same lineage never
-/// changes what the task may do, and never stops it.
-pub fn task_may_act(
+/// May a task that froze `frozen` still act, and what does it hold NOW? Only while its grant lineage is
+/// current, not revoked and not expired (by the frozen expiry or a shorter one set later). The result is
+/// the frozen identity with each axis limited to the stricter of frozen and current ([`crate::grant::narrowed`]):
+/// a wider version of the same lineage never reaches the task, a narrower one applies at once.
+pub fn task_permissions_now(
     rec: &ProjectRecord,
     frozen: &crate::grant::Frozen,
     now_ms: i64,
-) -> Result<(), RegError> {
+) -> Result<crate::grant::Frozen, RegError> {
     use crate::grant::GrantStatus;
     let Some(st) = &rec.grant else {
         return Err(err(
@@ -1197,5 +1198,14 @@ pub fn task_may_act(
             "the permissions this task was started under have expired",
         ));
     }
-    Ok(())
+    Ok(crate::grant::narrowed(frozen, &st.current))
+}
+
+/// [`task_permissions_now`] without the result (the task may act or not).
+pub fn task_may_act(
+    rec: &ProjectRecord,
+    frozen: &crate::grant::Frozen,
+    now_ms: i64,
+) -> Result<(), RegError> {
+    task_permissions_now(rec, frozen, now_ms).map(|_| ())
 }

@@ -1188,13 +1188,17 @@ impl Broker {
                 ))?;
                 crate::projects::set_workspace(&env, s("projectId"), mode)
             }
-            "project-list" => crate::projects::list(
-                &env,
-                params
-                    .get("changes")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-            ),
+            "project-list" => {
+                let mut v = crate::projects::list(
+                    &env,
+                    params
+                        .get("changes")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                )?;
+                v["permissions"] = self.permission_support();
+                Ok(v)
+            }
             "project-forget" => crate::projects::forget(&env, s("projectId")),
             "project-policy" => crate::projects::set_policy(
                 &env,
@@ -1218,6 +1222,37 @@ impl Broker {
         }
     }
 
+    /// What this installation can actually do with permissions, asked of the daemon itself (never assumed):
+    /// whether it applies per-project permissions at all and whether an approver channel exists for `ask`.
+    /// `known: false` = the daemon could not be asked quickly; callers then refuse rather than guess.
+    fn permission_support(&self) -> Value {
+        let cap = self.cap_hex.read().map(|c| c.clone()).unwrap_or_default();
+        let st = nexus_client::issuer::issuer_call_with_timeout(
+            &self.cfg.daemon_socket,
+            &cap,
+            "status",
+            json!({}),
+            1_500,
+        )
+        .ok()
+        .filter(|r| r.get("ok") == Some(&Value::Bool(true)));
+        match st {
+            Some(r) => {
+                let g = |k: &str| r.get(k).and_then(|v| v.as_bool()) == Some(true);
+                let (standing, ask) = (g("standingGrants"), g("approverChannel"));
+                json!({
+                    "known": true, "standingGrants": standing, "askAvailable": standing && ask,
+                    "askReason": if !standing { json!("this installation's daemon does not apply per-project permissions") }
+                        else if !ask { json!("this installation has no approver channel to answer a request") } else { Value::Null },
+                })
+            }
+            None => json!({
+                "known": false, "standingGrants": false, "askAvailable": false,
+                "askReason": "the Nexus runtime could not be asked just now",
+            }),
+        }
+    }
+
     /// Standing grants: preview / set / revoke / clear. Only the user's own clients reach these (the broker
     /// socket is uid-gated; the model and its sandbox have no path to it). The grant itself is stored in
     /// the operator registry and enforced by the daemon; nothing here grants anything by itself.
@@ -1230,6 +1265,35 @@ impl Broker {
             .get("projectId")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        // A permission that this installation cannot honour is refused BEFORE anything is shown or stored
+        // (the user is never offered an "ask" nobody can answer, nor a grant the daemon would ignore).
+        if matches!(cmd, "project-grant-preview" | "project-grant") {
+            let sup = self.permission_support();
+            if sup["known"] != true {
+                return Err((
+                    "not-available",
+                    "permissions cannot be changed right now: the Nexus runtime did not answer; nothing was changed".into(),
+                ));
+            }
+            if sup["standingGrants"] != true {
+                return Err((
+                    "not-available",
+                    "this installation does not apply per-project permissions; nothing was changed"
+                        .into(),
+                ));
+            }
+            if params.get("approval").and_then(|v| v.as_str()) == Some("ask")
+                && sup["askAvailable"] != true
+            {
+                return Err((
+                    "not-available",
+                    format!(
+                        "\"Ask me first\" is not available: {}; nothing was changed",
+                        sup["askReason"].as_str().unwrap_or("no approver channel")
+                    ),
+                ));
+            }
+        }
         match cmd {
             "project-grant-preview" => crate::projects::grant_preview(&env, id, params),
             "project-grant" => crate::projects::grant_set(&env, client, id, params),

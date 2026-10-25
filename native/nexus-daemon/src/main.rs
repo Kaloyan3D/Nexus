@@ -54,6 +54,7 @@ fn usage() -> i32 {
     println!("         [--enable-writes --approver-cap PATH --approver-uids UID[,UID...]");
     println!("          [--require-independent-approver] [--approver-cap-gid GID]");
     println!("          [--allow-nonindependent-approver-test-only]]");
+    println!("         [--standing-grants [--approver-cap PATH --approver-uids UID --approver-same-user]]   (per-project permissions; with --autonomous-workspace-policy)");
     println!(
         "         [--enable-process]   (A3.4 sandboxed processes; needs the approver flags above)\n         [--dep-cache <dir>]  (A3.5 read-only verified dependency cache, populated out of band)"
     );
@@ -727,10 +728,22 @@ fn run(args: &[String]) -> i32 {
             "--standing-grants requires --autonomous-workspace-policy (failing closed)",
         );
     }
+    // The single-user desktop topology: the approver is the same OS user as the issuer, with its OWN
+    // credential, used out-of-band in a terminal. It is the honest name of what the test-only flag allows
+    // and is accepted ONLY with --standing-grants (never for the strict human-approval mode). The decision
+    // record says `independent: false` either way.
+    let same_user = args.iter().any(|a| a == "--approver-same-user");
+    if same_user && !standing_grants {
+        return fatal(
+            "bad-config",
+            "--approver-same-user requires --standing-grants (failing closed)",
+        );
+    }
     if autonomous {
         for f in [
             "--require-human-approval",
             "--allow-nonindependent-approver-test-only",
+            "--approver-same-user",
             "--require-independent-approver",
             "--approver-cap",
             "--approver-uids",
@@ -739,6 +752,7 @@ fn run(args: &[String]) -> i32 {
                 && matches!(
                     f,
                     "--allow-nonindependent-approver-test-only"
+                        | "--approver-same-user"
                         | "--require-independent-approver"
                         | "--approver-cap"
                         | "--approver-uids"
@@ -843,7 +857,8 @@ fn run(args: &[String]) -> i32 {
         // names this a test-only configuration.
         let test_only = args
             .iter()
-            .any(|a| a == "--allow-nonindependent-approver-test-only");
+            .any(|a| a == "--allow-nonindependent-approver-test-only")
+            || same_user;
         if !approver_independent && !test_only {
             return fatal(
                 "bad-config",

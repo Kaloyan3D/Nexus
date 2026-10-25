@@ -317,3 +317,59 @@ fn standing_grants_are_the_only_way_the_automated_policy_and_the_approver_coexis
         .unwrap();
     assert!(!o.status.success());
 }
+
+#[test]
+fn the_same_user_approver_flag_is_honest_narrow_and_never_part_of_the_strict_or_production_modes() {
+    let approver = |r: &Root| -> Vec<String> {
+        vec![
+            "--approver-cap".into(),
+            r.acap_dir
+                .path()
+                .join("approver.cap")
+                .to_string_lossy()
+                .into_owned(),
+            "--approver-uids".into(),
+            euid().to_string(),
+            "--approver-same-user".into(),
+        ]
+    };
+    let auto = "--autonomous-workspace-policy".to_owned();
+    // plain automated policy: refused (the flag belongs to --standing-grants)
+    let r = root();
+    let mut a = vec![auto.clone()];
+    a.extend(approver(&r));
+    let e = start(&r, &a).expect_err("not alone");
+    assert!(
+        e.contains("requires --standing-grants") || e.contains("cannot be combined"),
+        "{e}"
+    );
+    // strict human-approval mode: refused
+    let r = root();
+    let mut a = approver(&r);
+    a.push("--require-human-approval".into());
+    let e = start(&r, &a).expect_err("not for strict human mode");
+    assert!(e.contains("requires --standing-grants"), "{e}");
+    // with --standing-grants it starts and the approver credential is private
+    let r = root();
+    let mut a = vec![auto.clone(), "--standing-grants".into()];
+    a.extend(approver(&r));
+    let mut d = start(&r, &a).expect("starts");
+    let md = std::fs::metadata(r.acap_dir.path().join("approver.cap")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        md.permissions().mode() & 0o077,
+        0,
+        "the approver credential must be owner-only"
+    );
+    terminate(&mut d);
+    // production-v1 never accepts it
+    let o = Command::new(nexusd_bin())
+        .args([
+            "--security-profile",
+            "production-v1",
+            "--approver-same-user",
+        ])
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+}

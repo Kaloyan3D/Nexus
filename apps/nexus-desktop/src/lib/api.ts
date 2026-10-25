@@ -26,7 +26,7 @@ import type {
   ModelRunStatus,
   ModelIoView,
   ProjectOpenReply,
-  ProjectView,
+  ProjectListReply,
   RegistryTarget,
   ThreadDetail,
   ThreadSendInput,
@@ -98,7 +98,7 @@ export interface NativeApi {
   providerRevoke(): Promise<RuntimeState["consent"]>;
   /** Native folder picker, then open the folder as a project. No path crosses this API. */
   projectPick(): Promise<ProjectOpenReply>;
-  projectList(withChanges?: boolean): Promise<{ projects: ProjectView[] }>;
+  projectList(withChanges?: boolean): Promise<ProjectListReply>;
   projectRefresh(projectId: string): Promise<ProjectOpenReply>;
   projectSetPolicy(projectId: string, policy: { installs?: boolean; trusted?: boolean }): Promise<unknown>;
   /** Where NEW tasks of a project edit (direct = its real folder). Choosing direct is confirmed natively. */
@@ -206,7 +206,7 @@ export const tauriApi: NativeApi = {
   providerConsent: () => invoke<RuntimeState["consent"]>("provider_consent"),
   providerRevoke: () => invoke<RuntimeState["consent"]>("provider_revoke"),
   projectPick: () => invoke<ProjectOpenReply>("project_pick"),
-  projectList: (withChanges) => invoke<{ projects: ProjectView[] }>("project_list", { withChanges: withChanges ?? false }),
+  projectList: (withChanges) => invoke<ProjectListReply>("project_list", { withChanges: withChanges ?? false }),
   projectRefresh: (projectId) => invoke<ProjectOpenReply>("project_refresh", { projectId }),
   projectSetPolicy: (projectId, policy) => invoke<unknown>("project_set_policy", { projectId, installs: policy.installs ?? null, trusted: policy.trusted ?? null }),
   projectSetEditMode: (projectId, mode) => invoke<unknown>("project_set_edit_mode", { projectId, mode }),
@@ -309,7 +309,7 @@ export const unavailableApi: NativeApi = {
   providerConsent: () => Promise.reject(notInShell),
   providerRevoke: () => Promise.reject(notInShell),
   projectPick: () => Promise.reject(notInShell),
-  projectList: () => Promise.resolve({ projects: [] }),
+  projectList: () => Promise.resolve({ projects: [] } as ProjectListReply),
   projectRefresh: () => Promise.reject(notInShell),
   projectSetPolicy: () => Promise.reject(notInShell),
   projectSetEditMode: () => Promise.reject(notInShell),

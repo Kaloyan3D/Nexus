@@ -9,8 +9,11 @@
 //!   id, version, the three axes and the expiry. Every change is also appended to an audit log.
 //! * **Immutable per task.** A task freezes the effective values (and the grant's identity) into its
 //!   identity record when it is created. Later edits only affect NEW tasks.
-//! * **Can only shrink while running.** A running task stays valid until its grant lineage is revoked,
-//!   cleared or expires (its frozen expiry, or a shorter one set later). A newer version never widens it.
+//! * **Can only shrink while running.** A running task holds, at every operation, the STRICTER of what it
+//!   froze and what its grant lineage allows now, per axis ([`narrowed`]): widening the grant never
+//!   reaches a task that already started; narrowing it applies from the task's next operation; a command
+//!   already running is ended only by revocation, removal, replacement or expiry (its frozen expiry, or a
+//!   shorter one set later). Granting again after a revocation is a new lineage: old tasks stay stopped.
 //! * **Fail closed.** A capability this build does not implement (Full Access, the controlled network
 //!   scopes) cannot be stored; an expired or revoked grant is rejected, never replaced by a default.
 
@@ -265,8 +268,40 @@ pub fn consent_text(project_label: &str, spec: &GrantSpec) -> String {
         None => "This permission does not expire until you revoke it.",
     };
     format!(
-        "Permissions for \"{project_label}\" (affects new tasks only).\n\n• Filesystem: {fs}\n• Network: {net}\n• Approval: {ap}\n• {exp}\n• You can revoke it at any time (running tasks then stop being allowed to act).\n• Nexus never commits, pushes, merges or deploys, and no model request can create, widen or renew this permission."
+        "Permissions for \"{project_label}\".\n\n• Filesystem: {fs}\n• Network: {net}\n• Approval: {ap}\n• {exp}\n• Changing these permissions affects NEW tasks. A task that is already running never gains anything; if you narrow them it follows from its next operation; if you revoke them it stops, including a command in progress.\n• Nexus never commits, pushes, merges or deploys, and no model request can create, widen or renew this permission."
     )
+}
+
+fn rank_fs(s: &str) -> u8 {
+    match s {
+        "scratch" => 0,
+        "workspace" => 1,
+        _ => 2, // anything unknown is the widest, so it can only be narrowed away
+    }
+}
+fn rank_net(s: &str) -> u8 {
+    match s {
+        "offline" => 0,
+        "install" => 1,
+        _ => 2,
+    }
+}
+
+/// What a running task holds now: its frozen identity (id, version, digest, expiry) with each axis limited
+/// to the stricter of the frozen value and the lineage's CURRENT value. Never wider than frozen.
+pub fn narrowed(frozen: &Frozen, current: &StandingGrant) -> Frozen {
+    let mut f = frozen.clone();
+    if rank_fs(&current.fs) < rank_fs(&f.fs) {
+        f.fs = current.fs.clone();
+    }
+    if rank_net(&current.net) < rank_net(&f.net) {
+        f.net = current.net.clone();
+    }
+    // "ask" is the stricter approval behaviour; an unreadable value counts as ask
+    if f.approval != "ask" && current.approval != "auto" {
+        f.approval = "ask".into();
+    }
+    f
 }
 
 pub fn text_digest(text: &str) -> String {
@@ -365,6 +400,61 @@ mod tests {
         x.created_by = "other".into();
         x.created_at_ms = 99;
         assert_eq!(base, x.digest("p"));
+    }
+
+    #[test]
+    fn a_running_task_holds_the_stricter_of_what_it_froze_and_what_is_granted_now() {
+        let mk = |fs: &str, net: &str, ap: &str| {
+            let mut g = g();
+            g.fs = fs.into();
+            g.net = net.into();
+            g.approval = ap.into();
+            g
+        };
+        let frozen = mk("workspace", "install", "auto").frozen("p");
+        // identical, or WIDER now: nothing changes (never gains)
+        for cur in [
+            mk("workspace", "install", "auto"),
+            mk("workspace", "install", "auto"),
+        ] {
+            assert_eq!(narrowed(&frozen, &cur), frozen);
+        }
+        let narrow_fs = narrowed(&frozen, &mk("scratch", "install", "auto"));
+        assert_eq!(
+            (
+                narrow_fs.fs.as_str(),
+                narrow_fs.net.as_str(),
+                narrow_fs.approval.as_str()
+            ),
+            ("scratch", "install", "auto")
+        );
+        let narrow_net = narrowed(&frozen, &mk("workspace", "offline", "auto"));
+        assert_eq!(
+            (narrow_net.fs.as_str(), narrow_net.net.as_str()),
+            ("workspace", "offline")
+        );
+        let narrow_ap = narrowed(&frozen, &mk("workspace", "install", "ask"));
+        assert_eq!(narrow_ap.approval, "ask");
+        // identity is the FROZEN one
+        assert_eq!(
+            (
+                narrow_ap.grant_id.as_str(),
+                narrow_ap.version,
+                narrow_ap.digest.as_str()
+            ),
+            (
+                frozen.grant_id.as_str(),
+                frozen.version,
+                frozen.digest.as_str()
+            )
+        );
+        // a task frozen at the narrow end never gains from a wider grant
+        let low = mk("scratch", "offline", "ask").frozen("p");
+        assert_eq!(narrowed(&low, &mk("workspace", "install", "auto")), low);
+        // an unknown current approval counts as ask
+        let mut weird = mk("workspace", "install", "auto");
+        weird.approval = "???".into();
+        assert_eq!(narrowed(&frozen, &weird).approval, "ask");
     }
 
     #[test]

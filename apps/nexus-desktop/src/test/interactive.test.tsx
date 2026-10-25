@@ -20,6 +20,10 @@ const rt = (over: Partial<RuntimeState> = {}): RuntimeState => ({
   ...over,
 });
 
+const support = (over: Partial<{ known: boolean; standingGrants: boolean; askAvailable: boolean; askReason: string | null }> = {}) => ({
+  known: true, standingGrants: true, askAvailable: true, askReason: null as string | null, ...over,
+});
+
 const project = (over: Partial<ProjectView> = {}): ProjectView => ({
   projectId: "tinycsv-6c94b7",
   label: "tinycsv",
@@ -212,6 +216,7 @@ describe("Projects page and evidence (A6.1.4)", () => {
     };
     const list = vi.fn(async () => ({
       projects: [project({ grant }), project({ projectId: "svc-aaaaaa", label: "svc", workspaceMode: "isolated" }), project({ projectId: "old-bbbbbb", label: "old", workspaceMode: "isolated", grant: { ...grant, status: "revoked" as const, revokedAtMs: 5 } })],
+      permissions: support(),
     }));
     const user = userEvent.setup();
     mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetPermissions: setGrant, projectEndPermissions: endGrant }), "#/projects");
@@ -236,6 +241,75 @@ describe("Projects page and evidence (A6.1.4)", () => {
     expect(endGrant).toHaveBeenCalledWith("tinycsv-6c94b7", true);
     // the page has no confirmation, digest or consent control of its own
     expect(document.querySelector("input[type=text], input[type=password]")).toBeNull();
+  });
+
+  it("'Ask me first' is disabled, with the reason, when this installation has no approver channel - before anything is granted", async () => {
+    const setPerm = vi.fn(async () => ({}));
+    const list = vi.fn(async () => ({
+      projects: [project()],
+      permissions: support({ askAvailable: false, askReason: "this installation has no approver channel to answer a request" }),
+    }));
+    const user = userEvent.setup();
+    mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetPermissions: setPerm }), "#/projects");
+    const table = await screen.findByRole("table", { name: "Opened projects" });
+    await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
+    const ask = within(table).getByRole("option", { name: /Asks me first/ }) as HTMLOptionElement;
+    expect(ask.disabled).toBe(true);
+    expect(within(table).getByRole("note", { name: "Why Ask is unavailable for tinycsv" })).toHaveTextContent(/approver channel/);
+    // the other choices still work
+    await user.click(within(table).getByRole("button", { name: "Apply…" }));
+    expect(setPerm).toHaveBeenCalledWith("tinycsv-6c94b7", expect.objectContaining({ approval: "auto" }));
+  });
+
+  it("'Ask me first' is offered when the runtime has an approver channel", async () => {
+    const setPerm = vi.fn(async () => ({}));
+    const list = vi.fn(async () => ({ projects: [project()], permissions: support() }));
+    const user = userEvent.setup();
+    mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetPermissions: setPerm }), "#/projects");
+    const table = await screen.findByRole("table", { name: "Opened projects" });
+    await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
+    expect((within(table).getByRole("option", { name: /Asks me first/ }) as HTMLOptionElement).disabled).toBe(false);
+    expect(within(table).queryByRole("note", { name: /Why Ask is unavailable/ })).not.toBeInTheDocument();
+    await user.selectOptions(within(table).getByLabelText("Approval behaviour for tinycsv"), "ask");
+    await user.click(within(table).getByRole("button", { name: "Apply…" }));
+    expect(setPerm).toHaveBeenCalledWith("tinycsv-6c94b7", expect.objectContaining({ approval: "ask" }));
+  });
+
+  it("nothing can be applied while the runtime cannot say what it supports", async () => {
+    const setPerm = vi.fn(async () => ({}));
+    const list = vi.fn(async () => ({ projects: [project()], permissions: support({ known: false, standingGrants: false, askAvailable: false, askReason: "the Nexus runtime could not be asked just now" }) }));
+    const user = userEvent.setup();
+    mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetPermissions: setPerm }), "#/projects");
+    const table = await screen.findByRole("table", { name: "Opened projects" });
+    await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
+    expect(within(table).getByRole("button", { name: "Apply…" })).toBeDisabled();
+    expect(within(table).getByRole("note", { name: /Why Ask is unavailable/ })).toHaveTextContent(/could not be asked just now/);
+  });
+
+  it("the installs setting says which control governs it: the old checkbox without permissions, the Network setting with them", async () => {
+    const grant = { grantId: "grt_a", version: 1, digest: "d".repeat(64), fs: "scratch" as const, net: "install" as const, approval: "auto" as const, expiresAtMs: null, createdAtMs: 1, createdBy: "cli:uid:1", status: "active" as const, revokedAtMs: null, history: [] };
+    const list = vi.fn(async () => ({
+      projects: [
+        project({ projectId: "legacy-a", label: "legacy", installs: true }),
+        project({ projectId: "on-b", label: "withnet", grant }),
+        project({ projectId: "off-c", label: "offline", grant: { ...grant, net: "offline" as const } }),
+        project({ projectId: "rev-d", label: "revoked", grant: { ...grant, status: "revoked" as const, revokedAtMs: 3 } }),
+      ],
+      permissions: support(),
+    }));
+    const setPolicy = vi.fn(async () => ({}));
+    mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetPolicy: setPolicy }), "#/projects");
+    const table = await screen.findByRole("table", { name: "Opened projects" });
+    // legacy: the checkbox, unchanged
+    expect(within(table).getByLabelText("Allow dependency installs for legacy")).toBeChecked();
+    // with permissions: no checkbox, the sentence names the controlling setting
+    for (const name of ["withnet", "offline", "revoked"]) {
+      expect(within(table).queryByLabelText(`Allow dependency installs for ${name}`)).not.toBeInTheDocument();
+    }
+    expect(within(table).getByText("installs: allowed by Permissions")).toBeInTheDocument();
+    expect(within(table).getByText("installs: not allowed by Permissions")).toBeInTheDocument();
+    expect(within(table).getByText("installs: stopped (permissions revoked)")).toBeInTheDocument();
+    expect(setPolicy).not.toHaveBeenCalled();
   });
 
   it("in-place commands cannot be chosen for a project that edits its real folder directly", async () => {
