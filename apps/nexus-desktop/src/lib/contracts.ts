@@ -557,6 +557,26 @@ export interface ProjectKindView {
 
 export type WorkspaceMode = "direct" | "isolated";
 
+export type GrantStatus = "active" | "expired" | "revoked";
+
+/** The user's standing permissions for a project (what its tasks' commands may do). */
+export interface ProjectGrantView {
+  grantId: string;
+  version: number;
+  digest: string;
+  /** `scratch`: commands work on a throw-away copy. `workspace`: they change the task's working copy in place. */
+  fs: "scratch" | "workspace";
+  net: "offline" | "install";
+  /** `auto`: inside the grant, no prompt. `ask`: every operation waits for the independent approver. */
+  approval: "ask" | "auto";
+  expiresAtMs: number | null;
+  createdAtMs: number;
+  createdBy: string;
+  status: GrantStatus;
+  revokedAtMs: number | null;
+  history: { atMs: number; kind: string; version: number; by: string }[];
+}
+
 export interface ProjectView {
   projectId: string;
   label: string;
@@ -570,6 +590,8 @@ export interface ProjectView {
   trusted?: boolean;
   /** Where NEW tasks edit: `direct` = this project's real folder, in place; `isolated` (or absent) = a throw-away copy. */
   workspaceMode?: WorkspaceMode;
+  /** Standing permissions; absent = the defaults (throw-away copy, no network, automatic approval). */
+  grant?: ProjectGrantView;
   snapshotAtMs: number;
   originDirty: boolean;
   /** True when the folder changed since Nexus last copied it (new tasks refresh automatically). */

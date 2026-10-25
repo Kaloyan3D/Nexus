@@ -501,7 +501,10 @@ fn run(args: &[String]) -> i32 {
         let human = args.iter().any(|a| a == "--require-human-approval");
         let indep = args.iter().any(|a| a == "--require-independent-approver");
         let auto = args.iter().any(|a| a == "--autonomous-workspace-policy");
-        let level = if auto {
+        let unified = args.iter().any(|a| a == "--standing-grants");
+        let level = if auto && unified {
+            Some(nexus_kernel::approvals::POLICY_UNIFIED)
+        } else if auto {
             Some(nexus_kernel::approvals::POLICY_AUTOMATED)
         } else if !human {
             None
@@ -713,6 +716,17 @@ fn run(args: &[String]) -> i32 {
     // there is NO human approver channel and no approver credential. It is a
     // different mode from (and never combined with) human approval.
     let autonomous = args.iter().any(|a| a == "--autonomous-workspace-policy");
+    // Permissions milestone: `--standing-grants` lets each project's standing grant choose, per task, between
+    // the automated policy (auto) and the independent human approver (ask). It is the ONLY way the two
+    // channels coexist; it needs the automated policy, and the approver channel is optional (without it
+    // a project whose grant says "ask" is refused at task creation).
+    let standing_grants = args.iter().any(|a| a == "--standing-grants");
+    if standing_grants && !autonomous {
+        return fatal(
+            "bad-config",
+            "--standing-grants requires --autonomous-workspace-policy (failing closed)",
+        );
+    }
     if autonomous {
         for f in [
             "--require-human-approval",
@@ -721,7 +735,15 @@ fn run(args: &[String]) -> i32 {
             "--approver-cap",
             "--approver-uids",
         ] {
-            if args.iter().any(|a| a == f) {
+            let allowed_with_grants = standing_grants
+                && matches!(
+                    f,
+                    "--allow-nonindependent-approver-test-only"
+                        | "--require-independent-approver"
+                        | "--approver-cap"
+                        | "--approver-uids"
+                );
+            if args.iter().any(|a| a == f) && !allowed_with_grants {
                 return fatal(
                     "bad-config",
                     &format!("--autonomous-workspace-policy cannot be combined with {f}: it has no human approver channel (failing closed)"),
@@ -776,7 +798,10 @@ fn run(args: &[String]) -> i32 {
                 "--autonomous-workspace-policy requires --allowed-uids and --workspace-bases (failing closed)",
             );
         }
-    } else if writes_enabled || process_enabled {
+    }
+    if (autonomous && standing_grants && (approver_cap_path.is_some() || approver_uids.is_some()))
+        || (!autonomous && (writes_enabled || process_enabled))
+    {
         if trust_mode != TrustMode::ShadowTest {
             return fatal(
                 "bad-config",
@@ -1198,6 +1223,7 @@ fn run(args: &[String]) -> i32 {
         writes_enabled,
         process_enabled,
         isolated_exec_scope,
+        standing_grants,
         command_policy: {
             let p = nexus_tools::process::CommandPolicy::standard(
                 nexus_tools::process::Toolchain::discover(),

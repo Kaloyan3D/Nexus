@@ -41,6 +41,8 @@ const COMMANDS: &[&str] = &[
     "project_refresh",
     "project_set_policy",
     "project_set_edit_mode",
+    "project_set_grant",
+    "project_end_grant",
     "code_limits_set",
     "project_forget",
     "project_adopt",

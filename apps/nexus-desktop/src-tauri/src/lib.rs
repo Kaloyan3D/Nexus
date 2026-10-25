@@ -731,6 +731,51 @@ async fn project_set_edit_mode(
     .map_err(|m| ui_msg("project", m))
 }
 
+/// Set the project's standing permissions. The native backend shows the broker's exact consent text and
+/// needs the person's "yes"; the renderer only chooses the three axes and an optional lifetime.
+#[tauri::command]
+async fn project_set_grant(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+    project_id: String,
+    fs: String,
+    net: String,
+    approval: String,
+    expires_in_secs: Option<u64>,
+) -> Result<serde_json::Value, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        rt.project_set_grant(
+            d.as_ref(),
+            &project_id,
+            &fs,
+            &net,
+            &approval,
+            expires_in_secs,
+        )
+    })
+    .await
+    .map_err(|_| internal())?
+    .map_err(|m| ui_msg("project", m))
+}
+
+/// Revoke or remove the project's standing permissions after a native confirmation.
+#[tauri::command]
+async fn project_end_grant(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+    project_id: String,
+    clear: bool,
+) -> Result<serde_json::Value, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        rt.project_end_grant(d.as_ref(), &project_id, clear)
+    })
+    .await
+    .map_err(|_| internal())?
+    .map_err(|m| ui_msg("project", m))
+}
+
 /// Apply a finished run's patch to the user's own folder after a native confirmation.
 #[tauri::command]
 async fn project_adopt(
@@ -1144,6 +1189,8 @@ pub fn run() {
             project_refresh,
             project_set_policy,
             project_set_edit_mode,
+            project_set_grant,
+            project_end_grant,
             code_limits_set,
             project_forget,
             project_adopt,
@@ -1207,6 +1254,8 @@ mod authz_tests {
         "project_refresh",
         "project_set_policy",
         "project_set_edit_mode",
+        "project_set_grant",
+        "project_end_grant",
         "code_limits_set",
         "project_forget",
         "project_adopt",

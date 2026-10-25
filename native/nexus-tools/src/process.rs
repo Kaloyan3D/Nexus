@@ -580,6 +580,8 @@ pub struct ProcessContext<'a> {
     pub scope_max_wall_ms: u64,
     /// Filesystem scope SEALED in the Kernel process scope (never taken from tool arguments).
     pub fs_scope: crate::exec_contract::FsScope,
+    /// The standing grant sealed in the process scope, recorded verbatim in the journal (absent = none).
+    pub grant: Option<&'a crate::authorization::GrantRef>,
 }
 
 /// Read-only binds plus the provenance note recorded in the journal.
@@ -1264,6 +1266,10 @@ pub fn run_process(
         "cgroup": cgroup_path.display().to_string(),
         "runDir": run_dir.display().to_string(),
     });
+    if let (Some(g), Some(o)) = (ctx.grant, prepared_record.as_object_mut()) {
+        // Audit: under which permissions this command was allowed to run (sealed by the Kernel).
+        o.insert("grant".into(), serde_json::to_value(g).unwrap_or_default());
+    }
     if let (true, Some(m), Some(o)) = (in_place, &mount, prepared_record.as_object_mut()) {
         // In place the record must say what is true: nothing was staged, the working copy is written.
         o.insert("snapshotDigest".into(), serde_json::Value::Null);
@@ -1384,6 +1390,9 @@ pub fn run_process(
                 "unsavedFiles": e.unsaved_files,
             }),
         );
+    }
+    if let (Some(g), Some(o)) = (ctx.grant, record.as_object_mut()) {
+        o.insert("grant".into(), serde_json::to_value(g).unwrap_or_default());
     }
     if let (true, Some(o)) = (in_place, record.as_object_mut()) {
         o.insert("snapshotDigest".into(), serde_json::Value::Null);

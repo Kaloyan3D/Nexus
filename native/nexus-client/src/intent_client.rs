@@ -1067,6 +1067,70 @@ pub fn project_list(socket: &Path, with_changes: bool) -> Result<serde_json::Val
     )
 }
 
+/// Standing grants (permissions): the exact consent text for these choices (and the refusal, if the choice
+/// cannot be stored). Changes nothing.
+pub fn project_grant_preview(
+    socket: &Path,
+    project_id: &str,
+    fs: &str,
+    net: &str,
+    approval: &str,
+    expires_in_secs: Option<u64>,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "project-grant-preview",
+        serde_json::json!({ "projectId": project_id, "fs": fs, "net": net, "approval": approval, "expiresInSecs": expires_in_secs }),
+        30_000,
+    )
+}
+
+/// Store a standing grant. `text_sha256` must be the digest of the text the user confirmed (from the preview).
+#[allow(clippy::too_many_arguments)]
+pub fn project_grant_set(
+    socket: &Path,
+    project_id: &str,
+    fs: &str,
+    net: &str,
+    approval: &str,
+    expires_in_secs: Option<u64>,
+    text_sha256: &str,
+    surface: &str,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "project-grant",
+        serde_json::json!({ "projectId": project_id, "fs": fs, "net": net, "approval": approval, "expiresInSecs": expires_in_secs, "textSha256": text_sha256, "surface": surface }),
+        30_000,
+    )
+}
+
+pub fn project_grant_revoke(
+    socket: &Path,
+    project_id: &str,
+    surface: &str,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "project-grant-revoke",
+        serde_json::json!({ "projectId": project_id, "surface": surface }),
+        30_000,
+    )
+}
+
+pub fn project_grant_clear(
+    socket: &Path,
+    project_id: &str,
+    surface: &str,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "project-grant-clear",
+        serde_json::json!({ "projectId": project_id, "surface": surface }),
+        30_000,
+    )
+}
+
 pub fn project_refresh(socket: &Path, project_id: &str) -> Result<serde_json::Value, ClientError> {
     call(
         socket,

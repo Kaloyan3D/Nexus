@@ -139,6 +139,10 @@ pub struct ProjectRecord {
     /// (one opened from the Desktop/CLI, with a known origin folder) can be `Direct`.
     #[serde(default, skip_serializing_if = "WorkspaceMode::is_isolated")]
     pub workspace_mode: WorkspaceMode,
+    /// The user's standing grant for this project (see `grant`). Absent = the long-standing defaults.
+    /// Written only through [`set_grant`], [`revoke_grant`] and [`clear_grant`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<crate::grant::GrantState>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -251,6 +255,18 @@ pub fn validate_record(p: &ProjectRecord) -> Result<(), RegError> {
             return Err(err(
                 "bad-workspace-mode",
                 "only a project opened with a canonical origin folder can use the direct workspace",
+            ));
+        }
+    }
+    // A live grant for in-place commands cannot coexist with the direct workspace (not implemented).
+    if let Some(g) = &p.grant {
+        if g.revoked_at_ms.is_none()
+            && g.current.fs == "workspace"
+            && p.workspace_mode == WorkspaceMode::Direct
+        {
+            return Err(err(
+                "bad-workspace-mode",
+                "this project's permissions allow commands to change the working copy in place, which is not available for the direct workspace; change the permissions first",
             ));
         }
     }
@@ -587,6 +603,7 @@ pub fn add_with(
         installs: false,
         trusted: false,
         workspace_mode: WorkspaceMode::Isolated,
+        grant: None,
         created_at_ms: now_ms(),
         updated_at_ms: now_ms(),
     };
@@ -821,6 +838,7 @@ pub fn upsert_managed(
                 installs: true,
                 trusted: false,
                 workspace_mode: meta.new_mode,
+                grant: None,
                 created_at_ms: now,
                 updated_at_ms: now,
             };
@@ -901,4 +919,283 @@ pub fn remove_managed(dir: &Path, trust: &Trust, id: &str) -> Result<ProjectReco
         }
     })?;
     gone.ok_or_else(|| err("internal", "no record"))
+}
+
+// ------------------------------------------------------------------ standing grants
+
+const GRANT_AUDIT: &str = "grants.audit.jsonl";
+
+fn grant_err(e: crate::grant::GrantError) -> RegError {
+    err(e.code, e.message)
+}
+
+/// Append one audit line (before the registry change is published, tagged with the generation it would
+/// produce, so a line whose publish failed is recognizable).
+fn audit_grant(dir: &Path, line: &serde_json::Value) -> Result<(), RegError> {
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir.join(GRANT_AUDIT))
+        .map_err(|e| {
+            err(
+                "registry-io",
+                format!("cannot write the grant audit log: {e}"),
+            )
+        })?;
+    let mut text = line.to_string();
+    text.push('\n');
+    f.write_all(text.as_bytes())
+        .and_then(|_| f.sync_all())
+        .map_err(|e| {
+            err(
+                "registry-io",
+                format!("cannot write the grant audit log: {e}"),
+            )
+        })
+}
+
+fn new_grant_id() -> Result<String, RegError> {
+    let mut b = [0u8; 8];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .map_err(|e| err("registry-io", format!("no randomness: {e}")))?;
+    Ok(format!("grt_{}", hex::encode(b)))
+}
+
+/// Create the project's standing grant, or replace it with a new version. `consent_sha256` is the digest
+/// of the exact text the user confirmed. Replacing keeps the grant id (the lineage running tasks hold)
+/// unless the previous grant was revoked, which starts a new lineage.
+pub fn set_grant(
+    dir: &Path,
+    trust: &Trust,
+    id: &str,
+    spec: &crate::grant::GrantSpec,
+    by: &str,
+    consent_sha256: &str,
+) -> Result<ProjectRecord, RegError> {
+    let mut out: Option<ProjectRecord> = None;
+    mutate(dir, trust, |f| {
+        let gen_next = f.generation + 1;
+        let p = f
+            .projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| err("not-found", format!("no project {id}")))?;
+        let now = now_ms();
+        crate::grant::validate_spec(spec, p.workspace_mode == WorkspaceMode::Direct, now)
+            .map_err(grant_err)?;
+        let (grant_id, version, kind, history, prev) = match &p.grant {
+            Some(st) if st.revoked_at_ms.is_none() => (
+                st.current.grant_id.clone(),
+                st.current.version + 1,
+                "replaced",
+                st.history.clone(),
+                Some(st.current.digest(id)),
+            ),
+            Some(st) => (
+                new_grant_id()?,
+                st.current.version + 1,
+                "created",
+                st.history.clone(),
+                Some(st.current.digest(id)),
+            ),
+            None => (new_grant_id()?, 1, "created", Vec::new(), None),
+        };
+        let cur = crate::grant::StandingGrant {
+            grant_id,
+            version,
+            fs: spec.fs.clone(),
+            net: spec.net.clone(),
+            approval: spec.approval.clone(),
+            created_at_ms: now,
+            expires_at_ms: spec.expires_at_ms,
+            created_by: by.chars().take(64).collect(),
+            consent_sha256: consent_sha256.chars().take(64).collect(),
+        };
+        let digest = cur.digest(id);
+        audit_grant(
+            dir,
+            &serde_json::json!({
+                "atMs": now, "generation": gen_next, "projectId": id, "event": kind,
+                "grantId": cur.grant_id, "version": cur.version, "digest": digest,
+                "previousDigest": prev, "fs": cur.fs, "net": cur.net, "approval": cur.approval,
+                "expiresAtMs": cur.expires_at_ms, "by": cur.created_by, "consentSha256": cur.consent_sha256,
+            }),
+        )?;
+        let mut st = crate::grant::GrantState {
+            current: cur,
+            revoked_at_ms: None,
+            revoked_by: None,
+            history,
+        };
+        st.push_event(crate::grant::GrantEvent {
+            at_ms: now,
+            kind: kind.into(),
+            version,
+            digest,
+            by: by.chars().take(64).collect(),
+        });
+        p.grant = Some(st);
+        p.updated_at_ms = now;
+        out = Some(p.clone());
+        Ok(())
+    })?;
+    out.ok_or_else(|| err("internal", "no record"))
+}
+
+/// Revoke the project's grant: new tasks are refused and running tasks stop being allowed to act.
+pub fn revoke_grant(
+    dir: &Path,
+    trust: &Trust,
+    id: &str,
+    by: &str,
+) -> Result<ProjectRecord, RegError> {
+    let mut out: Option<ProjectRecord> = None;
+    mutate(dir, trust, |f| {
+        let gen_next = f.generation + 1;
+        let p = f
+            .projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| err("not-found", format!("no project {id}")))?;
+        let now = now_ms();
+        let st = p
+            .grant
+            .as_mut()
+            .ok_or_else(|| err("no-grant", "this project has no standing grant"))?;
+        if st.revoked_at_ms.is_some() {
+            return Err(err("already-revoked", "this grant is already revoked"));
+        }
+        let digest = st.current.digest(id);
+        audit_grant(
+            dir,
+            &serde_json::json!({
+                "atMs": now, "generation": gen_next, "projectId": id, "event": "revoked",
+                "grantId": st.current.grant_id, "version": st.current.version, "digest": digest,
+                "by": by.chars().take(64).collect::<String>(),
+            }),
+        )?;
+        st.revoked_at_ms = Some(now);
+        st.revoked_by = Some(by.chars().take(64).collect());
+        let (v, d) = (st.current.version, digest);
+        st.push_event(crate::grant::GrantEvent {
+            at_ms: now,
+            kind: "revoked".into(),
+            version: v,
+            digest: d,
+            by: by.chars().take(64).collect(),
+        });
+        p.updated_at_ms = now;
+        out = Some(p.clone());
+        Ok(())
+    })?;
+    out.ok_or_else(|| err("internal", "no record"))
+}
+
+/// Remove the grant entirely (the project returns to the long-standing defaults). A task that holds the
+/// removed grant is no longer allowed to act. Audited.
+pub fn clear_grant(
+    dir: &Path,
+    trust: &Trust,
+    id: &str,
+    by: &str,
+) -> Result<ProjectRecord, RegError> {
+    let mut out: Option<ProjectRecord> = None;
+    mutate(dir, trust, |f| {
+        let gen_next = f.generation + 1;
+        let p = f
+            .projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| err("not-found", format!("no project {id}")))?;
+        let st = p
+            .grant
+            .as_ref()
+            .ok_or_else(|| err("no-grant", "this project has no standing grant"))?;
+        let now = now_ms();
+        audit_grant(
+            dir,
+            &serde_json::json!({
+                "atMs": now, "generation": gen_next, "projectId": id, "event": "cleared",
+                "grantId": st.current.grant_id, "version": st.current.version,
+                "digest": st.current.digest(id), "by": by.chars().take(64).collect::<String>(),
+            }),
+        )?;
+        p.grant = None;
+        p.updated_at_ms = now;
+        out = Some(p.clone());
+        Ok(())
+    })?;
+    out.ok_or_else(|| err("internal", "no record"))
+}
+
+/// The permissions a NEW task of this project runs under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolved {
+    /// No grant: the long-standing defaults apply.
+    Legacy,
+    /// An active grant.
+    Granted(crate::grant::Frozen),
+}
+
+/// Resolve the project's permissions for a new task. A grant that is expired or revoked is REJECTED (never
+/// replaced by the defaults): the user must renew, replace or clear it.
+pub fn resolve_permissions(rec: &ProjectRecord, now_ms: i64) -> Result<Resolved, RegError> {
+    use crate::grant::GrantStatus;
+    match &rec.grant {
+        None => Ok(Resolved::Legacy),
+        Some(st) => match st.status(now_ms) {
+            GrantStatus::Active => Ok(Resolved::Granted(st.current.frozen(&rec.id))),
+            GrantStatus::Expired => Err(err(
+                "grant-expired",
+                "this project's permissions have expired; renew them (nexus project grant set) or clear them",
+            )),
+            GrantStatus::Revoked => Err(err(
+                "grant-revoked",
+                "this project's permissions were revoked; grant them again or clear them",
+            )),
+        },
+    }
+}
+
+/// May a task that froze `frozen` still act? Only while its grant lineage is current, not revoked and not
+/// expired (by the frozen expiry or a shorter one set later). A newer version of the same lineage never
+/// changes what the task may do, and never stops it.
+pub fn task_may_act(
+    rec: &ProjectRecord,
+    frozen: &crate::grant::Frozen,
+    now_ms: i64,
+) -> Result<(), RegError> {
+    use crate::grant::GrantStatus;
+    let Some(st) = &rec.grant else {
+        return Err(err(
+            "grant-withdrawn",
+            "the permissions this task was started under were removed",
+        ));
+    };
+    if st.current.grant_id != frozen.grant_id {
+        return Err(err(
+            "grant-replaced",
+            "the permissions this task was started under were replaced by a new grant; start a new task",
+        ));
+    }
+    if st.status(now_ms) == GrantStatus::Revoked {
+        return Err(err(
+            "grant-revoked",
+            "the permissions this task was started under were revoked",
+        ));
+    }
+    let exp = [frozen.expires_at_ms, st.current.expires_at_ms]
+        .into_iter()
+        .flatten()
+        .min();
+    if exp.is_some_and(|e| now_ms >= e) {
+        return Err(err(
+            "grant-expired",
+            "the permissions this task was started under have expired",
+        ));
+    }
+    Ok(())
 }

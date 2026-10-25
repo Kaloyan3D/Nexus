@@ -89,6 +89,91 @@ pub const PROCESS_SCOPE_DOMAIN: &str = "nexus-process-scope/v1";
 /// with the v1 domain and canonical form exactly as before, so every existing row keeps verifying and a
 /// `scratch` row can never be read as anything else.
 pub const PROCESS_SCOPE_DOMAIN_V2: &str = "nexus-process-scope/v2";
+/// Used for scopes issued under a standing grant: additionally seals the grant's identity (id, version,
+/// digest) and the three axes (filesystem, network, approval behaviour) the grant gave this command.
+pub const PROCESS_SCOPE_DOMAIN_V3: &str = "nexus-process-scope/v3";
+/// Network scopes a process scope can seal.
+pub const NET_SCOPE_OFFLINE: &str = "offline";
+pub const NET_SCOPE_INSTALL: &str = "install";
+/// Approval behaviours a process scope can seal.
+pub const APPROVAL_ASK: &str = "ask";
+pub const APPROVAL_AUTO: &str = "auto";
+
+/// The identity and axes of the standing grant an operation runs under, as declared by the daemon in the
+/// reviewed (and digested) operation and sealed into the process scope.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GrantSeal {
+    pub grant_id: String,
+    pub version: u64,
+    pub digest: String,
+    pub net: String,
+    pub approval: String,
+}
+
+/// What the reviewed operation declares about its scope (`operation.execFsScope`, `operation.grant`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredScope {
+    pub fs_scope: String,
+    pub grant: Option<GrantSeal>,
+}
+
+impl DeclaredScope {
+    pub fn scratch() -> Self {
+        Self {
+            fs_scope: FS_SCOPE_SCRATCH.to_owned(),
+            grant: None,
+        }
+    }
+
+    /// Read the declaration from an operation description. Absent = scratch without a grant (every
+    /// operation that predates grants). Anything malformed or inconsistent is an error, never a default.
+    pub fn from_operation(op: &serde_json::Value) -> Result<Self, String> {
+        let fs_scope = match op.get("execFsScope") {
+            None | Some(serde_json::Value::Null) => FS_SCOPE_SCRATCH.to_owned(),
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(_) => return Err("execFsScope is not a string".into()),
+        };
+        let grant = match op.get("grant") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(g) => {
+                let st = |k: &str| g.get(k).and_then(|v| v.as_str()).map(str::to_owned);
+                let (Some(id), Some(digest), Some(gfs), Some(net), Some(approval), Some(version)) = (
+                    st("grantId"),
+                    st("digest"),
+                    st("fsScope"),
+                    st("netScope"),
+                    st("approval"),
+                    g.get("version").and_then(|v| v.as_u64()),
+                ) else {
+                    return Err("the grant declaration is incomplete".into());
+                };
+                if gfs != fs_scope {
+                    return Err("the grant's filesystem scope differs from the operation's".into());
+                }
+                if id.is_empty() || id.len() > 64 || digest.len() != 64 || version == 0 {
+                    return Err("the grant identity is malformed".into());
+                }
+                if net != NET_SCOPE_OFFLINE && net != NET_SCOPE_INSTALL {
+                    return Err("unsupported network scope in a grant".into());
+                }
+                if approval != APPROVAL_ASK && approval != APPROVAL_AUTO {
+                    return Err("unsupported approval behaviour in a grant".into());
+                }
+                Some(GrantSeal {
+                    grant_id: id,
+                    version,
+                    digest,
+                    net,
+                    approval,
+                })
+            }
+        };
+        if fs_scope != FS_SCOPE_SCRATCH && fs_scope != FS_SCOPE_WORKSPACE {
+            return Err("unsupported filesystem scope for a process scope".into());
+        }
+        Ok(Self { fs_scope, grant })
+    }
+}
 /// Filesystem scopes a process scope can seal. `full` is deliberately absent: not implemented.
 pub const FS_SCOPE_SCRATCH: &str = "scratch";
 pub const FS_SCOPE_WORKSPACE: &str = "workspace";
@@ -225,9 +310,42 @@ pub struct ProcessScopeBinding {
     /// this field existed deserialize as `scratch`.
     #[serde(default = "default_fs_scope")]
     pub fs_scope: String,
+    /// Identity of the standing grant this command runs under; empty = no grant (legacy).
+    #[serde(default)]
+    pub grant_id: String,
+    #[serde(default)]
+    pub grant_version: u64,
+    #[serde(default)]
+    pub grant_digest: String,
+    /// `offline` | `install`; meaningful only with a grant.
+    #[serde(default)]
+    pub net_scope: String,
+    /// `ask` | `auto`; meaningful only with a grant.
+    #[serde(default)]
+    pub approval: String,
 }
 
 fn process_scope_canonical(b: &ProcessScopeBinding) -> String {
+    if !b.grant_id.is_empty() {
+        return canonical_json(&serde_json::json!({
+            "domain": PROCESS_SCOPE_DOMAIN_V3,
+            "commandId": b.command_id,
+            "taskInstanceId": b.task_instance_id,
+            "attemptId": b.attempt_id,
+            "leaseEpoch": b.lease_epoch,
+            "storeIncarnation": b.store_incarnation,
+            "rootDigest": b.root_digest,
+            "maxWallMs": b.max_wall_ms,
+            "approverId": b.approver_id,
+            "independent": b.independent,
+            "fsScope": b.fs_scope,
+            "netScope": b.net_scope,
+            "approval": b.approval,
+            "grantId": b.grant_id,
+            "grantVersion": b.grant_version,
+            "grantDigest": b.grant_digest,
+        }));
+    }
     if b.fs_scope != FS_SCOPE_SCRATCH {
         return canonical_json(&serde_json::json!({
             "domain": PROCESS_SCOPE_DOMAIN_V2,
@@ -1352,6 +1470,29 @@ impl Kernel {
         max_wall_ms: u64,
         fs_scope: &str,
     ) -> KernelResult<ProcessScopeBinding> {
+        self.bind_process_scope_declared(
+            command_id,
+            approver_id,
+            independent,
+            approved_root_digest,
+            max_wall_ms,
+            &DeclaredScope {
+                fs_scope: fs_scope.to_owned(),
+                grant: None,
+            },
+        )
+    }
+
+    /// As [`Self::bind_process_scope`], sealing the declared filesystem scope and standing grant.
+    pub fn bind_process_scope_declared(
+        &mut self,
+        command_id: &str,
+        approver_id: &str,
+        independent: bool,
+        approved_root_digest: &str,
+        max_wall_ms: u64,
+        declared: &DeclaredScope,
+    ) -> KernelResult<ProcessScopeBinding> {
         Self::critical(&self.lock_file, &self.in_process, || {
             Self::bind_process_scope_inner(
                 &mut self.store,
@@ -1361,7 +1502,7 @@ impl Kernel {
                 independent,
                 approved_root_digest,
                 max_wall_ms,
-                fs_scope,
+                declared,
             )
         })
     }
@@ -1375,9 +1516,10 @@ impl Kernel {
         independent: bool,
         approved_root_digest: &str,
         max_wall_ms: u64,
-        fs_scope: &str,
+        declared: &DeclaredScope,
     ) -> KernelResult<ProcessScopeBinding> {
         {
+            let fs_scope = declared.fs_scope.as_str();
             if fs_scope != FS_SCOPE_SCRATCH && fs_scope != FS_SCOPE_WORKSPACE {
                 return Err(refuse(
                     KernelErrorCode::ScopeRefused,
@@ -1430,6 +1572,27 @@ impl Kernel {
                 approver_id: approver_id.chars().take(64).collect(),
                 independent,
                 fs_scope: fs_scope.to_owned(),
+                grant_id: declared
+                    .grant
+                    .as_ref()
+                    .map(|g| g.grant_id.clone())
+                    .unwrap_or_default(),
+                grant_version: declared.grant.as_ref().map(|g| g.version).unwrap_or(0),
+                grant_digest: declared
+                    .grant
+                    .as_ref()
+                    .map(|g| g.digest.clone())
+                    .unwrap_or_default(),
+                net_scope: declared
+                    .grant
+                    .as_ref()
+                    .map(|g| g.net.clone())
+                    .unwrap_or_default(),
+                approval: declared
+                    .grant
+                    .as_ref()
+                    .map(|g| g.approval.clone())
+                    .unwrap_or_default(),
             };
             let seal = hmac_seal_hex(&key_hex, &process_scope_canonical(&b))?;
             let json = canonical_json(&serde_json::to_value(&b).map_err(|_| {
@@ -1883,6 +2046,11 @@ mod process_scope_compat_tests {
             approver_id: "a".into(),
             independent: false,
             fs_scope: fs.into(),
+            grant_id: String::new(),
+            grant_version: 0,
+            grant_digest: String::new(),
+            net_scope: String::new(),
+            approval: String::new(),
         }
     }
 
@@ -1914,5 +2082,109 @@ mod process_scope_compat_tests {
         let b: ProcessScopeBinding = serde_json::from_str(old).unwrap();
         assert_eq!(b.fs_scope, FS_SCOPE_SCRATCH);
         assert_eq!(process_scope_canonical(&b), V1_CANONICAL);
+    }
+
+    fn granted(fs: &str, net: &str, ap: &str) -> ProcessScopeBinding {
+        let mut b = scope(fs);
+        b.grant_id = "grt_0123456789abcdef".into();
+        b.grant_version = 4;
+        b.grant_digest = "d".repeat(64);
+        b.net_scope = net.into();
+        b.approval = ap.into();
+        b
+    }
+
+    #[test]
+    fn a_granted_scope_seals_the_grant_identity_and_every_axis_under_its_own_domain() {
+        let base = process_scope_canonical(&granted("workspace", "offline", "auto"));
+        assert!(base.contains(PROCESS_SCOPE_DOMAIN_V3), "{base}");
+        for needle in [
+            r#""fsScope":"workspace""#,
+            r#""netScope":"offline""#,
+            r#""approval":"auto""#,
+            r#""grantId":"grt_0123456789abcdef""#,
+            r#""grantVersion":4"#,
+        ] {
+            assert!(base.contains(needle), "{needle} missing in {base}");
+        }
+        // changing ANY sealed axis or identity field changes the sealed bytes
+        let variants: Vec<ProcessScopeBinding> = vec![
+            granted("scratch", "offline", "auto"),
+            granted("workspace", "install", "auto"),
+            granted("workspace", "offline", "ask"),
+            {
+                let mut b = granted("workspace", "offline", "auto");
+                b.grant_version = 5;
+                b
+            },
+            {
+                let mut b = granted("workspace", "offline", "auto");
+                b.grant_digest = "e".repeat(64);
+                b
+            },
+            {
+                let mut b = granted("workspace", "offline", "auto");
+                b.grant_id = "grt_other".into();
+                b
+            },
+        ];
+        for v in variants {
+            assert_ne!(process_scope_canonical(&v), base);
+        }
+        // a granted scratch scope is NOT the legacy scratch scope
+        assert_ne!(
+            process_scope_canonical(&granted("scratch", "offline", "auto")),
+            V1_CANONICAL
+        );
+        // legacy and M1 forms are untouched
+        assert_eq!(process_scope_canonical(&scope("scratch")), V1_CANONICAL);
+        assert!(process_scope_canonical(&scope("workspace")).contains(PROCESS_SCOPE_DOMAIN_V2));
+    }
+
+    #[test]
+    fn the_declared_scope_is_read_strictly_from_the_reviewed_operation() {
+        use serde_json::json;
+        let ok = json!({"execFsScope": "workspace", "grant": {
+            "grantId": "grt_a", "version": 2, "digest": "d".repeat(64),
+            "fsScope": "workspace", "netScope": "install", "approval": "ask"}});
+        let d = DeclaredScope::from_operation(&ok).unwrap();
+        assert_eq!(d.fs_scope, "workspace");
+        assert_eq!(d.grant.unwrap().approval, "ask");
+        // absent = scratch, no grant (every operation that predates grants)
+        assert_eq!(
+            DeclaredScope::from_operation(&json!({"kind": "proc.run"})).unwrap(),
+            DeclaredScope::scratch()
+        );
+        // inconsistent or malformed declarations are errors, never defaults
+        let bad = |g: serde_json::Value, fs: Option<&str>| {
+            let mut op = json!({ "grant": g });
+            if let Some(f) = fs {
+                op["execFsScope"] = f.into();
+            }
+            DeclaredScope::from_operation(&op).is_err()
+        };
+        let base = |f: &str, n: &str, a: &str| json!({"grantId": "grt_a", "version": 1, "digest": "d".repeat(64), "fsScope": f, "netScope": n, "approval": a});
+        assert!(
+            bad(base("workspace", "offline", "auto"), None),
+            "fs differs from the operation's"
+        );
+        assert!(
+            bad(base("scratch", "controlled", "auto"), None),
+            "network scope not implemented"
+        );
+        assert!(bad(base("scratch", "full", "auto"), None));
+        assert!(bad(base("scratch", "offline", "maybe"), None));
+        assert!(bad(json!({"grantId": "grt_a"}), None), "incomplete");
+        assert!(bad(
+            json!({"grantId": "", "version": 1, "digest": "d".repeat(64), "fsScope": "scratch", "netScope": "offline", "approval": "auto"}),
+            None
+        ));
+        assert!(bad(
+            json!({"grantId": "grt_a", "version": 0, "digest": "d".repeat(64), "fsScope": "scratch", "netScope": "offline", "approval": "auto"}),
+            None
+        ));
+        assert!(DeclaredScope::from_operation(&json!({"execFsScope": "full"})).is_err());
+        assert!(DeclaredScope::from_operation(&json!({"execFsScope": 3})).is_err());
+        assert!(!bad(base("scratch", "offline", "auto"), None));
     }
 }

@@ -1,6 +1,7 @@
-import { FolderGit2, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
+import { useState } from "react";
+import { FolderGit2, FolderOpen, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
 import { useNexus } from "../../state/NexusContext";
-import type { WorkspaceMode } from "../../lib/contracts";
+import type { ProjectView, WorkspaceMode } from "../../lib/contracts";
 import { Alert, Badge, Button, EmptyState } from "../../components/ui/primitives";
 
 /**
@@ -8,6 +9,104 @@ import { Alert, Badge, Button, EmptyState } from "../../components/ui/primitives
  * commit pin, a write scope, a credential) is an operator action on the broker, never
  * something the Desktop can do or request.
  */
+
+const FS_LABEL: Record<string, string> = {
+  scratch: "Commands work on a throw-away copy",
+  workspace: "Commands change the task's working copy",
+};
+const NET_LABEL: Record<string, string> = { offline: "No network", install: "Network for dependency installs" };
+const APPROVAL_LABEL: Record<string, string> = { auto: "Runs without asking (inside these permissions)", ask: "Asks me first (approver terminal)" };
+const EXPIRY_CHOICES: { label: string; secs: number | null }[] = [
+  { label: "until I revoke it", secs: null },
+  { label: "1 day", secs: 86_400 },
+  { label: "7 days", secs: 7 * 86_400 },
+  { label: "30 days", secs: 30 * 86_400 },
+];
+
+/** A short summary of the project's standing permissions (nothing here changes them). */
+export function grantSummary(p: ProjectView): string {
+  const g = p.grant;
+  if (!g) return "Default permissions";
+  const s = g.status === "active" ? "" : ` · ${g.status}`;
+  return `${g.fs === "workspace" ? "In-place commands" : "Copy only"} · ${g.net === "install" ? "installs online" : "offline"} · ${g.approval === "ask" ? "asks" : "automatic"}${s}`;
+}
+
+/**
+ * The user's standing permissions for one project. Choosing and pressing Apply only SENDS the choice: the
+ * native backend shows the exact consent text in its own dialog and nothing changes without a "yes" there.
+ * The model cannot create, widen or renew a permission; this panel is the only Desktop path to one.
+ */
+function PermissionsEditor({ p }: { p: ProjectView }) {
+  const { setProjectPermissions, endProjectPermissions, setupBusy } = useNexus();
+  const [open, setOpen] = useState(false);
+  const g = p.grant;
+  const [fs, setFs] = useState<string>(g?.fs ?? "scratch");
+  const [net, setNet] = useState<string>(g?.net ?? "offline");
+  const [approval, setApproval] = useState<string>(g?.approval ?? "auto");
+  const [expiry, setExpiry] = useState<number>(0);
+  const busy = setupBusy === "project";
+  const inPlaceBlocked = p.workspaceMode === "direct";
+  return (
+    <div>
+      <Badge tone={g && g.status !== "active" ? "warning" : g ? "purple" : "neutral"} title="What commands of this project's tasks may do">
+        {grantSummary(p)}
+      </Badge>{" "}
+      <Button size="sm" variant="ghost" icon={<ShieldCheck size={13} />} aria-label={`Permissions for ${p.label}`} onClick={() => setOpen(!open)}>
+        Permissions…
+      </Button>
+      {open && (
+        <div className="nv-stack" style={{ gap: 6, marginTop: 6 }} role="group" aria-label={`Permissions for ${p.label}`}>
+          <label className="nv-note">
+            Commands{" "}
+            <select className="nv-select nv-select--quiet" aria-label={`Command filesystem scope for ${p.label}`} value={fs} onChange={(e) => setFs(e.target.value)}>
+              <option value="scratch">{FS_LABEL.scratch}</option>
+              <option value="workspace" disabled={inPlaceBlocked}>{FS_LABEL.workspace}{inPlaceBlocked ? " (not available for direct editing yet)" : ""}</option>
+            </select>
+          </label>
+          <label className="nv-note">
+            Network{" "}
+            <select className="nv-select nv-select--quiet" aria-label={`Network scope for ${p.label}`} value={net} onChange={(e) => setNet(e.target.value)}>
+              <option value="offline">{NET_LABEL.offline}</option>
+              <option value="install">{NET_LABEL.install}</option>
+            </select>
+          </label>
+          <label className="nv-note">
+            Approval{" "}
+            <select className="nv-select nv-select--quiet" aria-label={`Approval behaviour for ${p.label}`} value={approval} onChange={(e) => setApproval(e.target.value)}>
+              <option value="auto">{APPROVAL_LABEL.auto}</option>
+              <option value="ask">{APPROVAL_LABEL.ask}</option>
+            </select>
+          </label>
+          <label className="nv-note">
+            Valid for{" "}
+            <select className="nv-select nv-select--quiet" aria-label={`Lifetime of the permissions for ${p.label}`} value={expiry} onChange={(e) => setExpiry(Number(e.target.value))}>
+              {EXPIRY_CHOICES.map((c, i) => (
+                <option key={c.label} value={i}>{c.label}</option>
+              ))}
+            </select>
+          </label>
+          <div>
+            <Button size="sm" variant="primary" disabled={busy} onClick={() => void setProjectPermissions(p.projectId, { fs, net, approval, expiresInSecs: EXPIRY_CHOICES[expiry]?.secs ?? null })}>
+              Apply…
+            </Button>{" "}
+            {g && g.status !== "revoked" && (
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => void endProjectPermissions(p.projectId, false)}>
+                Revoke
+              </Button>
+            )}{" "}
+            {g && (
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => void endProjectPermissions(p.projectId, true)}>
+                Use defaults
+              </Button>
+            )}
+          </div>
+          {g && <p className="nv-note">Version {g.version}{g.expiresAtMs ? ` · expires ${new Date(g.expiresAtMs).toLocaleString()}` : ""} · applies to new tasks only.</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OpenedProjects() {
   const { projects, openProject, refreshProject, forgetProject, setProjectPolicy, setProjectEditMode, refreshProjects, setupBusy, setupError } = useNexus();
   const managed = projects.filter((p) => p.managed);
@@ -38,6 +137,7 @@ function OpenedProjects() {
               <th>Project</th>
               <th>Type</th>
               <th>Workspace</th>
+              <th>Permissions</th>
               <th>Snapshot</th>
               <th />
             </tr>
@@ -70,6 +170,9 @@ function OpenedProjects() {
                     </select>
                   </label>
                   {p.workspaceMode === "direct" ? <Badge tone="warning" title="Changes are written to your real files">edits your files</Badge> : null}
+                </td>
+                <td>
+                  <PermissionsEditor p={p} />
                 </td>
                 <td className="nv-note">
                   {new Date(p.snapshotAtMs).toLocaleString()}

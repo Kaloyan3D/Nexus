@@ -59,6 +59,8 @@
     "allow-run-engine",
     "allow-intent-resume",
     "allow-run-resumable",
-    "allow-project-set-edit-mode"
+    "allow-project-set-edit-mode",
+    "allow-project-set-grant",
+    "allow-project-end-grant"
   ]
 }

@@ -75,12 +75,16 @@ pub const POLICY_INDEPENDENT: &str = "human-required:independent";
 /// level, and a store that ever ran with human approval can never be restarted
 /// at this one (it is ranked BELOW both human levels).
 pub const POLICY_AUTOMATED: &str = "automated:workspace-policy/v1";
+/// Permissions milestone: approvals are decided per task by what the project's standing grant says -
+/// automatically by the workspace policy (`auto`) or by the independent human approver (`ask`). Same
+/// strictness rank as `POLICY_AUTOMATED` (it adds a human option and removes none).
+pub const POLICY_UNIFIED: &str = "unified:standing-grants/v1";
 
 fn policy_rank(p: Option<&str>) -> u8 {
     match p {
         Some(POLICY_INDEPENDENT) => 3,
         Some(POLICY_TEST_ONLY) => 2,
-        Some(POLICY_AUTOMATED) => 1,
+        Some(POLICY_AUTOMATED) | Some(POLICY_UNIFIED) => 1,
         Some(_) => 4, // unknown value: treat as strictest, never lower it
         None => 0,
     }
@@ -452,7 +456,7 @@ impl Kernel {
                             d.independent,
                             &Self::request_field(&row, "workspaceRootDigest"),
                             d.scope_cap,
-                            &Self::exec_fs_scope_of(&row),
+                            &Self::declared_of(&row)?,
                         )?;
                     }
                     _ => {
@@ -493,7 +497,10 @@ impl Kernel {
     ) -> KernelResult<ApprovalRow> {
         Self::critical(&self.lock_file, &self.in_process, || {
             let now = now_ms();
-            if self.store.approval_policy_get()?.as_deref() != Some(POLICY_AUTOMATED) {
+            if !matches!(
+                self.store.approval_policy_get()?.as_deref(),
+                Some(POLICY_AUTOMATED) | Some(POLICY_UNIFIED)
+            ) {
                 return Err(refuse(
                     KernelErrorCode::ScopeRefused,
                     "automated policy decisions are only available in a store latched at the automated workspace policy",
@@ -514,6 +521,18 @@ impl Kernel {
                     KernelErrorCode::BindingMismatch,
                     "the policy evaluated a different request than the pending approval",
                 ));
+            }
+            // A project whose standing grant says "ask" is decided by a person, never by the policy -
+            // whatever the daemon's caller asked for. A malformed declaration is refused.
+            match Self::grant_approval(&row) {
+                Ok(Some(ap)) if ap == crate::tools::APPROVAL_AUTO => {}
+                Ok(None) => {}
+                _ => {
+                    return Err(refuse(
+                        KernelErrorCode::ScopeRefused,
+                        "this operation belongs to a project whose permissions require a person's approval; the automated policy cannot decide it",
+                    ))
+                }
             }
             Self::approval_authority(&mut self.store, self.witness.as_ref(), &row, now)?;
             let approver_id = format!("automated-policy:{}", d.policy_id);
@@ -557,7 +576,7 @@ impl Kernel {
                         false,
                         &Self::request_field(&row, "workspaceRootDigest"),
                         d.scope_cap,
-                        &Self::exec_fs_scope_of(&row),
+                        &Self::declared_of(&row)?,
                     )?;
                 }
                 _ => return Err(refuse(KernelErrorCode::ScopeRefused, "unsupported scope")),
@@ -582,18 +601,34 @@ impl Kernel {
         })
     }
 
-    /// The filesystem scope the reviewed operation declares (`operation.execFsScope`, sealed in the request
-    /// digest the approver or the automated policy decided on). Absent = `scratch`, so every operation
-    /// that does not state a scope is exactly what it was before.
-    fn exec_fs_scope_of(row: &ApprovalRow) -> String {
-        serde_json::from_str::<serde_json::Value>(&row.request_json)
-            .ok()
-            .and_then(|v| {
-                v.pointer("/operation/execFsScope")
-                    .and_then(|x| x.as_str())
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| crate::tools::FS_SCOPE_SCRATCH.to_owned())
+    /// The scope the reviewed operation declares (`operation.execFsScope`, `operation.grant`), sealed in
+    /// the request digest the approver or the automated policy decided on. Absent = scratch, no grant, so
+    /// every operation that does not state a scope is exactly what it was before. A malformed declaration
+    /// refuses the decision.
+    fn declared_of(row: &ApprovalRow) -> KernelResult<crate::tools::DeclaredScope> {
+        let v = serde_json::from_str::<serde_json::Value>(&row.request_json)
+            .map_err(|_| refuse(KernelErrorCode::ScopeRefused, "unreadable approval request"))?;
+        match v.get("operation") {
+            Some(op) => crate::tools::DeclaredScope::from_operation(op)
+                .map_err(|m| refuse(KernelErrorCode::ScopeRefused, &m)),
+            None => Ok(crate::tools::DeclaredScope::scratch()),
+        }
+    }
+
+    /// `operation.grant.approval` of a request: `Ok(None)` when the operation runs under no grant.
+    fn grant_approval(row: &ApprovalRow) -> KernelResult<Option<String>> {
+        let v = serde_json::from_str::<serde_json::Value>(&row.request_json)
+            .map_err(|_| refuse(KernelErrorCode::ScopeRefused, "unreadable approval request"))?;
+        match v.pointer("/operation/grant") {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(g) => match g.get("approval").and_then(|x| x.as_str()) {
+                Some(a) => Ok(Some(a.to_owned())),
+                None => Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "malformed grant declaration",
+                )),
+            },
+        }
     }
 
     fn request_field(row: &ApprovalRow, key: &str) -> String {

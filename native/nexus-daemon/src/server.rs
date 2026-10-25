@@ -137,6 +137,10 @@ pub struct Daemon {
     /// created with (`scratch` = the A3.4 behaviour). It is frozen into each copy's identity record at
     /// creation; nothing a caller or model sends can change the scope of an existing task.
     pub isolated_exec_scope: nexus_tools::exec_contract::FsScope,
+    /// Permissions milestone: the project's standing grant decides what its tasks may do (filesystem,
+    /// network, approval behaviour). Without this a project that has a grant is refused, never run with
+    /// defaults.
+    pub standing_grants: bool,
     pub command_policy: nexus_tools::process::CommandPolicy,
     pub run_root: std::path::PathBuf,
     pub sandbox_caps: Option<nexus_tools::sandbox::SandboxCapabilities>,
@@ -1204,6 +1208,14 @@ fn approval_state_view(r: &nexus_store::ApprovalRow, full: bool) -> serde_json::
         "decisionKind": decision.get("humanAuth").and_then(|h| h.get("kind")),
         "grantRequestId": r.grant_request_id,
     });
+    // Audit: the standing grant (identity + axes) the operation was reviewed under, when it had one.
+    if let Some(g) = req
+        .get("operation")
+        .and_then(|o| o.get("grant"))
+        .filter(|g| !g.is_null())
+    {
+        v["grant"] = g.clone();
+    }
     if full {
         v["request"] = req;
     }
@@ -1285,7 +1297,11 @@ impl Default for AutonomousConfig {
     }
 }
 
-fn autonomous_policy_digest(c: &AutonomousConfig, in_place_task_copies: bool) -> String {
+fn autonomous_policy_digest(
+    c: &AutonomousConfig,
+    in_place_task_copies: bool,
+    standing_grants: bool,
+) -> String {
     let mut v = serde_json::json!({
         "id": AUTONOMOUS_POLICY_ID,
         "maxEditsPerTask": c.max_edits_per_task,
@@ -1299,7 +1315,63 @@ fn autonomous_policy_digest(c: &AutonomousConfig, in_place_task_copies: bool) ->
         // place. The digest differs ONLY then, so a scratch-only daemon's digest is unchanged.
         v["execFsScopes"] = serde_json::json!(["scratch", "workspace"]);
     }
+    if standing_grants {
+        // The policy additionally enforces each task's frozen standing grant (network, filesystem
+        // scope, validity) and never decides what a grant reserves for a person.
+        v["standingGrants"] = serde_json::json!("v1");
+    }
     sha256_hex_str(&nexus_contracts::canonical_json(&v))
+}
+
+/// Is the operation inside the permissions its task froze? (Validity is read from the registry now.)
+fn check_within_grant(
+    daemon: &Daemon,
+    sub: &nexus_kernel::ApprovalSubmission,
+) -> Result<Option<nexus_tools::grant::Frozen>, String> {
+    let frozen = grant_may_act(daemon, &sub.task_instance_id)?;
+    let declared = sub.operation.get("grant").filter(|g| !g.is_null());
+    let Some(f) = frozen else {
+        return match declared {
+            None => Ok(None),
+            Some(_) => Err("the operation names permissions this task does not hold".into()),
+        };
+    };
+    if declared != Some(&grant_declaration(&f)) {
+        return Err(
+            "the operation's permissions are not the ones this task was started under".into(),
+        );
+    }
+    if sub.scope == "process" {
+        let sandbox = sub.operation.get("sandbox");
+        match sandbox
+            .and_then(|s| s.get("network"))
+            .and_then(|v| v.as_str())
+        {
+            Some("none") => {}
+            Some("install") => {
+                if f.net_scope() != nexus_tools::exec_contract::NetScope::Install {
+                    return Err("installing dependencies (network) is not permitted by this project's permissions".into());
+                }
+            }
+            _ => {
+                return Err(
+                    "this command would use the network in a way the permissions do not allow"
+                        .into(),
+                )
+            }
+        }
+        let declared_fs = sub
+            .operation
+            .get("execFsScope")
+            .and_then(|v| v.as_str())
+            .unwrap_or("scratch");
+        if declared_fs != f.fs {
+            return Err(
+                "the command's filesystem scope is outside the project's permissions".into(),
+            );
+        }
+    }
+    Ok(Some(f))
 }
 
 /// Evaluate `autonomous-workspace/v1` for one pending approval. Inputs are facts
@@ -1341,6 +1413,15 @@ fn evaluate_autonomous_policy(
         .get("projectId")
         .and_then(|v| v.as_str())
         .map(str::to_owned);
+    // Standing grant: valid, declared by the operation exactly as this task froze it, and the operation
+    // inside its network/filesystem axes. Reserved-for-a-person grants are never decided here.
+    let frozen = check_within_grant(daemon, sub)?;
+    if frozen
+        .as_ref()
+        .is_some_and(|g| g.approval_mode() != nexus_tools::exec_contract::Approval::Auto)
+    {
+        return Err("the project's permissions reserve this decision for a person".into());
+    }
     let (edits, commands) = daemon
         .autonomous_counters
         .lock()
@@ -1384,10 +1465,14 @@ fn evaluate_autonomous_policy(
             if post > cfg.max_write_bytes {
                 return Err("the resulting file is larger than the workspace policy allows".into());
             }
-            Ok(serde_json::json!({
+            let mut facts = serde_json::json!({
                 "copy": task, "project": project, "tool": sub.tool_id, "path": path,
                 "postImageBytes": post, "editsSoFar": edits, "maxEdits": cfg.max_edits_per_task,
-            }))
+            });
+            if let Some(g) = &frozen {
+                facts["grant"] = grant_declaration(g);
+            }
+            Ok(facts)
         }
         ("proc.run", "process") => {
             if commands >= cfg.max_commands_per_task {
@@ -1399,7 +1484,10 @@ fn evaluate_autonomous_policy(
             let net = sandbox
                 .and_then(|s| s.get("network"))
                 .and_then(|v| v.as_str());
-            let installs_ok = meta.get("installs").and_then(|v| v.as_bool()) == Some(true);
+            let installs_ok = match &frozen {
+                Some(g) => g.net_scope() == nexus_tools::exec_contract::NetScope::Install,
+                None => meta.get("installs").and_then(|v| v.as_bool()) == Some(true),
+            };
             let net_ok = match net {
                 Some("none") => true,
                 // dependency installation: the only networked class, only where the
@@ -1446,6 +1534,9 @@ fn evaluate_autonomous_policy(
             });
             if task_scope != nexus_tools::exec_contract::FsScope::Scratch {
                 facts["fsScope"] = task_scope.as_str().into();
+            }
+            if let Some(g) = &frozen {
+                facts["grant"] = grant_declaration(g);
             }
             Ok(facts)
         }
@@ -1505,6 +1596,12 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     if let Some(r) = write_scope_refusal(daemon, &request) {
         return with_id(r, &req.id);
     }
+    // Standing grant: an expired, revoked or replaced grant is rejected here, before anything is
+    // proposed to anyone (the same check runs again at execution time).
+    let frozen = match grant_may_act(daemon, &request.task_instance_id) {
+        Ok(f) => f,
+        Err(m) => return refuse("grant-refused", &m),
+    };
     let ceiling = nexus_tools::ToolBudgets::ceiling();
     let mut kernel = match lock_kernel(daemon, &req.id) {
         Ok(k) => k,
@@ -1605,6 +1702,9 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                 if !pv.creates_dirs.is_empty() {
                     op["createsDirs"] = serde_json::json!(pv.creates_dirs);
                 }
+                if let Some(g) = &frozen {
+                    op["grant"] = grant_declaration(g);
+                }
                 op
             },
             preview,
@@ -1628,6 +1728,20 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             fs_scope: task_fs_scope(daemon, &request.task_instance_id)
                 .as_str()
                 .to_owned(),
+            grant_id: frozen
+                .as_ref()
+                .map(|g| g.grant_id.clone())
+                .unwrap_or_default(),
+            grant_version: frozen.as_ref().map(|g| g.version).unwrap_or(0),
+            grant_digest: frozen
+                .as_ref()
+                .map(|g| g.digest.clone())
+                .unwrap_or_default(),
+            net_scope: frozen.as_ref().map(|g| g.net.clone()).unwrap_or_default(),
+            approval: frozen
+                .as_ref()
+                .map(|g| g.approval.clone())
+                .unwrap_or_default(),
         };
         let prepared = match nexus_tools::prepare_process(
             request.clone(),
@@ -1673,6 +1787,9 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             op["sandbox"]["writeBack"] = "in-place-task-copy".into();
             op["filesystemEffects"] = "files the command creates, changes or deletes persist in this task's working copy (not the user's folder); .git is read-only; secret-shaped top-level entries are hidden".into();
         }
+        if let Some(g) = &frozen {
+            op["grant"] = grant_declaration(g);
+        }
         sub_common(
             "process",
             &prepared,
@@ -1702,7 +1819,24 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     match kernel.create_approval(&sub) {
         Ok(row) => {
             let mut row = row;
-            if let Some(cfg) = &daemon.autonomous {
+            let asks = frozen
+                .as_ref()
+                .is_some_and(|g| g.approval_mode() == nexus_tools::exec_contract::Approval::Ask);
+            if asks {
+                // The project's grant reserves this decision for a person. It must still lie WITHIN the
+                // grant (a person cannot approve what the grant does not cover); then it stays pending
+                // for the independent approver. The automated policy is never consulted, and the
+                // Kernel would refuse it anyway.
+                if let Err(why) = check_within_grant(daemon, &sub) {
+                    let _ = kernel.revoke_approval(&row.approval_id, "outside-grant");
+                    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                    return fail(
+                        &req.id,
+                        "grant-refused",
+                        format!("this operation is outside the project's permissions: {why}"),
+                    );
+                }
+            } else if let Some(cfg) = &daemon.autonomous {
                 // A6.1.4: decide by automated workspace policy; never by a human.
                 match evaluate_autonomous_policy(daemon, cfg, &sub) {
                     Ok(facts) => {
@@ -1712,6 +1846,7 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                                 cfg,
                                 daemon.isolated_exec_scope
                                     == nexus_tools::exec_contract::FsScope::Workspace,
+                                daemon.standing_grants,
                             ),
                             request_digest: row.request_digest.clone(),
                             scope_cap: if sub.scope == "process" {
@@ -2150,6 +2285,9 @@ struct DaemonProcessHooks<'a> {
     daemon: &'a Daemon,
     verified: &'a nexus_kernel::VerifiedToolGrant,
     last_seq: i64,
+    /// The task whose standing grant must stay valid while the process runs.
+    task: String,
+    last_grant_check: Option<std::time::Instant>,
 }
 
 impl nexus_tools::process::ProcessHooks for DaemonProcessHooks<'_> {
@@ -2187,7 +2325,24 @@ impl nexus_tools::process::ProcessHooks for DaemonProcessHooks<'_> {
                 nexus_tools::ToolErrorCode::Revoked,
                 format!("authority revoked ({})", e.code.as_str()),
             )
-        })
+        })?;
+        drop(k);
+        // Standing grant: a revoked / expired / replaced grant also ends a command that is already
+        // running (the supervisor polls this fence), not only the next operation. The registry is read at
+        // most a few times a second.
+        let due = self
+            .last_grant_check
+            .is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(250));
+        if due {
+            self.last_grant_check = Some(std::time::Instant::now());
+            if let Err(m) = grant_may_act(self.daemon, &self.task) {
+                return Err(nexus_tools::ToolError::new(
+                    nexus_tools::ToolErrorCode::Revoked,
+                    format!("permissions ended: {m}"),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2469,6 +2624,7 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     let mut project_id: Option<String> = None;
     let mut project_write_allow: Vec<String> = Vec::new();
     let mut project_installs = false;
+    let mut task_permissions: Option<nexus_tools::grant::Frozen> = None;
     let mut expected_commit = expected_commit;
     let canon = if let Some((dir, trust)) = &daemon.project_registry {
         if req.params.get("sourceRoot").is_some() {
@@ -2509,9 +2665,20 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                 );
             }
         }
+        // Standing grant: frozen NOW into the task's identity record; later changes only affect new tasks.
+        match resolve_task_permissions(daemon, &rec) {
+            Ok(f) => task_permissions = f,
+            Err((code, msg)) => {
+                daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                return fail(&req.id, code, msg);
+            }
+        }
         expected_commit = Some(rec.pinned_commit.clone());
         project_write_allow = rec.write_allow.clone();
-        project_installs = rec.installs;
+        project_installs = match &task_permissions {
+            Some(g) => g.net_scope() == nexus_tools::exec_contract::NetScope::Install,
+            None => rec.installs,
+        };
         project_id = Some(pid);
         canon
     } else {
@@ -2585,7 +2752,12 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         "installs": project_installs,
         // Frozen at creation, from the operator's daemon setting (never from the caller): the
         // filesystem scope commands in this task run under. Absent in a record = scratch.
-        "execFsScope": daemon.isolated_exec_scope.as_str(),
+        "execFsScope": match &task_permissions {
+            Some(g) => g.fs_scope().as_str(),
+            None => daemon.isolated_exec_scope.as_str(),
+        },
+        // The standing grant this task holds, frozen (absent = none). Written once; never rewritten.
+        "grant": task_permissions,
         "createdAtMs": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -2617,7 +2789,11 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     // of the reviewable change (the same names the stager and the effect report already treat as
     // toolchain artifacts), so the copy's own git excludes them - written here, outside the sandbox
     // (which sees `.git` read-only).
-    if daemon.isolated_exec_scope == nexus_tools::exec_contract::FsScope::Workspace {
+    let effective_scope = match &task_permissions {
+        Some(g) => g.fs_scope(),
+        None => daemon.isolated_exec_scope,
+    };
+    if effective_scope == nexus_tools::exec_contract::FsScope::Workspace {
         let ex = info.path.join(".git").join("info");
         let res = std::fs::create_dir_all(&ex).and_then(|_| {
             use std::io::Write;
@@ -2647,7 +2823,7 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                 "path": info.path.to_string_lossy(),
                 "sourceCommit": info.source.commit,
                 "sourceRepoId": info.source.repo_id,
-                "execFsScope": daemon.isolated_exec_scope.as_str(),
+                "execFsScope": effective_scope.as_str(),
             }
         }),
     )
@@ -2674,10 +2850,136 @@ fn task_fs_scope(daemon: &Daemon, task: &str) -> nexus_tools::exec_contract::FsS
         // Direct + in-place execution is a later stage; it is never inferred.
         return FsScope::Scratch;
     }
+    // a task that holds a standing grant runs under the grant's filesystem scope
+    if let Some(g) = meta.get("grant").filter(|g| !g.is_null()) {
+        return match g.get("fs").and_then(|v| v.as_str()) {
+            Some("workspace") => FsScope::Workspace,
+            _ => FsScope::Scratch,
+        };
+    }
     match meta.get("execFsScope").and_then(|v| v.as_str()) {
         Some("workspace") => FsScope::Workspace,
         _ => FsScope::Scratch,
     }
+}
+
+// ---- standing grants (permissions milestone) --------------------------------------------------
+
+fn now_ms_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// The permissions a NEW task of `rec` will hold, checked against what THIS daemon can really provide.
+/// `Ok(None)` = no grant (the long-standing defaults). An expired or revoked grant, a grant this daemon
+/// does not honour, or an axis it cannot provide, is a refusal - never a silent default.
+fn resolve_task_permissions(
+    daemon: &Daemon,
+    rec: &nexus_tools::registry::ProjectRecord,
+) -> Result<Option<nexus_tools::grant::Frozen>, (&'static str, String)> {
+    use nexus_tools::exec_contract::{Approval, FsScope, NetScope};
+    use nexus_tools::registry::{resolve_permissions, Resolved};
+    if rec.grant.is_some() && !daemon.standing_grants {
+        return Err((
+            "scope-refused",
+            "this project has standing permissions that this daemon does not honour (it was not started with --standing-grants); nothing was started".into(),
+        ));
+    }
+    let frozen = match resolve_permissions(rec, now_ms_i64()) {
+        Ok(Resolved::Legacy) => return Ok(None),
+        Ok(Resolved::Granted(f)) => f,
+        Err(e) => return Err(("grant-refused", e.message)),
+    };
+    // belt and braces: values this build cannot enforce are refused even if a registry carries them
+    if !matches!(frozen.fs_scope(), FsScope::Scratch | FsScope::Workspace)
+        || !matches!(frozen.net_scope(), NetScope::Offline | NetScope::Install)
+        || nexus_tools::exec_contract::Approval::parse(&frozen.approval).is_none()
+    {
+        return Err((
+            "scope-refused",
+            "the project's permissions name a capability this build does not provide".into(),
+        ));
+    }
+    if frozen.fs_scope() == FsScope::Workspace
+        && (daemon.autonomous.is_none() || !daemon.process_enabled)
+    {
+        return Err((
+            "scope-refused",
+            "the project's permissions need in-place commands, which this daemon is not configured to run".into(),
+        ));
+    }
+    match frozen.approval_mode() {
+        Approval::Ask if daemon.approver_auth.is_none() => {
+            return Err((
+                "scope-refused",
+                "the project's permissions say every operation needs your approval, but this installation has no approver channel (start nexusd with --approver-cap and --approver-uids)".into(),
+            ))
+        }
+        Approval::Auto if daemon.autonomous.is_none() => {
+            return Err((
+                "scope-refused",
+                "the project's permissions allow automatic approval, which this daemon does not provide".into(),
+            ))
+        }
+        _ => {}
+    }
+    Ok(Some(frozen))
+}
+
+/// The frozen grant recorded in a task's identity record. `Err` = a grant is recorded but unreadable.
+fn frozen_of_meta(meta: &serde_json::Value) -> Result<Option<nexus_tools::grant::Frozen>, String> {
+    match meta.get("grant") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(g) => serde_json::from_value(g.clone())
+            .map(Some)
+            .map_err(|_| "the task's recorded permissions are unreadable".to_owned()),
+    }
+}
+
+fn task_meta(daemon: &Daemon, task: &str) -> Option<serde_json::Value> {
+    let root = daemon.worktree_root.as_ref()?;
+    if !nexus_tools::gitwt::valid_task_id(task) {
+        return None;
+    }
+    serde_json::from_str(&std::fs::read_to_string(wt_meta_path(root, task)).ok()?).ok()
+}
+
+/// May this task still act? A task without a grant always may (as before). A task with one may only
+/// while its grant lineage is current, not revoked and not expired - read from the registry NOW, so a
+/// revocation takes effect on the very next operation of a running task. Returns the frozen grant.
+fn grant_may_act(
+    daemon: &Daemon,
+    task: &str,
+) -> Result<Option<nexus_tools::grant::Frozen>, String> {
+    let Some(meta) = task_meta(daemon, task) else {
+        return Ok(None);
+    };
+    let Some(frozen) = frozen_of_meta(&meta)? else {
+        return Ok(None);
+    };
+    let Some((dir, trust)) = &daemon.project_registry else {
+        return Err("permissions cannot be checked: the daemon has no project registry".into());
+    };
+    let pid = meta
+        .get("projectId")
+        .and_then(|v| v.as_str())
+        .ok_or("the task has no project")?;
+    let file = nexus_tools::registry::load(dir, trust).map_err(|e| e.message)?;
+    let rec = file
+        .get(pid)
+        .ok_or("the task's project is no longer registered")?;
+    nexus_tools::registry::task_may_act(rec, &frozen, now_ms_i64()).map_err(|e| e.message)?;
+    Ok(Some(frozen))
+}
+
+/// The grant identity and axes as declared in a reviewed operation (and sealed by the Kernel).
+fn grant_declaration(f: &nexus_tools::grant::Frozen) -> serde_json::Value {
+    serde_json::json!({
+        "grantId": f.grant_id, "version": f.version, "digest": f.digest,
+        "fsScope": f.fs, "netScope": f.net, "approval": f.approval,
+    })
 }
 
 /// Direct Workspace: open a task whose edits go to the project's REAL folder.
@@ -2739,6 +3041,25 @@ fn do_direct_open(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     let Some(origin) = rec.origin.clone() else {
         return fail(&req.id, "scope-refused", "the project has no folder");
     };
+    let task_permissions = match resolve_task_permissions(daemon, &rec) {
+        Ok(f) => f,
+        Err((code, msg)) => {
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            return fail(&req.id, code, msg);
+        }
+    };
+    if task_permissions
+        .as_ref()
+        .is_some_and(|g| g.fs_scope() != nexus_tools::exec_contract::FsScope::Scratch)
+    {
+        // Commands over the user's REAL folder are not implemented; never inferred from a grant.
+        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+        return fail(
+            &req.id,
+            "scope-refused",
+            "in-place commands in the direct workspace are not available yet; nothing was started",
+        );
+    }
     let mut forbidden = vec![root.clone(), daemon.run_root.clone(), dir.clone()];
     if let Some(e) = &daemon.project_envs {
         forbidden.push(e.clone());
@@ -2778,7 +3099,11 @@ fn do_direct_open(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         "projectId": pid,
         // Frozen at creation: a later registry change never alters a started task.
         "writeAllow": rec.write_allow,
-        "installs": rec.installs,
+        "installs": match &task_permissions {
+            Some(g) => g.net_scope() == nexus_tools::exec_contract::NetScope::Install,
+            None => rec.installs,
+        },
+        "grant": task_permissions,
         "createdAtMs": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -3425,6 +3750,19 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                 "sandboxed process execution is not enabled on this daemon",
             );
         }
+        // Standing grant: revoked / expired / replaced permissions stop the very next operation of a
+        // running task, even one that was approved before.
+        let held = if is_process || mutating {
+            match grant_may_act(daemon, &request.task_instance_id) {
+                Ok(f) => f,
+                Err(m) => {
+                    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                    return fail(&req.id, "grant-refused", &m);
+                }
+            }
+        } else {
+            None
+        };
         let mut proc_scope_wall: u64 = 0;
         if mutating && !daemon.writes_enabled {
             daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
@@ -3455,6 +3793,25 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                     &req.id,
                     "scope-refused",
                     "the approved filesystem scope is not this task's scope; execution refused",
+                );
+            }
+            // ... and the sealed grant identity and axes must be exactly the ones this task froze.
+            let sealed_ok = match &held {
+                Some(g) => {
+                    scope.grant_id == g.grant_id
+                        && scope.grant_version == g.version
+                        && scope.grant_digest == g.digest
+                        && scope.net_scope == g.net
+                        && scope.approval == g.approval
+                }
+                None => scope.grant_id.is_empty(),
+            };
+            if !sealed_ok {
+                daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                return fail(
+                    &req.id,
+                    "scope-refused",
+                    "the approved permissions are not the ones this task was started under; execution refused",
                 );
             }
             proc_scope_wall = scope.max_wall_ms;
@@ -3523,6 +3880,8 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             daemon,
             verified: started.verified(),
             last_seq: 0,
+            task: call.prepared().request().task_instance_id.clone(),
+            last_grant_check: None,
         };
         let penv = project_env_for(daemon, &call.prepared().request().task_instance_id);
         return match nexus_tools::run_process_call(
@@ -3885,6 +4244,8 @@ fn do_status(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "repoCodeEnabled": daemon.repo_code_enabled,
             "requireHumanApproval": daemon.require_human_approval && daemon.autonomous.is_none(),
             "approvalGated": daemon.require_human_approval,
+            "standingGrants": daemon.standing_grants,
+            "approverChannel": daemon.approver_auth.is_some(),
             "automatedPolicy": daemon.autonomous.as_ref().map(|_| AUTONOMOUS_POLICY_ID),
             "writesEnabled": daemon.writes_enabled,
             "processEnabled": daemon.process_enabled,
@@ -4523,6 +4884,7 @@ mod isolation_tests {
             writes_enabled: false,
             process_enabled: false,
             isolated_exec_scope: nexus_tools::exec_contract::FsScope::Scratch,
+            standing_grants: false,
             command_policy: nexus_tools::process::CommandPolicy::standard(
                 nexus_tools::process::Toolchain::discover(),
             ),
@@ -4685,11 +5047,328 @@ mod isolation_tests {
         );
     }
 
+    // ---- standing grants: what the policy and the task-creation rules do with them -----------------
+
+    fn rec_with_grant(
+        grant: Option<nexus_tools::grant::GrantState>,
+    ) -> nexus_tools::registry::ProjectRecord {
+        nexus_tools::registry::ProjectRecord {
+            id: "p".into(),
+            source_path: "/tmp/x".into(),
+            pinned_commit: "0".repeat(40),
+            write_allow: vec![],
+            allowed_uids: vec![],
+            managed: false,
+            label: None,
+            origin: None,
+            kinds: vec![],
+            snapshot_fingerprint: None,
+            snapshot_origin_dirty: false,
+            installs: false,
+            trusted: false,
+            workspace_mode: nexus_tools::registry::WorkspaceMode::Isolated,
+            grant,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }
+    }
+
+    /// A rig whose task holds a frozen grant and whose registry holds the same project.
+    fn grant_rig(
+        fs: &str,
+        net: &str,
+        approval: &str,
+    ) -> (
+        Daemon,
+        tempfile::TempDir,
+        String,
+        String,
+        nexus_tools::grant::Frozen,
+        std::path::PathBuf,
+    ) {
+        let (mut d, keep, task, digest) = policy_rig(&["src/"]);
+        let regdir = keep.path().join("reg");
+        let spec = nexus_tools::grant::GrantSpec {
+            fs: fs.into(),
+            net: net.into(),
+            approval: approval.into(),
+            expires_at_ms: None,
+        };
+        let trust = nexus_tools::registry::Trust::default();
+        nexus_tools::registry::mutate(&regdir, &trust, |f| {
+            f.projects.push(rec_with_grant(None));
+            Ok(())
+        })
+        .unwrap();
+        let rec =
+            nexus_tools::registry::set_grant(&regdir, &trust, "p", &spec, "test", "c").unwrap();
+        let frozen = rec.grant.unwrap().current.frozen("p");
+        d.project_registry = Some((regdir.clone(), trust));
+        d.standing_grants = true;
+        let root = d.worktree_root.clone().unwrap();
+        set_scope(
+            &root,
+            &task,
+            serde_json::json!({"projectId": "p", "grant": frozen, "execFsScope": fs, "installs": net == "install"}),
+        );
+        (d, keep, task, digest, frozen, regdir)
+    }
+
+    fn granted_proc(
+        frozen: Option<&nexus_tools::grant::Frozen>,
+        network: &str,
+        write_back: &str,
+        fs: Option<&str>,
+    ) -> serde_json::Value {
+        let mut o = proc_op(network, false, write_back);
+        if let Some(f) = frozen {
+            o["grant"] = grant_declaration(f);
+        }
+        if let Some(fs) = fs {
+            o["execFsScope"] = fs.into();
+        }
+        o
+    }
+
+    #[test]
+    fn a_task_holding_a_grant_is_approved_only_inside_it_and_exactly_as_it_froze_it() {
+        let (d, _k, task, digest, f, _r) = grant_rig("scratch", "offline", "auto");
+        let cfg = d.autonomous.clone().unwrap();
+        let ev = |op: serde_json::Value| {
+            evaluate_autonomous_policy(
+                &d,
+                &cfg,
+                &sub(&task, &digest, "proc.run", "process", &[], op),
+            )
+        };
+        // inside the grant
+        let facts = ev(granted_proc(Some(&f), "none", "none", None)).expect("inside the grant");
+        assert_eq!(facts["grant"]["grantId"], f.grant_id);
+        // an operation that does not carry the task's grant, or carries another, or a widened axis
+        assert!(ev(granted_proc(None, "none", "none", None)).is_err());
+        let mut other = f.clone();
+        other.version += 1;
+        assert!(ev(granted_proc(Some(&other), "none", "none", None)).is_err());
+        let mut wider = f.clone();
+        wider.net = "install".into();
+        assert!(ev(granted_proc(Some(&wider), "none", "none", None)).is_err());
+        // outside the network axis: an install command under an offline grant
+        assert!(ev(granted_proc(Some(&f), "install", "none", None))
+            .unwrap_err()
+            .contains("not permitted"));
+        // outside the filesystem axis: claiming in-place under a scratch grant
+        assert!(ev(granted_proc(
+            Some(&f),
+            "none",
+            "in-place-task-copy",
+            Some("workspace")
+        ))
+        .is_err());
+        // edits: inside the grant they carry its declaration; without it they are refused
+        let mut edit_op = serde_json::json!({"postImageBytes": 10, "grant": grant_declaration(&f)});
+        assert!(evaluate_autonomous_policy(
+            &d,
+            &cfg,
+            &sub(
+                &task,
+                &digest,
+                "fs.edit",
+                "write",
+                &["src/lib.rs"],
+                edit_op.clone()
+            )
+        )
+        .is_ok());
+        edit_op.as_object_mut().unwrap().remove("grant");
+        assert!(evaluate_autonomous_policy(
+            &d,
+            &cfg,
+            &sub(&task, &digest, "fs.edit", "write", &["src/lib.rs"], edit_op)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_network_axis_of_the_grant_governs_installs() {
+        let (d, _k, task, digest, f, _r) = grant_rig("scratch", "install", "auto");
+        let cfg = d.autonomous.clone().unwrap();
+        let r = evaluate_autonomous_policy(
+            &d,
+            &cfg,
+            &sub(
+                &task,
+                &digest,
+                "proc.run",
+                "process",
+                &[],
+                granted_proc(Some(&f), "install", "none", None),
+            ),
+        );
+        assert!(r.is_ok(), "{r:?}");
+    }
+
+    #[test]
+    fn a_grant_that_reserves_the_decision_for_a_person_is_never_decided_by_the_policy() {
+        let (d, _k, task, digest, f, _r) = grant_rig("scratch", "offline", "ask");
+        let cfg = d.autonomous.clone().unwrap();
+        let op = granted_proc(Some(&f), "none", "none", None);
+        let s = sub(&task, &digest, "proc.run", "process", &[], op);
+        // still inside the grant (a person can be asked) ...
+        assert!(check_within_grant(&d, &s).is_ok());
+        // ... but the automated policy refuses to decide it
+        assert!(evaluate_autonomous_policy(&d, &cfg, &s)
+            .unwrap_err()
+            .contains("person"));
+    }
+
+    #[test]
+    fn revocation_expiry_and_replacement_stop_a_running_task_at_its_next_operation() {
+        let (d, keep, task, digest, f, regdir) = grant_rig("scratch", "offline", "auto");
+        let cfg = d.autonomous.clone().unwrap();
+        let t = nexus_tools::registry::Trust::default();
+        let run = || {
+            evaluate_autonomous_policy(
+                &d,
+                &cfg,
+                &sub(
+                    &task,
+                    &digest,
+                    "proc.run",
+                    "process",
+                    &[],
+                    granted_proc(Some(&f), "none", "none", None),
+                ),
+            )
+        };
+        assert!(run().is_ok());
+        // a wider new version of the same lineage changes nothing for the running task
+        let spec = nexus_tools::grant::GrantSpec {
+            fs: "workspace".into(),
+            net: "install".into(),
+            approval: "auto".into(),
+            expires_at_ms: None,
+        };
+        nexus_tools::registry::set_grant(&regdir, &t, "p", &spec, "test", "c").unwrap();
+        assert!(run().is_ok());
+        assert!(grant_may_act(&d, &task).unwrap().unwrap().fs == "scratch");
+        // revoked: the very next operation is refused
+        nexus_tools::registry::revoke_grant(&regdir, &t, "p", "test").unwrap();
+        assert!(run().unwrap_err().contains("revoked"));
+        assert!(grant_may_act(&d, &task).unwrap_err().contains("revoked"));
+        // granted again = a different lineage: the old task stays stopped
+        nexus_tools::registry::set_grant(&regdir, &t, "p", &spec, "test", "c").unwrap();
+        assert!(grant_may_act(&d, &task).unwrap_err().contains("replaced"));
+        // removed
+        nexus_tools::registry::clear_grant(&regdir, &t, "p", "test").unwrap();
+        assert!(grant_may_act(&d, &task).unwrap_err().contains("removed"));
+        drop(keep);
+    }
+
+    #[test]
+    fn the_expiry_frozen_into_a_task_ends_it_without_any_registry_change() {
+        let (d, _k, task, _digest, f, _r) = grant_rig("scratch", "offline", "auto");
+        assert!(grant_may_act(&d, &task).is_ok());
+        let root = d.worktree_root.clone().unwrap();
+        let mut ex = f.clone();
+        ex.expires_at_ms = Some(1);
+        set_scope(&root, &task, serde_json::json!({"grant": ex}));
+        assert!(grant_may_act(&d, &task).unwrap_err().contains("expired"));
+    }
+
+    #[test]
+    fn a_task_whose_recorded_grant_is_unreadable_is_refused_not_defaulted() {
+        let (d, _k, task, _digest, _f, _r) = grant_rig("scratch", "offline", "auto");
+        let root = d.worktree_root.clone().unwrap();
+        set_scope(
+            &root,
+            &task,
+            serde_json::json!({"grant": {"nonsense": true}}),
+        );
+        assert!(grant_may_act(&d, &task).is_err());
+    }
+
+    #[test]
+    fn new_tasks_are_refused_when_the_daemon_cannot_provide_what_the_grant_says() {
+        let trust = nexus_tools::registry::Trust::default();
+        let _ = &trust;
+        let mk = |fs: &str, net: &str, ap: &str, exp: Option<i64>| {
+            let spec = nexus_tools::grant::GrantSpec {
+                fs: fs.into(),
+                net: net.into(),
+                approval: ap.into(),
+                expires_at_ms: exp,
+            };
+            let mut st = nexus_tools::grant::GrantState {
+                current: nexus_tools::grant::StandingGrant {
+                    grant_id: "grt_t".into(),
+                    version: 1,
+                    fs: spec.fs,
+                    net: spec.net,
+                    approval: spec.approval,
+                    created_at_ms: 1,
+                    expires_at_ms: spec.expires_at_ms,
+                    created_by: "t".into(),
+                    consent_sha256: "c".into(),
+                },
+                revoked_at_ms: None,
+                revoked_by: None,
+                history: vec![],
+            };
+            if exp == Some(-1) {
+                st.revoked_at_ms = Some(5);
+                st.current.expires_at_ms = None;
+            }
+            rec_with_grant(Some(st))
+        };
+        let mut d = test_daemon(Some(vec![own_uid()]), TrustMode::ShadowTest);
+        // no grant: defaults, with or without the flag
+        assert_eq!(
+            resolve_task_permissions(&d, &rec_with_grant(None)).unwrap(),
+            None
+        );
+        // a grant on a daemon that does not honour grants is refused, never run with defaults
+        let e = resolve_task_permissions(&d, &mk("scratch", "offline", "auto", None)).unwrap_err();
+        assert!(e.1.contains("--standing-grants"), "{e:?}");
+        d.standing_grants = true;
+        // automatic approval needs the automated policy
+        assert!(resolve_task_permissions(&d, &mk("scratch", "offline", "auto", None)).is_err());
+        d.autonomous = Some(AutonomousConfig::default());
+        assert!(
+            resolve_task_permissions(&d, &mk("scratch", "offline", "auto", None))
+                .unwrap()
+                .is_some()
+        );
+        // asking needs an approver channel
+        let e = resolve_task_permissions(&d, &mk("scratch", "offline", "ask", None)).unwrap_err();
+        assert!(e.1.contains("approver channel"), "{e:?}");
+        // in-place commands need process execution
+        let e =
+            resolve_task_permissions(&d, &mk("workspace", "offline", "auto", None)).unwrap_err();
+        assert!(e.1.contains("in-place"), "{e:?}");
+        d.process_enabled = true;
+        assert!(
+            resolve_task_permissions(&d, &mk("workspace", "offline", "auto", None))
+                .unwrap()
+                .is_some()
+        );
+        // expired / revoked: rejected with the grant's own reason
+        let e =
+            resolve_task_permissions(&d, &mk("scratch", "offline", "auto", Some(1))).unwrap_err();
+        assert_eq!(e.0, "grant-refused");
+        assert!(e.1.contains("expired"));
+        let e =
+            resolve_task_permissions(&d, &mk("scratch", "offline", "auto", Some(-1))).unwrap_err();
+        assert!(e.1.contains("revoked"), "{e:?}");
+        // values this build cannot enforce are refused even if a registry carries them
+        assert!(resolve_task_permissions(&d, &mk("full", "offline", "auto", None)).is_err());
+        assert!(resolve_task_permissions(&d, &mk("scratch", "controlled", "auto", None)).is_err());
+    }
+
     #[test]
     fn the_policy_digest_changes_only_when_in_place_copies_are_enabled() {
         let c = AutonomousConfig::default();
-        let scratch_only = autonomous_policy_digest(&c, false);
-        let with_ws = autonomous_policy_digest(&c, true);
+        let scratch_only = autonomous_policy_digest(&c, false, false);
+        let with_ws = autonomous_policy_digest(&c, true, false);
         assert_ne!(scratch_only, with_ws);
         // the scratch-only digest is the historical one (no extra key)
         let historical = sha256_hex_str(&nexus_contracts::canonical_json(&serde_json::json!({

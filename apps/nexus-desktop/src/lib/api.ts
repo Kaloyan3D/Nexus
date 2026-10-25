@@ -103,6 +103,10 @@ export interface NativeApi {
   projectSetPolicy(projectId: string, policy: { installs?: boolean; trusted?: boolean }): Promise<unknown>;
   /** Where NEW tasks of a project edit (direct = its real folder). Choosing direct is confirmed natively. */
   projectSetEditMode(projectId: string, mode: WorkspaceMode): Promise<unknown>;
+  /** Set the project's standing permissions. The native backend shows the exact consent text and needs the person's "yes". */
+  projectSetPermissions(projectId: string, grant: { fs: string; net: string; approval: string; expiresInSecs?: number | null }): Promise<unknown>;
+  /** Revoke (`clear` false) or remove (`clear` true) the project's standing permissions after a native confirmation. */
+  projectEndPermissions(projectId: string, clear: boolean): Promise<unknown>;
   projectForget(projectId: string): Promise<{ forgotten: string }>;
   /** Apply a finished run's patch to the user's folder after a native confirmation. */
   projectAdopt(runId: string): Promise<{ applied: string[] }>;
@@ -206,6 +210,8 @@ export const tauriApi: NativeApi = {
   projectRefresh: (projectId) => invoke<ProjectOpenReply>("project_refresh", { projectId }),
   projectSetPolicy: (projectId, policy) => invoke<unknown>("project_set_policy", { projectId, installs: policy.installs ?? null, trusted: policy.trusted ?? null }),
   projectSetEditMode: (projectId, mode) => invoke<unknown>("project_set_edit_mode", { projectId, mode }),
+  projectSetPermissions: (projectId, g) => invoke<unknown>("project_set_grant", { projectId, fs: g.fs, net: g.net, approval: g.approval, expiresInSecs: g.expiresInSecs ?? null }),
+  projectEndPermissions: (projectId, clear) => invoke<unknown>("project_end_grant", { projectId, clear }),
   projectForget: (projectId) => invoke<{ forgotten: string }>("project_forget", { projectId }),
   projectAdopt: (runId) => invoke<{ applied: string[] }>("project_adopt", { runId }),
   threadList: (projectId, includeArchived) => invoke<{ threads: ThreadSummary[] }>("thread_list", { projectId: projectId ?? null, includeArchived: includeArchived ?? false }),
@@ -307,6 +313,8 @@ export const unavailableApi: NativeApi = {
   projectRefresh: () => Promise.reject(notInShell),
   projectSetPolicy: () => Promise.reject(notInShell),
   projectSetEditMode: () => Promise.reject(notInShell),
+  projectSetPermissions: () => Promise.reject(notInShell),
+  projectEndPermissions: () => Promise.reject(notInShell),
   projectForget: () => Promise.reject(notInShell),
   projectAdopt: () => Promise.reject(notInShell),
   threadList: () => Promise.resolve({ threads: [] }),

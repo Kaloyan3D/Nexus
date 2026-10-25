@@ -202,6 +202,52 @@ describe("Projects page and evidence (A6.1.4)", () => {
     expect(setWs).toHaveBeenCalledWith("tinycsv-6c94b7", "isolated");
   });
 
+  it("permissions show the project's standing grant and send only the user's choices (the native backend confirms)", async () => {
+    const setGrant = vi.fn(async () => ({}));
+    const endGrant = vi.fn(async () => ({}));
+    const grant = {
+      grantId: "grt_aaaaaaaaaaaaaaaa", version: 2, digest: "d".repeat(64), fs: "workspace" as const, net: "install" as const,
+      approval: "auto" as const, expiresAtMs: Date.now() + 86_400_000, createdAtMs: 1, createdBy: "desktop:uid:1000",
+      status: "active" as const, revokedAtMs: null, history: [],
+    };
+    const list = vi.fn(async () => ({
+      projects: [project({ grant }), project({ projectId: "svc-aaaaaa", label: "svc", workspaceMode: "isolated" }), project({ projectId: "old-bbbbbb", label: "old", workspaceMode: "isolated", grant: { ...grant, status: "revoked" as const, revokedAtMs: 5 } })],
+    }));
+    const user = userEvent.setup();
+    mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetPermissions: setGrant, projectEndPermissions: endGrant }), "#/projects");
+    const table = await screen.findByRole("table", { name: "Opened projects" });
+    expect(within(table).getByText("In-place commands · installs online · automatic")).toBeInTheDocument();
+    expect(within(table).getByText("Default permissions")).toBeInTheDocument();
+    expect(within(table).getByText(/revoked$/)).toBeInTheDocument();
+    // a project without a grant: choose and apply; only the three choices and a lifetime are sent
+    await user.click(within(table).getByRole("button", { name: "Permissions for svc" }));
+    const grp = within(table).getByRole("group", { name: "Permissions for svc" });
+    await user.selectOptions(within(grp).getByLabelText("Command filesystem scope for svc"), "workspace");
+    await user.selectOptions(within(grp).getByLabelText("Approval behaviour for svc"), "ask");
+    await user.selectOptions(within(grp).getByLabelText("Lifetime of the permissions for svc"), "2");
+    await user.click(within(grp).getByRole("button", { name: "Apply…" }));
+    expect(setGrant).toHaveBeenCalledWith("svc-aaaaaa", { fs: "workspace", net: "offline", approval: "ask", expiresInSecs: 7 * 86_400 });
+    // revoke / return to defaults go through the backend too
+    await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
+    const g2 = within(table).getByRole("group", { name: "Permissions for tinycsv" });
+    await user.click(within(g2).getByRole("button", { name: "Revoke" }));
+    expect(endGrant).toHaveBeenCalledWith("tinycsv-6c94b7", false);
+    await user.click(within(g2).getByRole("button", { name: "Use defaults" }));
+    expect(endGrant).toHaveBeenCalledWith("tinycsv-6c94b7", true);
+    // the page has no confirmation, digest or consent control of its own
+    expect(document.querySelector("input[type=text], input[type=password]")).toBeNull();
+  });
+
+  it("in-place commands cannot be chosen for a project that edits its real folder directly", async () => {
+    const list = vi.fn(async () => ({ projects: [project({ workspaceMode: "direct" })] }));
+    const user = userEvent.setup();
+    mount(fakeApi({ runtimeState: async () => rt(), projectList: list }), "#/projects");
+    const table = await screen.findByRole("table", { name: "Opened projects" });
+    await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
+    const opt = within(table).getByRole("option", { name: /Commands change the task's working copy/ }) as HTMLOptionElement;
+    expect(opt.disabled).toBe(true);
+  });
+
   it("a policy grant is labelled as automated, never as an approval by a person", async () => {
     const run = fakeRun({
       intentType: "repo-code", conversationId: CONV, state: "completed", terminal: true, workspaceId: "tinycsv-6c94b7",

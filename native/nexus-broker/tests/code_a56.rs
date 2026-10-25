@@ -787,6 +787,15 @@ fn fixture_full(
     } else {
         (None, None)
     };
+    let daemon_args: Vec<String> = daemon_args
+        .iter()
+        .map(|a| match a.as_str() {
+            "@APPROVER_CAP@" => approver_cap.to_string_lossy().into_owned(),
+            "@UID@" => own_uid().to_string(),
+            x => x.to_owned(),
+        })
+        .collect();
+    let daemon_args = daemon_args.as_slice();
     let (daemon, daemon_socket, cap) = spawn_daemon(
         tmp.path(),
         &ddir,
@@ -16607,6 +16616,9 @@ fn start_interactive(fx: &Fx, name: &str) -> BrokerHandle {
         nexus_tools::registry::Trust::default(),
     ));
     c.interactive = true;
+    let snaps = fx.tmp.path().join("project-snapshots");
+    std::fs::create_dir_all(&snaps).unwrap();
+    c.project_snapshots = Some(snaps);
     nexus_broker::start(c).expect("broker starts")
 }
 
@@ -16909,5 +16921,647 @@ fn m1_dependency_and_cache_folders_made_by_in_place_commands_are_not_part_of_the
         ["keep/k.txt"],
         "toolchain artifacts leaked into the patch: {paths:?}"
     );
+    b.shutdown();
+}
+
+// ------------------------------------------------ Standing grants (permissions milestone)
+
+/// The interactive profile with standing grants AND the independent approver channel (test topology:
+/// the approver shares the test uid, which the daemon only accepts under its explicit test-only flag).
+fn fixture_unified(responder: Responder, env: &[(&str, &str)]) -> Fx {
+    fixture_full(
+        responder,
+        Box::new(|_| {}),
+        env,
+        true,
+        true,
+        None,
+        &[
+            "--standing-grants".to_owned(),
+            "--approver-cap".to_owned(),
+            "@APPROVER_CAP@".to_owned(),
+            "--approver-uids".to_owned(),
+            "@UID@".to_owned(),
+            "--allow-nonindependent-approver-test-only".to_owned(),
+        ],
+    )
+}
+
+/// What the user does in the CLI / Desktop: preview the consent text, confirm it, store the grant.
+fn user_sets_grant(
+    sock: &Path,
+    project: &str,
+    fs: &str,
+    net: &str,
+    approval: &str,
+    expires_in_secs: Option<u64>,
+) -> Value {
+    let pv = ic::project_grant_preview(sock, project, fs, net, approval, expires_in_secs)
+        .expect("preview");
+    let digest = pv["textSha256"].as_str().unwrap().to_owned();
+    ic::project_grant_set(
+        sock,
+        project,
+        fs,
+        net,
+        approval,
+        expires_in_secs,
+        &digest,
+        "cli",
+    )
+    .expect("set")
+}
+
+fn grant_of(fx: &Fx, project: &str) -> Value {
+    let f = nexus_tools::registry::load(
+        fx.reg_dir.as_ref().unwrap(),
+        &nexus_tools::registry::Trust::default(),
+    )
+    .unwrap();
+    let rec = f.get(project).unwrap();
+    nexus_broker::projects::grant_view(
+        rec,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64,
+    )
+    .unwrap_or(Value::Null)
+}
+
+fn running_cmd(needle: &str) -> bool {
+    std::fs::read_dir("/proc").unwrap().flatten().any(|e| {
+        std::fs::read(e.path().join("cmdline"))
+            .map(|c| String::from_utf8_lossy(&c).contains(needle))
+            .unwrap_or(false)
+    })
+}
+
+#[test]
+fn perm_automatic_approval_runs_inside_the_grant_and_every_record_names_the_grant() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_unified(m1_script(), &[]);
+    let b = start_interactive(&fx, "pa");
+    let g = user_sets_grant(
+        b.socket_path(),
+        "other",
+        "workspace",
+        "offline",
+        "auto",
+        None,
+    );
+    let gid = g["project"]["grant"]["grantId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(g["project"]["grant"]["version"], 1);
+    let repo2 = fx.repo2.clone().unwrap();
+    let before = fp_of(&repo2);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "perm-auto-00000001", |_| {}),
+        150,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    // in-place under the grant (the grant, not an operator flag, chose it): persisted in the copy
+    let wc = working_copy(&fx).expect("copy");
+    assert_eq!(
+        std::fs::read_to_string(wc.join("tools/gen/out.txt")).unwrap(),
+        "GENERATED\n"
+    );
+    for a in run.tool_activity.iter().filter(|a| a.tool == "proc_run") {
+        assert_eq!(
+            a.approval_actor.as_deref(),
+            Some("automated-policy"),
+            "{a:?}"
+        );
+    }
+    assert_eq!(fp_of(&repo2), before, "the original changed");
+    // audit: the approvals the Kernel journaled carry the grant identity (facts the policy relied on)
+    let acap = std::fs::read_to_string(&fx.approver_cap)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let icap = std::fs::read_to_string(&fx.cap).unwrap().trim().to_owned();
+    let list = nexus_client::issuer::issuer_call(
+        &fx.daemon_socket,
+        &icap,
+        "approval-list",
+        json!({"limit": 50}),
+    )
+    .unwrap();
+    let rows = list["approvals"].as_array().unwrap();
+    assert!(!rows.is_empty());
+    for r in rows {
+        assert_eq!(
+            r["grant"]["grantId"],
+            gid.as_str(),
+            "the approval record does not name the grant: {r}"
+        );
+        assert_eq!(r["grant"]["version"], 1);
+        assert_eq!(r["grant"]["approval"], "auto");
+    }
+    let _ = &acap;
+    // the process journal says which permissions the command ran under
+    let ti = run.task_instance_id.clone().unwrap();
+    let tid = run.task_id.clone().unwrap();
+    let mut named = 0;
+    for a in 1..=last_attempts(&run) {
+        for r in tool_events(&fx, &ti, &format!("{tid}-A{a}")) {
+            if r["process"]["grant"]["grantId"] == gid.as_str() {
+                assert_eq!(r["process"]["grant"]["approval"], "auto");
+                assert_eq!(r["process"]["grant"]["fs"], "workspace");
+                named += 1;
+            }
+        }
+    }
+    assert!(
+        named >= 2,
+        "the process journal does not name the grant ({named})"
+    );
+    // status reports the mode
+    let st =
+        nexus_client::issuer::issuer_call(&fx.daemon_socket, &icap, "status", json!({})).unwrap();
+    assert_eq!(st["standingGrants"], true);
+    assert_eq!(st["approverChannel"], true);
+    assert_eq!(st["automatedPolicy"], "autonomous-workspace/v1");
+    b.shutdown();
+}
+
+#[test]
+fn perm_ask_waits_for_the_independent_approver_and_a_denial_runs_nothing() {
+    if !sandbox_ready() {
+        return;
+    }
+    // approve
+    let fx = fixture_unified(
+        script(
+            vec![(
+                "proc_run",
+                r#"{"program":"sh","args":["-c","echo asked > asked.txt"]}"#.to_owned(),
+            )],
+            "Done.",
+        ),
+        &[],
+    );
+    let appr = Approver::start(&fx, approve_all());
+    let b = start_interactive(&fx, "pk");
+    user_sets_grant(
+        b.socket_path(),
+        "other",
+        "workspace",
+        "offline",
+        "ask",
+        None,
+    );
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "perm-ask-000000001", |_| {}),
+        150,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let a = run
+        .tool_activity
+        .iter()
+        .find(|a| a.tool == "proc_run")
+        .unwrap();
+    assert_eq!(a.approval_outcome.as_deref(), Some("approved"), "{a:?}");
+    assert_ne!(
+        a.approval_actor.as_deref(),
+        Some("automated-policy"),
+        "an Ask project was decided by the policy: {a:?}"
+    );
+    assert_eq!(
+        appr.reviewed().len(),
+        1,
+        "exactly one operation reached the approver"
+    );
+    assert_eq!(
+        std::fs::read_to_string(working_copy(&fx).unwrap().join("asked.txt")).unwrap(),
+        "asked\n"
+    );
+    drop(appr);
+    b.shutdown();
+    drop(fx);
+    // deny
+    let fx = fixture_unified(
+        script(
+            vec![(
+                "proc_run",
+                r#"{"program":"sh","args":["-c","echo denied > denied.txt"]}"#.to_owned(),
+            )],
+            "Done.",
+        ),
+        &[],
+    );
+    let appr = Approver::start(&fx, Arc::new(|_| Decide::Deny));
+    let b = start_interactive(&fx, "pk2");
+    user_sets_grant(
+        b.socket_path(),
+        "other",
+        "workspace",
+        "offline",
+        "ask",
+        None,
+    );
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "perm-deny-00000001", |_| {}),
+        150,
+    );
+    let a = run
+        .tool_activity
+        .iter()
+        .find(|a| a.tool == "proc_run")
+        .unwrap();
+    assert_ne!(a.status, "executed", "{a:?}");
+    assert!(
+        !working_copy(&fx).unwrap().join("denied.txt").exists(),
+        "a denied command ran"
+    );
+    drop(appr);
+    b.shutdown();
+}
+
+#[test]
+fn perm_an_ask_project_is_never_decided_by_the_policy_even_when_nobody_answers() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_unified(
+        script(
+            vec![(
+                "proc_run",
+                r#"{"program":"sh","args":["-c","echo x > never.txt"]}"#.to_owned(),
+            )],
+            "Done.",
+        ),
+        &[],
+    );
+    let b = start_interactive(&fx, "pk3");
+    user_sets_grant(
+        b.socket_path(),
+        "other",
+        "workspace",
+        "offline",
+        "ask",
+        None,
+    );
+    // no approver is running: the run must end by its own time limit, executing nothing
+    let r = ic::submit(
+        b.socket_path(),
+        &code_intent_for("other", "go", "perm-noappr-0000001", |l| {
+            l.max_runtime_secs = Some(8)
+        }),
+    )
+    .unwrap()
+    .run;
+    let run = wait_terminal(b.socket_path(), &r.run_id, 60);
+    assert!(run.terminal);
+    assert!(
+        !working_copy(&fx)
+            .map(|w| w.join("never.txt").exists())
+            .unwrap_or(false),
+        "an unanswered Ask ran"
+    );
+    let icap = std::fs::read_to_string(&fx.cap).unwrap().trim().to_owned();
+    let list = nexus_client::issuer::issuer_call(
+        &fx.daemon_socket,
+        &icap,
+        "approval-list",
+        json!({"limit": 50}),
+    )
+    .unwrap();
+    for r in list["approvals"].as_array().unwrap() {
+        assert_ne!(r["decisionKind"], "automated-policy", "{r}");
+    }
+    b.shutdown();
+}
+
+#[test]
+fn perm_requests_outside_the_grant_cannot_run_without_a_new_authorization() {
+    if !sandbox_ready() {
+        return;
+    }
+    // an offline grant: a dependency install (network) is outside it
+    let fx = fixture_unified(
+        script(
+            vec![
+                (
+                    "proc_run",
+                    r#"{"program":"npm","args":["install","left-pad"]}"#.to_owned(),
+                ),
+                (
+                    "proc_run",
+                    r#"{"program":"sh","args":["-c","echo inside > inside.txt"]}"#.to_owned(),
+                ),
+            ],
+            "Done.",
+        ),
+        &[],
+    );
+    let b = start_interactive(&fx, "po");
+    user_sets_grant(b.socket_path(), "other", "scratch", "offline", "auto", None);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "perm-outside-0000001", |_| {}),
+        150,
+    );
+    let st = statuses(&run);
+    assert_eq!(st[0].0, "proc_run");
+    assert_eq!(st[0].1, "refused", "{st:?}");
+    // a scratch grant never lets a command write the copy, and the offline grant never gets the network
+    assert!(!working_copy(&fx).unwrap().join("inside.txt").exists());
+    // the user widens the grant (a NEW authorization): the same request is now allowed to proceed past the grant check
+    user_sets_grant(b.socket_path(), "other", "scratch", "install", "auto", None);
+    assert_eq!(grant_of(&fx, "other")["version"], 2);
+    b.shutdown();
+}
+
+#[test]
+fn perm_expired_and_revoked_permissions_are_rejected_for_new_tasks() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_unified(m1_script(), &[]);
+    let b = start_interactive(&fx, "px");
+    user_sets_grant(
+        b.socket_path(),
+        "other",
+        "scratch",
+        "offline",
+        "auto",
+        Some(2),
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(grant_of(&fx, "other")["status"], "expired");
+    let r = ic::submit(
+        b.socket_path(),
+        &code_intent_for("other", "go", "perm-expired-0000001", |_| {}),
+    );
+    let run = match r {
+        Ok(s) => wait_terminal(b.socket_path(), &s.run.run_id, 60),
+        Err(e) => panic!("{e:?}"),
+    };
+    assert_ne!(run.state, "completed", "{run:?}");
+    assert!(
+        run.error_message
+            .clone()
+            .unwrap_or_default()
+            .contains("expired")
+            || run.error_code.clone().unwrap_or_default().contains("grant"),
+        "{run:?}"
+    );
+    assert!(
+        working_copy(&fx).is_none(),
+        "a working copy was made under an expired grant"
+    );
+    // renewing it (a new user authorization) lets work proceed; revoking stops it again
+    user_sets_grant(b.socket_path(), "other", "scratch", "offline", "auto", None);
+    let ok = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "perm-renewed-0000001", |_| {}),
+        150,
+    );
+    assert_eq!(ok.state, "completed", "{ok:?}");
+    ic::project_grant_revoke(b.socket_path(), "other", "cli").unwrap();
+    assert_eq!(grant_of(&fx, "other")["status"], "revoked");
+    let r = ic::submit(
+        b.socket_path(),
+        &code_intent_for("other", "go", "perm-revoked-0000001", |_| {}),
+    )
+    .unwrap();
+    let run = wait_terminal(b.socket_path(), &r.run.run_id, 60);
+    assert_ne!(run.state, "completed", "{run:?}");
+    b.shutdown();
+}
+
+#[test]
+fn perm_revoking_stops_a_running_task_including_the_command_in_flight() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_unified(
+        script(
+            vec![
+                (
+                    "proc_run",
+                    r#"{"program":"sh","args":["-c","echo first > first.txt; sleep 77"]}"#
+                        .to_owned(),
+                ),
+                (
+                    "proc_run",
+                    r#"{"program":"sh","args":["-c","echo second > second.txt"]}"#.to_owned(),
+                ),
+            ],
+            "Done.",
+        ),
+        &[],
+    );
+    let b = start_interactive(&fx, "pr");
+    user_sets_grant(
+        b.socket_path(),
+        "other",
+        "workspace",
+        "offline",
+        "auto",
+        None,
+    );
+    let sock = b.socket_path().to_owned();
+    let r = ic::submit(
+        &sock,
+        &code_intent_for("other", "go", "perm-revoke-0000001", |_| {}),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(90);
+    while !running_cmd("sleep\x0077") {
+        assert!(
+            Instant::now() < end,
+            "the command never started: {:?}",
+            ic::status(&sock, &r.run_id)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let t0 = Instant::now();
+    ic::project_grant_revoke(&sock, "other", "desktop").unwrap();
+    // the command that is ALREADY running is ended by the revocation
+    while running_cmd("sleep\x0077") && t0.elapsed() < Duration::from_secs(30) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !running_cmd("sleep\x0077"),
+        "the in-flight command survived the revocation"
+    );
+    assert!(
+        t0.elapsed() < Duration::from_secs(20),
+        "revocation took too long: {:?}",
+        t0.elapsed()
+    );
+    let run = wait_terminal(&sock, &r.run_id, 90);
+    assert!(run.terminal);
+    assert!(
+        !working_copy(&fx).unwrap().join("second.txt").exists(),
+        "an operation after the revocation ran"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn perm_a_daemon_that_does_not_honour_grants_refuses_projects_that_have_them() {
+    if !sandbox_ready() {
+        return;
+    }
+    // interactive profile WITHOUT --standing-grants
+    let fx = fixture_autonomous(m1_script());
+    let reg = fx.reg_dir.clone().unwrap();
+    let spec = nexus_tools::grant::GrantSpec {
+        fs: "scratch".into(),
+        net: "offline".into(),
+        approval: "ask".into(),
+        expires_at_ms: None,
+    };
+    nexus_tools::registry::set_grant(
+        &reg,
+        &nexus_tools::registry::Trust::default(),
+        "other",
+        &spec,
+        "operator",
+        "c",
+    )
+    .unwrap();
+    let b = start_interactive(&fx, "pn");
+    let r = ic::submit(
+        b.socket_path(),
+        &code_intent_for("other", "go", "perm-nogrants-000001", |_| {}),
+    )
+    .unwrap();
+    let run = wait_terminal(b.socket_path(), &r.run.run_id, 60);
+    assert_ne!(
+        run.state, "completed",
+        "an Ask project ran with the defaults: {run:?}"
+    );
+    assert!(working_copy(&fx).is_none());
+    b.shutdown();
+}
+
+#[test]
+fn perm_the_model_cannot_name_a_scope_a_grant_or_a_network_in_its_tool_arguments() {
+    for bad in [
+        r#"{"program":"sh","args":["-c","id"],"fsScope":"workspace"}"#,
+        r#"{"program":"sh","args":["-c","id"],"grant":{"fs":"workspace"}}"#,
+        r#"{"program":"sh","args":["-c","id"],"net":"full"}"#,
+        r#"{"program":"sh","args":["-c","id"],"approval":"auto"}"#,
+        r#"{"program":"sh","args":["-c","id"],"unsandboxed":true}"#,
+    ] {
+        let args: Value = serde_json::from_str(bad).unwrap();
+        let r = nexus_broker::code::validate_code_proposal_in(
+            "proc_run",
+            &args,
+            &Default::default(),
+            true,
+        );
+        assert!(r.is_err(), "{bad} was accepted");
+    }
+}
+
+#[test]
+fn perm_the_cli_changes_permissions_only_after_an_explicit_confirmation() {
+    let fx = fixture_unified(m1_script(), &[]);
+    let b = start_interactive(&fx, "pc");
+    let sock = b.socket_path().to_owned();
+    let (code, out) = cli(&sock, &["project", "grant", "other", "show"], None);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.trim() == "null" || out.contains("null"), "{out}");
+    // no terminal and no --yes: refused, nothing stored
+    let (code, _o) = cli(
+        &sock,
+        &[
+            "project",
+            "grant",
+            "other",
+            "set",
+            "--fs",
+            "scratch",
+            "--net",
+            "offline",
+            "--approval",
+            "ask",
+        ],
+        None,
+    );
+    assert_ne!(code, 0);
+    assert!(
+        grant_of(&fx, "other").is_null(),
+        "an unconfirmed change was stored"
+    );
+    // a capability this build lacks is refused even with --yes
+    for bad in [["--fs", "full"], ["--net", "controlled"], ["--net", "full"]] {
+        let mut a = vec!["project", "grant", "other", "set", "--yes"];
+        a.extend(bad);
+        let (code, _o) = cli(&sock, &a, None);
+        assert_ne!(code, 0, "{bad:?}");
+    }
+    assert!(grant_of(&fx, "other").is_null());
+    // confirmed
+    let (code, out) = cli(
+        &sock,
+        &[
+            "project",
+            "grant",
+            "other",
+            "set",
+            "--fs",
+            "workspace",
+            "--net",
+            "install",
+            "--approval",
+            "ask",
+            "--expires",
+            "7d",
+            "--yes",
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "{out}");
+    let g = grant_of(&fx, "other");
+    assert_eq!(
+        (
+            g["fs"].as_str(),
+            g["net"].as_str(),
+            g["approval"].as_str(),
+            g["status"].as_str()
+        ),
+        (
+            Some("workspace"),
+            Some("install"),
+            Some("ask"),
+            Some("active")
+        )
+    );
+    assert!(g["expiresAtMs"].as_i64().unwrap() > 6 * 86_400_000);
+    assert_eq!(
+        g["createdBy"].as_str().unwrap().split(':').next(),
+        Some("cli")
+    );
+    let (code, _o) = cli(&sock, &["project", "grant", "other", "revoke"], None);
+    assert_ne!(code, 0, "revoking without confirmation");
+    assert_eq!(grant_of(&fx, "other")["status"], "active");
+    let (code, _o) = cli(
+        &sock,
+        &["project", "grant", "other", "revoke", "--yes"],
+        None,
+    );
+    assert_eq!(code, 0);
+    assert_eq!(grant_of(&fx, "other")["status"], "revoked");
+    let (code, _o) = cli(
+        &sock,
+        &["project", "grant", "other", "clear", "--yes"],
+        None,
+    );
+    assert_eq!(code, 0);
+    assert!(grant_of(&fx, "other").is_null());
     b.shutdown();
 }

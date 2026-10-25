@@ -38,9 +38,27 @@ pub struct PreparedToolRequest {
     /// Filesystem scope of a process call, taken from the Kernel-verified process scope by
     /// `prepare_process` (always `Scratch` for every other tool).
     fs_scope: crate::exec_contract::FsScope,
+    /// Identity of the standing grant sealed in the process scope (recorded in the journal).
+    grant: Option<GrantRef>,
+}
+
+/// The standing grant a process call runs under, as sealed by the Kernel.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantRef {
+    pub grant_id: String,
+    pub version: u64,
+    pub digest: String,
+    pub fs: String,
+    pub net: String,
+    pub approval: String,
 }
 
 impl PreparedToolRequest {
+    pub fn grant(&self) -> Option<&GrantRef> {
+        self.grant.as_ref()
+    }
+
     /// Mark this call as proposed by a model within a repo-inspect command.
     /// The Kernel independently refuses it unless the command's published
     /// intent is `repo-inspect`, its model turn was dispatched, the pilot is
@@ -132,7 +150,15 @@ pub fn prepare_process(
     }
     let args = ToolArgs::parse(ToolId::ProcRun, &request.args)?;
     if let ToolArgs::Proc(a) = &args {
-        policy.resolve(a)?;
+        let resolved = policy.resolve(a)?;
+        // Standing grant: a command that needs the network must be inside the network axis sealed in
+        // the process scope (a scope without a grant keeps the long-standing project-level rule).
+        if !scope.grant_id.is_empty() && resolved.install && scope.net_scope != "install" {
+            return Err(ToolError::new(
+                ToolErrorCode::CommandRefused,
+                "installing dependencies needs network access, which this project's permissions do not allow",
+            ));
+        }
     }
     let fs_scope = match crate::exec_contract::FsScope::parse(&scope.fs_scope) {
         Some(f) if f.is_implemented() => f,
@@ -151,6 +177,16 @@ pub fn prepare_process(
     }
     let mut p = prepare_inner(request, binding, None, true)?;
     p.fs_scope = fs_scope;
+    if !scope.grant_id.is_empty() {
+        p.grant = Some(GrantRef {
+            grant_id: scope.grant_id.clone(),
+            version: scope.grant_version,
+            digest: scope.grant_digest.clone(),
+            fs: scope.fs_scope.clone(),
+            net: scope.net_scope.clone(),
+            approval: scope.approval.clone(),
+        });
+    }
     // Clamp BEFORE the budget digest is sealed.
     p.budgets.proc_wall_ms = p.budgets.proc_wall_ms.min(scope.max_wall_ms).max(1);
     p.budget_digest = p.budgets.digest();
@@ -260,6 +296,7 @@ fn prepare_inner(
         root_digest,
         ai_origin: None,
         fs_scope: crate::exec_contract::FsScope::Scratch,
+        grant: None,
         request,
         tool,
         args,
@@ -643,6 +680,7 @@ pub fn run_process_call(
         budgets: &p.budgets,
         scope_max_wall_ms,
         fs_scope: p.fs_scope,
+        grant: p.grant.as_ref(),
     };
     crate::process::run_process(&ctx, args, cancel, hooks)
 }

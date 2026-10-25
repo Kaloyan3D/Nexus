@@ -225,3 +225,95 @@ fn m1_the_in_place_scope_is_an_explicit_operator_setting_that_fails_closed() {
     .expect("starts");
     terminate(&mut a);
 }
+
+#[test]
+fn standing_grants_are_the_only_way_the_automated_policy_and_the_approver_coexist() {
+    let r = root();
+    let auto = "--autonomous-workspace-policy".to_owned();
+    let approver = |r: &Root| -> Vec<String> {
+        vec![
+            "--approver-cap".into(),
+            r.acap_dir
+                .path()
+                .join("approver.cap")
+                .to_string_lossy()
+                .into_owned(),
+            "--approver-uids".into(),
+            euid().to_string(),
+            "--allow-nonindependent-approver-test-only".into(),
+        ]
+    };
+    // without --standing-grants the old rule stands
+    let mut a = vec![auto.clone()];
+    a.extend(approver(&r));
+    let e = start(&r, &a).expect_err("approver flags with the automated policy alone");
+    assert!(e.contains("cannot be combined"), "{e}");
+    // --standing-grants needs the automated policy
+    // (a fresh store each time: a refused start can still have raised the store's latch)
+    let e = start(&root(), &["--standing-grants".into()]).expect_err("needs the policy");
+    assert!(e.contains("requires --autonomous-workspace-policy"), "{e}");
+    // the human-approval flag still cannot be combined
+    let e = start(
+        &root(),
+        &[
+            auto.clone(),
+            "--standing-grants".into(),
+            "--require-human-approval".into(),
+        ],
+    )
+    .expect_err("human flag");
+    assert!(e.contains("cannot be combined"), "{e}");
+    // with it, both channels start, and the status says so
+    let r = root();
+    let mut a = vec![auto.clone(), "--standing-grants".into()];
+    a.extend(approver(&r));
+    let mut d = start(&r, &a).expect("unified starts");
+    let cap = read_cap(&r.dir.path().join("issuer.cap"));
+    let st = raw_request(
+        &r.dir.path().join("n.sock"),
+        &authed_frame(&cap, "status", serde_json::json!({})),
+    )
+    .unwrap();
+    assert_eq!(st["standingGrants"], true, "{st}");
+    assert_eq!(st["approverChannel"], true, "{st}");
+    assert_eq!(st["automatedPolicy"], "autonomous-workspace/v1");
+    assert_eq!(st["approvalGated"], true);
+    assert!(r.acap_dir.path().join("approver.cap").exists());
+    terminate(&mut d);
+    // grants without an approver channel: starts (Ask projects are then refused at task creation)
+    let r2 = root();
+    let mut d =
+        start(&r2, &[auto.clone(), "--standing-grants".into()]).expect("grants without approver");
+    let cap = read_cap(&r2.dir.path().join("issuer.cap"));
+    let st = raw_request(
+        &r2.dir.path().join("n.sock"),
+        &authed_frame(&cap, "status", serde_json::json!({})),
+    )
+    .unwrap();
+    assert_eq!(
+        (st["standingGrants"].clone(), st["approverChannel"].clone()),
+        (serde_json::json!(true), serde_json::json!(false))
+    );
+    terminate(&mut d);
+    // the latch: automated -> unified is allowed, unified -> automated is allowed (same rank), and a store that
+    // ever ran with human approval can never start unified (the automated policy is weaker than a person)
+    let mut d = start(&r2, std::slice::from_ref(&auto))
+        .expect("unified store restarted as plain automated");
+    terminate(&mut d);
+    let mut d = start(&r2, &[auto.clone(), "--standing-grants".into()]).expect("and back");
+    terminate(&mut d);
+    let r3 = root();
+    let mut h = start(&r3, &human_flags(&r3)).expect("human mode starts");
+    terminate(&mut h);
+    let e = start(&r3, &[auto.clone(), "--standing-grants".into()]).expect_err("downgrade");
+    assert!(
+        e.contains("approval-downgrade-refused") || e.contains("downgrade"),
+        "{e}"
+    );
+    // production-v1 never accepts it
+    let o = Command::new(nexusd_bin())
+        .args(["--security-profile", "production-v1", "--standing-grants"])
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+}

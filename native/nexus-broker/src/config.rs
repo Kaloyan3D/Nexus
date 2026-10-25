@@ -190,6 +190,21 @@ pub struct BrokerConfig {
 }
 
 impl BrokerConfig {
+    /// The registry alone (permissions management needs no snapshots): interactive profile with a project
+    /// registry. Never used to open or snapshot a folder.
+    pub fn registry_env(&self) -> Option<crate::projects::Env<'_>> {
+        let (dir, trust) = self.project_registry.as_ref()?;
+        if !self.interactive {
+            return None;
+        }
+        Some(crate::projects::Env {
+            registry_dir: dir,
+            trust,
+            snapshots_dir: self.project_snapshots.as_deref().unwrap_or(&self.state_dir),
+            forbidden: Vec::new(),
+        })
+    }
+
     /// Project onboarding environment, when this broker can open projects.
     pub fn project_env(&self) -> Option<crate::projects::Env<'_>> {
         let (dir, trust) = self.project_registry.as_ref()?;

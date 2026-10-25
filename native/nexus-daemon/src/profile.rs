@@ -53,6 +53,7 @@ const FORBIDDEN: &[&str] = &[
     "--worktree-root",
     "--project-registry",
     "--autonomous-workspace-policy",
+    "--standing-grants",
     "--project-registry-owner-uid",
 ];
 

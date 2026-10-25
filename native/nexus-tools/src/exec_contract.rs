@@ -75,6 +75,25 @@ impl NetScope {
     pub fn is_implemented(self) -> bool {
         matches!(self, NetScope::Offline | NetScope::Install)
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NetScope::Offline => "offline",
+            NetScope::Install => "install",
+            NetScope::Controlled => "controlled",
+            NetScope::Full => "full",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "offline" => Some(NetScope::Offline),
+            "install" => Some(NetScope::Install),
+            "controlled" => Some(NetScope::Controlled),
+            "full" => Some(NetScope::Full),
+            _ => None,
+        }
+    }
 }
 
 /// Approval behaviour. Recorded for the vocabulary; the daemon's existing mode switch still decides (ADR S2).
@@ -83,6 +102,23 @@ pub enum Approval {
     Ask,
     #[default]
     Auto,
+}
+
+impl Approval {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Approval::Ask => "ask",
+            Approval::Auto => "auto",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "ask" => Some(Approval::Ask),
+            "auto" => Some(Approval::Auto),
+            _ => None,
+        }
+    }
 }
 
 /// The three independent axes of one execution.
