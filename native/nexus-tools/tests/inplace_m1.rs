@@ -82,6 +82,14 @@ fn scratch_scope_is_unchanged_effects_are_discarded_and_reported() {
     );
     assert_eq!(v["scratchEffects"]["persisted"], false);
     assert!(
+        v.get("effects").is_none(),
+        "a scratch run gained an effects record: {v}"
+    );
+    assert!(
+        !fx.dir.path().join("exec/_effects").exists(),
+        "a scratch run wrote a ledger"
+    );
+    assert!(
         !fx.ws.join("out").exists(),
         "scratch effects reached the project"
     );
@@ -375,7 +383,7 @@ fn cancellation_stops_the_whole_tree_and_keeps_only_what_was_written() {
     );
     assert!(
         std::fs::read_dir(fx.dir.path().join("exec"))
-            .map(|d| d.count())
+            .map(|d| d.flatten().filter(|e| e.file_name() != "_effects").count())
             .unwrap_or(0)
             == 0,
         "run dir left behind"

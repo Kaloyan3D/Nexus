@@ -16924,6 +16924,238 @@ fn m1_dependency_and_cache_folders_made_by_in_place_commands_are_not_part_of_the
     b.shutdown();
 }
 
+// ------------------------------------------------ M3A: command effects ledger
+
+/// The persisted effects records of every in-place execution of this daemon.
+fn effects_records(fx: &Fx) -> Vec<Value> {
+    let dir = fx.ddir.join("exec").join("_effects");
+    std::fs::read_dir(dir)
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+                .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn pre_manifests(fx: &Fx) -> usize {
+    std::fs::read_dir(fx.ddir.join("exec").join("_effects"))
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.file_name().to_string_lossy().contains(".pre."))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn proc_events_of(fx: &Fx, st: &ic::IntentRun) -> Vec<Value> {
+    let ti = st.task_instance_id.clone().unwrap();
+    let tid = st.task_id.clone().unwrap();
+    let mut all = Vec::new();
+    for a in 1..=last_attempts(st) {
+        all.extend(tool_events(fx, &ti, &format!("{tid}-A{a}")));
+    }
+    all
+}
+
+#[test]
+fn m3a_observed_changes_are_in_the_project_diff_and_the_ledger_matches_the_journal() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_in_place(
+        script(
+            vec![(
+                "proc_run",
+                r#"{"program":"sh","args":["-c","mkdir -p src/gen node_modules/p && echo a > src/gen/a.txt && echo b > src/b.txt && echo 1 > node_modules/p/i.js && echo c >> README.md"]}"#.to_owned(),
+            )],
+            "Done.",
+        ),
+        &[],
+    );
+    let b = start_interactive(&fx, "m3a1");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "m3a-diff-00000001", |_| {}),
+        150,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let d = ic::diff(b.socket_path(), &run.run_id).unwrap();
+    let diff_paths: std::collections::HashSet<String> =
+        d.files.iter().map(|f| f.path.clone()).collect();
+    let recs = effects_records(&fx);
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    let rec = &recs[0];
+    assert_eq!(rec["outcome"], "observed", "{rec}");
+    let mut seen = Vec::new();
+    for k in ["created", "modified", "deleted"] {
+        for p in rec["effects"][k]["paths"].as_array().unwrap() {
+            seen.push(p.as_str().unwrap().to_owned());
+        }
+    }
+    assert!(
+        seen.contains(&"src/gen/a.txt".to_owned()) && seen.contains(&"src/b.txt".to_owned()),
+        "{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|p| p.starts_with("node_modules/")),
+        "dependency files enumerated: {seen:?}"
+    );
+    for p in &seen {
+        assert!(
+            diff_paths.contains(p),
+            "observed change {p} is missing from the project diff {diff_paths:?}"
+        );
+    }
+    // the journal summary and the file agree
+    let ps = proc_events_of(&fx, &run);
+    let exited = ps
+        .iter()
+        .find(|r| r["phase"] == "exited")
+        .unwrap_or_else(|| panic!("no exited: {ps:#?}"));
+    assert_eq!(exited["process"]["effects"]["digest"], rec["digest"]);
+    assert_eq!(exited["process"]["effects"]["outcome"], "observed");
+    assert_eq!(
+        pre_manifests(&fx),
+        0,
+        "a pre-manifest outlived its execution"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn m3a_a_crash_after_the_observation_keeps_the_record_and_still_closes_the_run_as_interrupted() {
+    if !sandbox_ready() {
+        return;
+    }
+    let mut fx = fixture_in_place(
+        script(
+            vec![(
+                "proc_run",
+                r#"{"program":"sh","args":["-c","mkdir -p obsdir && echo seen > obsdir/f.txt"]}"#
+                    .to_owned(),
+            )],
+            "never reached",
+        ),
+        &[("NEXUS_TEST_WRITE_CRASH_AT", "proc-after-observation")],
+    );
+    let b = start_interactive(&fx, "m3a2");
+    let r = ic::submit(
+        b.socket_path(),
+        &code_intent_for("other", "go", "m3a-obs-crash-001", |_| {}),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(90);
+    while !matches!(fx.daemon.try_wait(), Ok(Some(_))) {
+        assert!(
+            Instant::now() < end,
+            "the crash point never fired: {:?} {:?}",
+            ic::status(b.socket_path(), &r.run_id),
+            effects_records(&fx)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    b.shutdown();
+    fx.restart_daemon();
+    let b = start_interactive(&fx, "m3a2");
+    let st = wait_terminal(b.socket_path(), &r.run_id, 90);
+    assert!(st.terminal && st.state != "completed", "{st:?}");
+    let all = proc_events_of(&fx, &st);
+    let phases: Vec<&str> = all.iter().filter_map(|r| r["phase"].as_str()).collect();
+    assert!(
+        phases.contains(&"interrupted") && !phases.contains(&"exited"),
+        "{phases:?}"
+    );
+    let intr = all.iter().find(|r| r["phase"] == "interrupted").unwrap();
+    assert_eq!(intr["process"]["effects"]["outcome"], "uncertain", "{intr}");
+    let recs = effects_records(&fx);
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    let created = recs[0]["effects"]["created"]["paths"].to_string();
+    assert!(created.contains("obsdir/f.txt"), "{created}");
+    assert_eq!(pre_manifests(&fx), 0);
+    b.shutdown();
+}
+
+#[test]
+fn m3a_killing_the_daemon_mid_command_records_what_the_recovery_saw_as_uncertain() {
+    if !sandbox_ready() {
+        return;
+    }
+    let mut fx = fixture_in_place(
+        script(
+            vec![(
+                "proc_run",
+                r#"{"program":"sh","args":["-c","mkdir -p part && echo half > part/h.txt; sleep 117"]}"#
+                    .to_owned(),
+            )],
+            "never reached",
+        ),
+        &[],
+    );
+    let b = start_interactive(&fx, "m3a3");
+    let sock = b.socket_path().to_owned();
+    let r = ic::submit(
+        &sock,
+        &code_intent_for("other", "go", "m3a-kill-00000001", |_| {}),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(60);
+    let running = || {
+        std::fs::read_dir("/proc").unwrap().flatten().any(|e| {
+            std::fs::read(e.path().join("cmdline"))
+                .map(|c| String::from_utf8_lossy(&c).contains("sleep\x00117"))
+                .unwrap_or(false)
+        })
+    };
+    while !(running() && working_copy(&fx).is_some_and(|w| w.join("part/h.txt").exists())) {
+        assert!(Instant::now() < end, "command never started");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // the durable pre-manifest exists while the command runs
+    assert_eq!(pre_manifests(&fx), 1);
+    kill(&mut fx.daemon);
+    let gone = Instant::now();
+    while running() && gone.elapsed() < Duration::from_secs(30) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!running());
+    b.shutdown();
+    fx.restart_daemon();
+    let b = start_interactive(&fx, "m3a3");
+    let st = wait_terminal(b.socket_path(), &r.run_id, 60);
+    assert!(st.terminal && st.state != "completed", "{st:?}");
+    let all = proc_events_of(&fx, &st);
+    let intr = all
+        .iter()
+        .find(|r| r["phase"] == "interrupted")
+        .expect("interrupted");
+    let e = &intr["process"]["effects"];
+    assert_eq!(e["outcome"], "uncertain", "{intr}");
+    assert!(
+        e["outcomeReasons"]
+            .to_string()
+            .contains("recovered-after-crash"),
+        "{e}"
+    );
+    assert!(
+        e["created"]["paths"].to_string().contains("part/h.txt"),
+        "{e}"
+    );
+    let recs = effects_records(&fx);
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0]["outcome"], "uncertain");
+    assert_eq!(recs[0]["process"]["settled"], true);
+    assert_eq!(pre_manifests(&fx), 0, "recovery left the pre-manifest");
+    assert_ne!(
+        st.coding_outcome.as_ref().map(|o| o.verification.as_str()),
+        Some("verified-passed")
+    );
+    b.shutdown();
+}
+
 // ------------------------------------------------ Standing grants (permissions milestone)
 
 /// The interactive profile with standing grants AND the independent approver channel (test topology:

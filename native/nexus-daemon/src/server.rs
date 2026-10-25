@@ -2313,6 +2313,13 @@ impl nexus_tools::process::ProcessHooks for DaemonProcessHooks<'_> {
         self.last_seq = e.seq;
         Ok(())
     }
+    fn effects(&mut self, record: &nexus_tools::observe::EffectsRecord) {
+        // A task that edits its real folder keeps the observation next to its pre-images, so its diff
+        // and its outside-change check can include what commands did.
+        if let Some((store, _)) = direct_store(self.daemon, &self.task) {
+            let _ = store.record_command_effects(record);
+        }
+    }
     fn fence(&mut self) -> Result<(), nexus_tools::ToolError> {
         let k = self.daemon.kernel.lock().map_err(|_| {
             nexus_tools::ToolError::new(
@@ -3311,6 +3318,7 @@ fn do_worktree_diff(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                         "diffDigest": d.diff_digest,
                         "diffTruncated": d.diff_truncated,
                         "createdDirs": d.created_dirs,
+                        "commandEvidence": d.command_evidence,
                     },
                     "direct": true,
                 }),
@@ -3389,6 +3397,27 @@ fn do_worktree_list(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     }
     out.sort_by_key(|v| v["createdAtMs"].as_u64().unwrap_or(0));
     ok(&req.id, serde_json::json!({ "worktrees": out }))
+}
+
+/// The persisted effects record of one in-place execution (read-only evidence; the issuer asks, nothing is
+/// authorized by it). The id is validated to the Kernel's execution-id alphabet before it names a file.
+fn do_exec_effects(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    if let Err(r) = only_keys(&req.params, &["executionId"], &req.id) {
+        return r;
+    }
+    let id = match get_string(&req.params, "executionId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let dir = nexus_tools::observe::effects_dir(&daemon.run_root);
+    match nexus_tools::observe::read_record(&dir, &id) {
+        Some(rec) => ok(&req.id, serde_json::json!({ "effects": rec })),
+        None => fail(
+            &req.id,
+            "not-found",
+            "not-found: no effects record for that execution",
+        ),
+    }
 }
 
 fn do_worktree_stat(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
@@ -4347,6 +4376,7 @@ pub fn dispatch(
             "worktree-remove" => do_worktree_remove(daemon, req),
             "worktree-list" => do_worktree_list(daemon, req),
             "worktree-stat" => do_worktree_stat(daemon, req),
+            "exec-effects" => do_exec_effects(daemon, req),
             "seal" => do_seal(daemon, req),
             "accept" => do_accept(daemon, req),
             _ => unreachable!("privileged set is fixed"),

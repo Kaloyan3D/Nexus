@@ -681,6 +681,8 @@ pub fn run_process_call(
         scope_max_wall_ms,
         fs_scope: p.fs_scope,
         grant: p.grant.as_ref(),
+        task_instance_id: &p.request.task_instance_id,
+        command_id: &p.request.command_id,
     };
     crate::process::run_process(&ctx, args, cancel, hooks)
 }
@@ -746,7 +748,11 @@ pub fn reconcile_processes(kernel: &mut Kernel) -> Result<u64, ToolError> {
     for op in open {
         obs.insert(
             op.request_id.clone(),
-            crate::process::observe_process_for_recovery(&op.prepared, op.running.as_ref()),
+            crate::process::observe_process_for_recovery(
+                &op.prepared,
+                op.running.as_ref(),
+                (&op.execution_id, &op.task_instance_id, &op.command_id),
+            ),
         );
     }
     kernel

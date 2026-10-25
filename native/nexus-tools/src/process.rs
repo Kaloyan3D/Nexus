@@ -42,6 +42,9 @@ pub trait ProcessHooks {
     fn journal(&mut self, phase: &str, payload: serde_json::Value) -> Result<(), ToolError>;
     fn fence(&mut self) -> Result<(), ToolError>;
     fn at(&mut self, _point: &str) {}
+    /// An in-place execution's effects record was persisted (before its end is journaled). The daemon feeds
+    /// it to the Direct Workspace evidence of a task that has one; the default keeps nothing.
+    fn effects(&mut self, _record: &crate::observe::EffectsRecord) {}
 }
 
 // ------------------------------------------------------------ policy
@@ -135,6 +138,8 @@ pub struct CommandPolicy {
     dep_cache: Option<PathBuf>,
     /// Autonomy-first command set (`workbench.rs`) instead of the strict exact-argv one.
     workbench: bool,
+    /// Resource budget of the filesystem observation of in-place commands (daemon configuration).
+    observe: crate::observe::ObserveBudget,
 }
 
 fn arg_ok(a: &str) -> bool {
@@ -156,6 +161,7 @@ impl CommandPolicy {
             dep_cache: None,
             test_programs: Vec::new(),
             workbench: false,
+            observe: Default::default(),
         }
     }
 
@@ -168,6 +174,16 @@ impl CommandPolicy {
 
     pub fn is_workbench(&self) -> bool {
         self.workbench
+    }
+
+    /// Set the observation budget (a daemon setting; no tool argument can reach it).
+    pub fn with_observe_budget(mut self, b: crate::observe::ObserveBudget) -> Self {
+        self.observe = b;
+        self
+    }
+
+    pub fn observe_budget(&self) -> &crate::observe::ObserveBudget {
+        &self.observe
     }
 
     pub(crate) fn toolchain_has_cargo(&self) -> bool {
@@ -191,6 +207,7 @@ impl CommandPolicy {
             dep_cache: None,
             test_programs: programs.iter().map(|s| s.to_string()).collect(),
             workbench: false,
+            observe: Default::default(),
         }
     }
 
@@ -582,6 +599,9 @@ pub struct ProcessContext<'a> {
     pub fs_scope: crate::exec_contract::FsScope,
     /// The standing grant sealed in the process scope, recorded verbatim in the journal (absent = none).
     pub grant: Option<&'a crate::authorization::GrantRef>,
+    /// Identity of the task and command the execution belongs to (recorded in the effects ledger).
+    pub task_instance_id: &'a str,
+    pub command_id: &'a str,
 }
 
 /// Read-only binds plus the provenance note recorded in the journal.
@@ -1234,6 +1254,18 @@ pub fn run_process(
     } else {
         base.join(&unit)
     };
+    // 2b. In place: describe the workspace BEFORE the command, through the pinned descriptor, and make that
+    //     description durable together with the execution's intent. (Scratch runs are not observed.)
+    let eff_dir = crate::observe::effects_dir(ctx.run_root);
+    let obs_budget = ctx.policy.observe_budget().clone();
+    let mut observation: Option<(crate::observe::Manifest, bool, bool, u64)> = None;
+    if in_place {
+        let started = crate::observe::now_ms();
+        let pre = crate::observe::observe(ctx.ws, &obs_budget);
+        let persisted = crate::observe::write_pre(&eff_dir, ctx.execution_id, &pre).is_ok();
+        let leads = crate::observe::path_still_leads_to(ctx.ws);
+        observation = Some((pre, persisted, leads, started));
+    }
     // 3. Durable intent BEFORE spawn: identity, digests, limits, cgroup
     //    and run directory (so recovery can find and kill a leftover).
     let mut prepared_record = serde_json::json!({
@@ -1266,6 +1298,24 @@ pub fn run_process(
         "cgroup": cgroup_path.display().to_string(),
         "runDir": run_dir.display().to_string(),
     });
+    if let (Some((pre, persisted, leads, started)), Some(o)) =
+        (&observation, prepared_record.as_object_mut())
+    {
+        // The durable observation boundary: what was seen before the process existed, and where.
+        o.insert(
+            "observation".into(),
+            serde_json::json!({
+                "startedAtMs": started,
+                "workspace": pre.root,
+                "rootPath": ctx.ws.root_path(),
+                "pathLeadsToPinnedRoot": leads,
+                "pre": crate::observe::ManifestBrief::of(pre),
+                "preManifestPersisted": persisted,
+                "budget": obs_budget,
+                "attribution": "temporal",
+            }),
+        );
+    }
     if let (Some(g), Some(o)) = (ctx.grant, prepared_record.as_object_mut()) {
         // Audit: under which permissions this command was allowed to run (sealed by the Kernel).
         o.insert("grant".into(), serde_json::to_value(g).unwrap_or_default());
@@ -1292,6 +1342,7 @@ pub fn run_process(
                         // 4. Last fence, then run.
     if cancel.is_cancelled() {
         let _ = std::fs::remove_dir_all(&run_dir);
+        crate::observe::remove_pre(&eff_dir, ctx.execution_id);
         hooks.journal(
             PH_CANCELLED,
             serde_json::json!({"reason": "cancelled", "processStarted": false}),
@@ -1300,6 +1351,7 @@ pub fn run_process(
     }
     if let Err(e) = hooks.fence() {
         let _ = std::fs::remove_dir_all(&run_dir);
+        crate::observe::remove_pre(&eff_dir, ctx.execution_id);
         hooks.journal(
             PH_CANCELLED,
             serde_json::json!({"reason": "revoked", "detail": e.message, "processStarted": false}),
@@ -1325,15 +1377,55 @@ pub fn run_process(
         .then(|| scratch_effects(&src, &report))
         .filter(|e| !e.is_empty());
     let _ = std::fs::remove_dir_all(&run_dir);
+    // In place: observe what the workspace looks like now and record the difference. `run_sandboxed` returns
+    // Ok only after the execution cgroup was emptied; an error means the tree may not have settled.
+    let mut ledger: Option<crate::observe::EffectsRecord> = None;
+    if let Some((pre, _, _, started)) = observation.take() {
+        if outcome.is_err() {
+            kill_and_remove_cgroup(&cgroup_path);
+        }
+        let state = match &outcome {
+            Ok(o) => crate::observe::ProcessState {
+                exited: true,
+                how: o.exit.reason().into(),
+                exit_code: match &o.exit {
+                    ExitKind::Exited(c) => Some(i64::from(*c)),
+                    _ => None,
+                },
+                settled: true,
+            },
+            Err(_) => crate::observe::ProcessState {
+                exited: false,
+                how: "unknown".into(),
+                exit_code: None,
+                settled: false,
+            },
+        };
+        ledger = Some(finish_observation(
+            ctx,
+            &eff_dir,
+            &obs_budget,
+            pre,
+            started,
+            state,
+        ));
+    }
     let out = match outcome {
         Ok(o) => o,
         Err(e) => {
             // Spawn/cleanup failure. The cgroup is killed best-effort.
             kill_and_remove_cgroup(&cgroup_path);
+            if let Some(rec) = &ledger {
+                hooks.effects(rec);
+            }
             return failed(hooks, &run_dir, e.code, e.message);
         }
     };
     crash_point("proc-after-exit");
+    if let Some(rec) = &ledger {
+        crash_point("proc-after-observation");
+        hooks.effects(rec);
+    }
     // 5. Redact + bound, then record the explicit outcome.
     let mut red = Redaction::default();
     let so = redact_stream(&out.stdout, out.stdout_truncated, &mut red);
@@ -1344,13 +1436,17 @@ pub fn run_process(
         _ => (None, None),
     };
     let reason = out.exit.reason();
-    let verification = verdict(
+    let mut verification = verdict(
         match &out.exit {
             ExitKind::Exited(c) => Some(i64::from(*c)),
             _ => None,
         },
         pipefail,
     );
+    // A command whose effects could not be established cannot be reported as verified.
+    if ledger.as_ref().is_some_and(|l| l.outcome == "uncertain") && verification == "pass" {
+        verification = "unverified";
+    }
     let phase = match out.exit {
         ExitKind::Cancelled | ExitKind::Revoked(_) => PH_CANCELLED,
         _ => PH_EXITED,
@@ -1399,6 +1495,9 @@ pub fn run_process(
         o.insert("fsScope".into(), "workspace".into());
         o.insert("writeBack".into(), "in-place".into());
     }
+    if let (Some(l), Some(o)) = (&ledger, record.as_object_mut()) {
+        o.insert("effects".into(), crate::observe::summary(l, 20));
+    }
     hooks.journal(phase, record)?;
     let output = serde_json::json!({
         "reason": reason, "exitCode": code, "signal": signal,
@@ -1423,6 +1522,9 @@ pub fn run_process(
             "files the command created or changed are in the task's working copy".into(),
         );
     }
+    if let (Some(l), Some(o)) = (&ledger, output.as_object_mut()) {
+        o.insert("effects".into(), crate::observe::summary(l, 40));
+    }
     if let (Some(e), Some(o)) = (&effects, output.as_object_mut()) {
         let mut v = serde_json::to_value(e).unwrap_or_default();
         v["persisted"] = serde_json::json!(false);
@@ -1445,6 +1547,54 @@ pub fn run_process(
     ))
 }
 
+/// Post-state observation, comparison, outcome and durable ledger write for one in-place execution.
+fn finish_observation(
+    ctx: &ProcessContext<'_>,
+    dir: &Path,
+    budget: &crate::observe::ObserveBudget,
+    pre: crate::observe::Manifest,
+    started: u64,
+    state: crate::observe::ProcessState,
+) -> crate::observe::EffectsRecord {
+    use crate::observe as ob;
+    let post = ob::observe(ctx.ws, budget);
+    let (mut fx, changed) = ob::diff(&pre, &post, budget);
+    ob::hash_changed(ctx.ws, &changed, &mut fx, budget);
+    let identity_ok = ob::root_identity(ctx.ws).is_some_and(|r| r == pre.root);
+    let (mut outcome, mut reasons) = ob::judge(&pre, Some(&post), &state, identity_ok);
+    let mut rec = ob::EffectsRecord {
+        schema: ob::RECORD_SCHEMA.into(),
+        execution_id: ctx.execution_id.into(),
+        task_instance_id: ctx.task_instance_id.into(),
+        command_id: ctx.command_id.into(),
+        workspace: pre.root.clone(),
+        grant: ctx.grant.and_then(|g| serde_json::to_value(g).ok()),
+        fs_scope: "workspace".into(),
+        started_ms: started,
+        ended_ms: ob::now_ms(),
+        pre: ob::ManifestBrief::of(&pre),
+        post: Some(ob::ManifestBrief::of(&post)),
+        process: state,
+        effects: fx,
+        outcome: outcome.clone(),
+        outcome_reasons: reasons.clone(),
+        attribution: "temporal".into(),
+        note: ob::ATTRIBUTION_NOTE.into(),
+        digest: String::new(),
+    };
+    rec.digest = rec.compute_digest();
+    if ob::write_record(dir, &rec).is_err() {
+        // The evidence could not be stored: say so rather than pretend.
+        outcome = "uncertain".into();
+        reasons.push("ledger-write-failed".into());
+        rec.outcome = outcome;
+        rec.outcome_reasons = reasons;
+        rec.digest = rec.compute_digest();
+    }
+    ob::remove_pre(dir, ctx.execution_id);
+    rec
+}
+
 fn cancelled_result() -> ToolResultV1 {
     ToolResultV1::failure(
         "proc.run",
@@ -1462,6 +1612,7 @@ fn cancelled_result() -> ToolResultV1 {
 pub fn observe_process_for_recovery(
     prepared: &serde_json::Value,
     running: Option<&serde_json::Value>,
+    ids: (&str, &str, &str),
 ) -> serde_json::Value {
     let cg = prepared
         .get("cgroup")
@@ -1494,13 +1645,100 @@ pub fn observe_process_for_recovery(
             dir_removed = std::fs::remove_dir_all(rd).is_ok();
         }
     }
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "reason": "no terminal record (daemon crash or restart); never restarted",
         "processStarted": running.is_some(),
         "outcome": if running.is_some() { "uncertain" } else { "never-started" },
         "leftoverProcessesKilled": killed,
         "runDirRemoved": dir_removed,
-    })
+    });
+    if let Some(e) = recover_effects(prepared, running.is_some(), ids) {
+        v["effects"] = e;
+    }
+    v
+}
+
+/// Recovery of the effects of an in-place execution that has no terminal record: the process tree is gone
+/// (killed above), so observe the workspace again and compare with the pre-manifest that was persisted
+/// before the process started. The result is always `uncertain` (nobody saw the process end).
+fn recover_effects(
+    prepared: &serde_json::Value,
+    started: bool,
+    (exec_id, task_id, command_id): (&str, &str, &str),
+) -> Option<serde_json::Value> {
+    use crate::observe as ob;
+    let obs = prepared.get("observation")?;
+    let run_dir = PathBuf::from(prepared.get("runDir")?.as_str()?);
+    let dir = ob::effects_dir(run_dir.parent()?);
+    // A record written before the crash (the process ended and was observed) is authoritative evidence of
+    // what happened, but the end was never journaled: still uncertain.
+    if let Some(mut rec) = ob::read_record(&dir, exec_id) {
+        rec.outcome = "uncertain".into();
+        rec.outcome_reasons.push("recovered-after-crash".into());
+        return Some(ob::summary(&rec, 20));
+    }
+    let uncertain = |why: &str| {
+        Some(serde_json::json!({
+            "outcome": "uncertain", "outcomeReasons": [why, "recovered-after-crash"],
+            "complete": false, "attribution": "temporal", "note": ob::ATTRIBUTION_NOTE,
+        }))
+    };
+    if !started {
+        ob::remove_pre(&dir, exec_id);
+        return None;
+    }
+    let Some(pre) = ob::read_pre(&dir, exec_id) else {
+        return uncertain("pre-manifest-unavailable");
+    };
+    let root = obs.get("rootPath").and_then(|v| v.as_str())?;
+    let Ok(ws) =
+        crate::workspace::Workspace::open_root(root, crate::workspace::WorkspacePolicy::default())
+    else {
+        return uncertain("root-unavailable");
+    };
+    let identity_ok = ob::root_identity(&ws).is_some_and(|r| r == pre.root);
+    let budget: ob::ObserveBudget = obs
+        .get("budget")
+        .and_then(|b| serde_json::from_value(b.clone()).ok())
+        .unwrap_or_default();
+    let post = ob::observe(&ws, &budget);
+    let (mut fx, changed) = ob::diff(&pre, &post, &budget);
+    if identity_ok {
+        ob::hash_changed(&ws, &changed, &mut fx, &budget);
+    }
+    let state = ob::ProcessState {
+        exited: false,
+        how: "unknown".into(),
+        exit_code: None,
+        settled: true,
+    };
+    let (_, mut reasons) = ob::judge(&pre, Some(&post), &state, identity_ok);
+    reasons.push("recovered-after-crash".into());
+    let mut rec = ob::EffectsRecord {
+        schema: ob::RECORD_SCHEMA.into(),
+        execution_id: exec_id.into(),
+        task_instance_id: task_id.into(),
+        command_id: command_id.into(),
+        workspace: pre.root.clone(),
+        grant: prepared.get("grant").cloned(),
+        fs_scope: "workspace".into(),
+        started_ms: obs.get("startedAtMs").and_then(|v| v.as_u64()).unwrap_or(0),
+        ended_ms: ob::now_ms(),
+        pre: ob::ManifestBrief::of(&pre),
+        post: Some(ob::ManifestBrief::of(&post)),
+        process: state,
+        effects: fx,
+        outcome: "uncertain".into(),
+        outcome_reasons: reasons,
+        attribution: "temporal".into(),
+        note: ob::ATTRIBUTION_NOTE.into(),
+        digest: String::new(),
+    };
+    rec.digest = rec.compute_digest();
+    if ob::write_record(&dir, &rec).is_ok() {
+        ob::remove_pre(&dir, exec_id);
+    }
+    Some(ob::summary(&rec, 20))
 }
 
 #[cfg(test)]

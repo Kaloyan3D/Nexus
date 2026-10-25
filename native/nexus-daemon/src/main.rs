@@ -1072,6 +1072,11 @@ fn run(args: &[String]) -> i32 {
             );
         }
     }
+    // Effects ledger files are bounded evidence, not an archive: drop the old ones (30 days).
+    let _ = nexus_tools::observe::sweep(
+        &nexus_tools::observe::effects_dir(&layout.dir.join("exec")),
+        std::time::Duration::from_secs(30 * 24 * 3600),
+    );
     // A4.2: a restart never fabricates or preserves consent. Approved but
     // unconsumed approvals lapse; reviewed-pending ones must be re-reviewed.
     match if integrity_blocked.is_some() {
@@ -1246,6 +1251,14 @@ fn run(args: &[String]) -> i32 {
             // the interactive (automated workspace policy) profile runs the workbench
             // command set; the strict profile keeps its exact-argv set
             let p = if autonomous { p.with_workbench() } else { p };
+            let mut budget = nexus_tools::observe::ObserveBudget::default();
+            if let Some(n) = flag_str(args, "--observe-max-entries").and_then(|v| v.parse().ok()) {
+                budget.max_entries = n;
+            }
+            if let Some(n) = flag_str(args, "--observe-max-ms").and_then(|v| v.parse().ok()) {
+                budget.max_wall_ms = n;
+            }
+            let p = p.with_observe_budget(budget);
             match flag(args, "--dep-cache") {
                 Some(d) => p.with_dep_cache(d),
                 None => p,

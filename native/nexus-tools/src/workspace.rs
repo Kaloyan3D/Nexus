@@ -352,11 +352,11 @@ fn statx_at(dirfd: RawFd, name: &CString, flags: i32) -> Result<Identity, i32> {
     })
 }
 
-fn fstatat_nofollow(dirfd: RawFd, name: &CString) -> Result<Identity, i32> {
+pub(crate) fn fstatat_nofollow(dirfd: RawFd, name: &CString) -> Result<Identity, i32> {
     statx_at(dirfd, name, libc::AT_SYMLINK_NOFOLLOW)
 }
 
-fn fstat_fd(fd: RawFd) -> Result<Identity, i32> {
+pub(crate) fn fstat_fd(fd: RawFd) -> Result<Identity, i32> {
     let empty = CString::new("").expect("static");
     statx_at(fd, &empty, libc::AT_EMPTY_PATH)
 }
@@ -381,7 +381,7 @@ const RESOLVE_BENEATH: u64 = 0x08;
 /// (defense in depth on top of the userspace `statx` checks); falls back to
 /// `openat(O_NOFOLLOW)` when `openat2` is unavailable (the userspace mount-ID
 /// and identity checks still apply).
-fn open_rel(parent: RawFd, name: &CString, flags: i32) -> Result<RawFd, i32> {
+pub(crate) fn open_rel(parent: RawFd, name: &CString, flags: i32) -> Result<RawFd, i32> {
     if !OPENAT2_UNAVAILABLE.load(Ordering::Relaxed) {
         let how = OpenHow {
             flags: flags as u64,

@@ -128,6 +128,9 @@ pub struct Entry {
     #[serde(default)]
     pub applied: bool,
     pub first_touch_ms: u64,
+    /// When Nexus last verified an operation on this path (used to tell a tool write from a command's).
+    #[serde(default)]
+    pub last_post_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +143,41 @@ struct Manifest {
     /// Folders this task created (workspace-relative, in creation order).
     #[serde(default)]
     dirs: Vec<String>,
+    /// What commands were observed to change in the folder (temporal evidence, no pre-images).
+    #[serde(default)]
+    observed: Vec<Observed>,
+}
+
+/// Cap on remembered command observations per task (oldest dropped, said so in `observedDropped`).
+pub const MAX_OBSERVED: usize = 64;
+
+/// One path a command was observed to change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservedPath {
+    pub path: String,
+    /// `created` | `modified` | `deleted`
+    pub kind: String,
+    /// sha256 of the post-image when the observer hashed it (absent = not hashed or deleted).
+    pub post_sha: Option<String>,
+    /// A tool write (fs_write) on this path completed inside the command's window: whose change this is
+    /// cannot be told apart.
+    pub ambiguous: bool,
+}
+
+/// The Direct Workspace's view of one observed command execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Observed {
+    pub execution_id: String,
+    pub command_id: String,
+    pub started_ms: u64,
+    pub ended_ms: u64,
+    /// `observed` | `partial` | `uncertain`
+    pub outcome: String,
+    /// The lists below name every change (observation complete, nothing truncated).
+    pub complete: bool,
+    pub paths: Vec<ObservedPath>,
 }
 
 fn now_ms() -> u64 {
@@ -208,6 +246,7 @@ impl Store {
             root: root.to_owned(),
             entries: Vec::new(),
             dirs: Vec::new(),
+            observed: Vec::new(),
         })?;
         Ok(s)
     }
@@ -349,6 +388,7 @@ impl Store {
             last_post_sha: None,
             applied: false,
             first_touch_ms: now_ms(),
+            last_post_ms: 0,
         });
         self.write_manifest(&m)
     }
@@ -361,6 +401,7 @@ impl Store {
             Some(e) => {
                 e.last_post_sha = post.map(str::to_owned);
                 e.applied = true;
+                e.last_post_ms = now_ms();
             }
             None => {
                 return Err(err(
@@ -370,6 +411,64 @@ impl Store {
             }
         }
         self.write_manifest(&m)
+    }
+
+    /// Remember what an observed in-place command changed in the folder. Idempotent per execution id.
+    pub fn record_command_effects(
+        &self,
+        rec: &crate::observe::EffectsRecord,
+    ) -> Result<(), DirectError> {
+        let _g = self.lock()?;
+        let mut m = self.read_manifest()?;
+        if m.observed
+            .iter()
+            .any(|o| o.execution_id == rec.execution_id)
+        {
+            return Ok(());
+        }
+        let fx = &rec.effects;
+        let mut paths: Vec<ObservedPath> = Vec::new();
+        for (kind, list) in [
+            ("created", &fx.created),
+            ("modified", &fx.modified),
+            ("deleted", &fx.deleted),
+        ] {
+            for p in &list.paths {
+                let ambiguous = m.entries.iter().any(|e| {
+                    e.path == *p
+                        && e.last_post_ms >= rec.started_ms
+                        && e.last_post_ms <= rec.ended_ms
+                });
+                paths.push(ObservedPath {
+                    path: p.clone(),
+                    kind: kind.to_owned(),
+                    post_sha: fx.post_sha256.get(p).cloned(),
+                    ambiguous,
+                });
+            }
+        }
+        let complete = rec.outcome == "observed"
+            && !fx.lists_may_be_incomplete
+            && fx.created.count + fx.modified.count + fx.deleted.count == paths.len() as u64;
+        m.observed.push(Observed {
+            execution_id: rec.execution_id.clone(),
+            command_id: rec.command_id.clone(),
+            started_ms: rec.started_ms,
+            ended_ms: rec.ended_ms,
+            outcome: rec.outcome.clone(),
+            complete,
+            paths,
+        });
+        let over = m.observed.len().saturating_sub(MAX_OBSERVED);
+        if over > 0 {
+            m.observed.drain(..over);
+        }
+        self.write_manifest(&m)
+    }
+
+    /// Command observations, oldest first.
+    pub fn observed(&self) -> Result<Vec<Observed>, DirectError> {
+        Ok(self.read_manifest()?.observed)
     }
 
     fn read_pre(&self, e: &Entry) -> Option<Vec<u8>> {
@@ -470,6 +569,35 @@ pub fn external_changes(store: &Store, root: &str) -> Result<Vec<String>, Direct
             out.push(e.path);
         }
     }
+    // Paths only a command changed: what the command left is the expected state; a later difference
+    // (a user edit after the command) is an outside change. The latest observation of a path wins.
+    let known: std::collections::HashSet<String> =
+        store.entries()?.into_iter().map(|e| e.path).collect();
+    let mut latest: std::collections::BTreeMap<String, ObservedPath> = Default::default();
+    for o in store.observed()? {
+        for p in o.paths {
+            latest.insert(p.path.clone(), p);
+        }
+    }
+    for (path, o) in latest {
+        if known.contains(&path) {
+            continue;
+        }
+        let cur = read_current(&ws, &path).ok().flatten();
+        let changed = match (o.kind.as_str(), &o.post_sha, &cur) {
+            ("deleted", _, Some(_)) => true,
+            ("deleted", _, None) => false,
+            (_, _, None) => true,
+            (_, Some(sha), Some(b)) => &sha_hex(b) != sha,
+            // not hashed (too large, secret-shaped): nothing to compare against
+            (_, None, Some(_)) => false,
+        };
+        if changed {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out.dedup();
     Ok(out)
 }
 
@@ -483,6 +611,13 @@ pub struct FileDiff {
     pub deletions: Option<u64>,
     /// The file changed after Nexus's last verified write (someone else edited it).
     pub external_change: bool,
+    /// `tool` (Nexus recorded a pre-image) | `command` (observed after a command ran; no pre-image)
+    pub origin: String,
+    /// `exact` for tool writes; for commands `temporal` or `ambiguous` (see the observer's note)
+    pub attribution: String,
+    /// The diff text for this file is against a recorded pre-image. False for command-origin
+    /// modifications and deletions: only the fact of the change is known.
+    pub pre_image: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -495,6 +630,18 @@ pub struct DirectDiff {
     pub diff_truncated: bool,
     /// Folders the task created that exist now.
     pub created_dirs: Vec<String>,
+    /// Changes made by commands that cannot be shown as a diff (no pre-image), and how reliable the
+    /// command evidence is. Empty when no command ran in place.
+    pub command_evidence: CommandEvidence,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandEvidence {
+    pub executions: u64,
+    /// Some observation was partial, uncertain, truncated, or ambiguous: the list may be incomplete.
+    pub incomplete: bool,
+    pub note: String,
 }
 
 /// What this task changed: pre-image vs the current file, for the paths it touched only.
@@ -542,9 +689,84 @@ pub fn diff(store: &Store, root: &str) -> Result<DirectDiff, DirectError> {
             additions: None,
             deletions: None,
             external_change: external,
+            origin: "tool".into(),
+            attribution: "exact".into(),
+            pre_image: true,
         });
         changed_paths.push(e.path);
     }
+    // Paths only a command changed.
+    let known: std::collections::HashSet<String> = files.iter().map(|f| f.path.clone()).collect();
+    let all_known: std::collections::HashSet<String> =
+        store.entries()?.into_iter().map(|e| e.path).collect();
+    let observed = store.observed()?;
+    let mut evidence = CommandEvidence {
+        executions: observed.len() as u64,
+        ..Default::default()
+    };
+    let mut latest: std::collections::BTreeMap<String, (ObservedPath, bool)> = Default::default();
+    for o in &observed {
+        if !o.complete {
+            evidence.incomplete = true;
+        }
+        for p in &o.paths {
+            if p.ambiguous {
+                evidence.incomplete = true;
+            }
+            latest.insert(p.path.clone(), (p.clone(), o.complete));
+        }
+    }
+    for (path, (o, complete)) in latest {
+        if known.contains(&path) || all_known.contains(&path) {
+            continue;
+        }
+        let cur = read_current(&ws, &path).unwrap_or(None);
+        let (status, with_pre) = match (o.kind.as_str(), &cur) {
+            ("created", Some(_)) => ("added", true),
+            ("deleted", None) => ("deleted", false),
+            (_, Some(_)) => ("modified", false),
+            // created then removed, or modified then removed: report what is true now
+            (_, None) => ("deleted", false),
+        };
+        if o.ambiguous {
+            evidence.incomplete = true;
+        }
+        let external = match (&o.post_sha, &cur) {
+            (Some(sha), Some(b)) => &sha_hex(b) != sha,
+            _ => false,
+        };
+        if with_pre {
+            if let Some(bytes) = &cur {
+                let p = b_dir.join(&path);
+                if let Some(parent) = p.parent() {
+                    std::fs::create_dir_all(parent).map_err(io)?;
+                }
+                std::fs::write(&p, bytes).map_err(io)?;
+            }
+        }
+        files.push(FileDiff {
+            path: path.clone(),
+            status: status.to_owned(),
+            additions: None,
+            deletions: None,
+            external_change: external,
+            origin: "command".into(),
+            attribution: if o.ambiguous || !complete {
+                "ambiguous".into()
+            } else {
+                "temporal".into()
+            },
+            // a created file is shown whole against nothing, which is exact; the rest cannot be
+            pre_image: with_pre,
+        });
+        if with_pre {
+            changed_paths.push(path);
+        }
+    }
+    if evidence.executions > 0 {
+        evidence.note = crate::observe::ATTRIBUTION_NOTE.into();
+    }
+    let _ = &changed_paths;
     let files_truncated = files.len() > MAX_DIFF_FILES;
     files.truncate(MAX_DIFF_FILES);
     let created_dirs: Vec<String> = store
@@ -565,6 +787,7 @@ pub fn diff(store: &Store, root: &str) -> Result<DirectDiff, DirectError> {
             diff_digest: sha_hex(b""),
             diff_truncated: false,
             created_dirs,
+            command_evidence: evidence,
         });
     }
     let (status, out) = crate::gitwt::run_git(
@@ -666,6 +889,7 @@ pub fn diff(store: &Store, root: &str) -> Result<DirectDiff, DirectError> {
         diff_digest,
         diff_truncated,
         created_dirs,
+        command_evidence: evidence,
     })
 }
 
