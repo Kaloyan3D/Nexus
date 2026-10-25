@@ -17,6 +17,8 @@
 
 pub mod authorization;
 pub mod checkpoint;
+pub mod confine;
+pub mod confine_host;
 pub mod contract;
 pub mod depcache;
 pub mod detect;

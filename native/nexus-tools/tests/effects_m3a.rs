@@ -305,11 +305,20 @@ fn a_concurrent_user_edit_is_reported_as_temporal_not_as_the_commands_proven_wor
     fx.approve_process_fs(60_000, "workspace");
     let ws = fx.ws.clone();
     let t = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(400));
+        // edit while the command is running: wait for its first sign of life
+        let t0 = std::time::Instant::now();
+        while !ws.join("started.txt").exists() && t0.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         std::fs::write(ws.join("mine.txt"), "user edit\n").unwrap();
         std::fs::write(ws.join("user-new.txt"), "u\n").unwrap();
     });
-    let o = run(&mut fx, "sleep 1.3; echo cmd > cmd.txt", &policy()).unwrap();
+    let o = run(
+        &mut fx,
+        "echo up > started.txt; sleep 1.3; echo cmd > cmd.txt",
+        &policy(),
+    )
+    .unwrap();
     t.join().unwrap();
     let v = out(&o);
     let all: Vec<String> = ["created", "modified"]

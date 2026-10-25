@@ -162,6 +162,9 @@ pub struct BackendCaps {
     pub hide_existing_entries: bool,
     pub kernel_resource_limits: bool,
     pub kill_tree: KillGuarantee,
+    /// Landlock ABI of the running kernel (None = unavailable) and the launch gate that applies it.
+    pub landlock_abi: Option<u32>,
+    pub launch_gate: bool,
 }
 
 /// What a grant needs from the backend.
@@ -170,6 +173,8 @@ pub struct RequiredCaps {
     pub pinned_root_mount: bool,
     pub subpath_readonly: bool,
     pub hide_existing_entries: bool,
+    /// Kernel confinement (Landlock, at least `confine::MIN_ABI`) applied by the launch gate.
+    pub kernel_confinement: bool,
 }
 
 impl RequiredCaps {
@@ -179,6 +184,7 @@ impl RequiredCaps {
                 pinned_root_mount: true,
                 subpath_readonly: true,
                 hide_existing_entries: true,
+                kernel_confinement: true,
             },
             _ => RequiredCaps::default(),
         }
@@ -233,6 +239,14 @@ pub fn check_grant(caps: &BackendCaps, g: &ExecGrant) -> Result<(), ExecRefusal>
     if req.hide_existing_entries && !caps.hide_existing_entries {
         missing.push("hiding existing secret entries");
     }
+    if req.kernel_confinement
+        && !(caps.launch_gate
+            && caps
+                .landlock_abi
+                .is_some_and(|a| a >= crate::confine::MIN_ABI))
+    {
+        missing.push("kernel confinement (Landlock) with its launch gate");
+    }
     if missing.is_empty() {
         Ok(())
     } else {
@@ -286,6 +300,8 @@ impl ExecBackend for LinuxBwrapBackend {
             hide_existing_entries: fd,
             kernel_resource_limits: crate::sandbox::kernel_limits_available(),
             kill_tree: KillGuarantee::Cgroup,
+            landlock_abi: crate::confine::landlock_abi(),
+            launch_gate: crate::confine_host::locate_shim().is_some(),
         }
     }
 
@@ -316,6 +332,8 @@ mod tests {
             hide_existing_entries: fd,
             kernel_resource_limits: true,
             kill_tree: KillGuarantee::Cgroup,
+            landlock_abi: Some(7),
+            launch_gate: true,
         }
     }
 
@@ -330,6 +348,29 @@ mod tests {
         assert!(check_grant(&caps(true), &ws).is_ok());
         let e = check_grant(&caps(false), &ws).unwrap_err();
         assert!(matches!(e, ExecRefusal::NotImplemented(_)), "{e:?}");
+    }
+
+    #[test]
+    fn a_workspace_grant_needs_landlock_and_the_launch_gate_and_never_downgrades() {
+        let ws = ExecGrant {
+            fs: FsScope::Workspace,
+            ..Default::default()
+        };
+        for (abi, gate) in [(None, true), (Some(2), true), (Some(7), false)] {
+            let mut c = caps(true);
+            c.landlock_abi = abi;
+            c.launch_gate = gate;
+            let e = check_grant(&c, &ws).unwrap_err();
+            assert!(
+                matches!(&e, ExecRefusal::BackendInsufficient(m) if m.iter().any(|x| x.contains("Landlock"))),
+                "{abi:?} {gate}: {e:?}"
+            );
+        }
+        // Scratch is unaffected by the absence of Landlock (legacy semantics)
+        let mut c = caps(false);
+        c.landlock_abi = None;
+        c.launch_gate = false;
+        assert!(check_grant(&c, &ExecGrant::default()).is_ok());
     }
 
     #[test]

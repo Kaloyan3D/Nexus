@@ -1309,6 +1309,12 @@ fn run(args: &[String]) -> i32 {
             }
             ck.force_copy = args.iter().any(|a| a == "--checkpoint-force-copy");
             let p = p.with_checkpoint(ck);
+            // M3C.4: hard-linked files are read-only for in-place commands unless the operator opts in.
+            let p = if args.iter().any(|a| a == "--allow-hardlinked-writes") {
+                p.with_hard_links(nexus_tools::inplace::HardLinks::Allow)
+            } else {
+                p
+            };
             match flag(args, "--dep-cache") {
                 Some(d) => p.with_dep_cache(d),
                 None => p,

@@ -134,7 +134,71 @@ pub struct SandboxSpec {
     pub limits: SandboxLimits,
     /// Host cgroup directory under which the execution cgroup is created.
     pub cgroup_base: PathBuf,
+    /// M3C: run the command behind the in-sandbox launch gate (verification + Landlock). In-place only;
+    /// Scratch runs keep their historical argv and digest.
+    pub confine: Option<ConfineSpec>,
 }
+
+/// The launch gate of an in-place execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfineSpec {
+    /// Host path of `nexus-confine` (mounted read-only at `confine::SANDBOX_PATH`).
+    pub shim: PathBuf,
+    pub shim_sha256: String,
+    /// `(dev, ino)` of the verified workspace directory.
+    pub root: (u64, u64),
+    pub min_abi: u32,
+    /// The command shares the host network namespace: abstract sockets and signals must be scoped.
+    pub require_scope: bool,
+}
+
+impl ConfineSpec {
+    /// The launch-gate plan for `spec`: what the namespace must look like and what Landlock grants.
+    pub fn plan(&self, spec: &SandboxSpec) -> crate::confine::Plan {
+        use crate::confine::{Expect, Plan};
+        let mut ro: Vec<String> = vec!["/usr".into(), "/proc".into(), "/nexus".into()];
+        if spec.net {
+            ro.extend(
+                NET_FILES
+                    .iter()
+                    .filter(|f| Path::new(f).exists())
+                    .map(|f| (*f).to_owned()),
+            );
+        }
+        ro.extend(spec.ro_binds.iter().map(|(_, s)| s.clone()));
+        let mut rw: Vec<String> = vec!["/work/src".into(), "/work/out".into(), "/tmp".into()];
+        rw.extend(spec.rw_binds.iter().map(|(_, s)| s.clone()));
+        let expect = spec
+            .protect
+            .iter()
+            .map(|p| match p.mode {
+                crate::exec_contract::ProtectMode::HideFile => Expect::HiddenFile(p.rel.clone()),
+                crate::exec_contract::ProtectMode::HideDir => Expect::HiddenDir(p.rel.clone()),
+                crate::exec_contract::ProtectMode::ReadOnly => {
+                    Expect::ReadOnly(p.rel.clone(), p.ino)
+                }
+            })
+            .collect();
+        Plan {
+            ro,
+            rw,
+            dev: vec!["/dev".into()],
+            min_abi: self.min_abi,
+            require_scope: self.require_scope,
+            root: Some(self.root),
+            expect,
+        }
+    }
+}
+
+const NET_FILES: [&str; 6] = [
+    "/etc/resolv.conf",
+    "/etc/hosts",
+    "/etc/nsswitch.conf",
+    "/etc/ssl",
+    "/etc/ca-certificates",
+    "/etc/pki",
+];
 
 /// One protected sub-path of a pinned root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +208,8 @@ pub struct Protect {
     pub mode: crate::exec_contract::ProtectMode,
     /// Required for `ReadOnly`: an `O_PATH` descriptor of the exact entry.
     pub fd: Option<std::os::fd::RawFd>,
+    /// Inode of the entry a `ReadOnly` descriptor refers to (verified inside the sandbox before the command).
+    pub ino: u64,
 }
 
 /// First descriptor number inside the supervisor's child for in-place mounts (3 is the seccomp program).
@@ -227,6 +293,10 @@ pub struct SandboxCapabilities {
     pub kernel_enforced_limits: bool,
     pub seccomp: bool,
     pub backend: &'static str,
+    /// Landlock ABI of the kernel (None = unavailable) and whether the launch gate was found: both are needed
+    /// for in-place (Workspace) execution.
+    pub landlock_abi: Option<u32>,
+    pub launch_gate: bool,
 }
 
 fn refuse(msg: impl Into<String>) -> ToolError {
@@ -474,14 +544,7 @@ pub fn bwrap_argv(spec: &SandboxSpec) -> Vec<String> {
     }
     if spec.net {
         // name resolution and TLS trust only; no other host configuration
-        for f in [
-            "/etc/resolv.conf",
-            "/etc/hosts",
-            "/etc/nsswitch.conf",
-            "/etc/ssl",
-            "/etc/ca-certificates",
-            "/etc/pki",
-        ] {
+        for f in NET_FILES {
             if std::path::Path::new(f).exists() {
                 a.push("--ro-bind".to_owned());
                 a.push(f.to_owned());
@@ -504,6 +567,11 @@ pub fn bwrap_argv(spec: &SandboxSpec) -> Vec<String> {
         a.push(k.clone());
         a.push(v.clone());
     }
+    if let Some(c) = &spec.confine {
+        a.push("--ro-bind".to_owned());
+        a.push(c.shim.to_string_lossy().into_owned());
+        a.push(crate::confine::SANDBOX_PATH.to_owned());
+    }
     // The synthetic root itself becomes read-only: only /tmp and /work/out
     // (size-limited tmpfs mounts) remain writable.
     a.push("--remount-ro".to_owned());
@@ -513,6 +581,11 @@ pub fn bwrap_argv(spec: &SandboxSpec) -> Vec<String> {
     a.push("--chdir".to_owned());
     a.push(spec.cwd.clone());
     a.push("--".to_owned());
+    if let Some(c) = &spec.confine {
+        // the launch gate: verifies the namespace, applies Landlock, then executes what follows `--`
+        a.push(crate::confine::SANDBOX_PATH.to_owned());
+        a.extend(c.plan(spec).to_args());
+    }
     a.push(PRLIMIT.to_owned());
     a.push(format!("--nproc={}", l.max_procs));
     a.push(format!("--cpu={}", l.cpu_secs));
@@ -536,6 +609,10 @@ pub fn sandbox_digest(spec: &SandboxSpec) -> String {
         h.update([0]);
     }
     h.update(seccomp_program());
+    if let Some(c) = &spec.confine {
+        h.update(b"confine\0");
+        h.update(c.shim_sha256.as_bytes());
+    }
     hex::encode(h.finalize())
 }
 
@@ -631,6 +708,8 @@ pub fn preflight() -> SandboxCapabilities {
         kernel_enforced_limits: false,
         seccomp: cfg!(target_arch = "x86_64"),
         backend: "bubblewrap+seccomp+cgroup-v2",
+        landlock_abi: crate::confine::landlock_abi(),
+        launch_gate: crate::confine_host::locate_shim().is_some(),
     };
     if !cfg!(target_arch = "x86_64") {
         problems.push("seccomp filter is implemented for x86_64 only".to_owned());
@@ -690,6 +769,7 @@ pub fn preflight() -> SandboxCapabilities {
                 ..Default::default()
             },
             cgroup_base: cgroup_base().unwrap_or_default(),
+            confine: None,
         };
         struct Never;
         impl SandboxControl for Never {
@@ -877,6 +957,21 @@ pub fn run_sandboxed(
     }
     if !spec.program.starts_with('/') {
         return Err(refuse("program must be an absolute in-sandbox path"));
+    }
+    if let Some(c) = &spec.confine {
+        // Fail closed: the gate must exist, be ours and match the digest that was recorded.
+        match crate::confine_host::shim_is_trustworthy(&c.shim) {
+            Ok(sha) if sha == c.shim_sha256 => {}
+            Ok(_) => {
+                return Err(refuse(
+                    "the launch gate changed after it was recorded; refusing to run",
+                ))
+            }
+            Err(e) => return Err(refuse(format!("{e}; refusing to run"))),
+        }
+        if spec.pinned_root.is_none() {
+            return Err(refuse("the launch gate needs a pinned workspace root"));
+        }
     }
     if spec.pinned_root.is_none() && !spec.src_dir.is_dir() {
         return Err(refuse("staged snapshot directory is missing"));
@@ -1170,6 +1265,26 @@ pub fn run_sandboxed(
             ToolErrorCode::SandboxUnavailable,
             "execution cgroup could not be emptied; leaving it for reconciliation",
         ));
+    }
+    if spec.confine.is_some() {
+        if let ExitKind::Exited(c) = &exit {
+            let said = String::from_utf8_lossy(&stderr);
+            if *c == crate::confine::REFUSED_EXIT
+                && said.starts_with(crate::confine::REFUSED_PREFIX)
+            {
+                let why = said
+                    .trim_start_matches(crate::confine::REFUSED_PREFIX)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned();
+                return Err(ToolError::new(
+                    ToolErrorCode::SandboxUnavailable,
+                    format!("confinement refused: {why}; nothing was run and no weaker backend was used"),
+                ));
+            }
+        }
     }
     let tv = |t: libc::timeval| (t.tv_sec as u64) * 1000 + (t.tv_usec as u64) / 1000;
     let hint = match &exit {
