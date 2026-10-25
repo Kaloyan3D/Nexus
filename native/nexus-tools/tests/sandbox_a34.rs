@@ -70,6 +70,7 @@ fn spec(id: &str, program: &str, args: &[&str], src: &std::path::Path) -> Sandbo
             ..Default::default()
         },
         cgroup_base: nexus_tools::sandbox::cgroup_base().unwrap(),
+        confine: None,
     }
 }
 

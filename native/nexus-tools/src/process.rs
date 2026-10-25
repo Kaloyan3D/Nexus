@@ -142,6 +142,10 @@ pub struct CommandPolicy {
     observe: crate::observe::ObserveBudget,
     /// Checkpoint policy of in-place commands (daemon configuration; default off).
     checkpoint: crate::checkpoint::CheckpointPolicy,
+    /// Existing hard-linked files in an in-place workspace (M3C.4).
+    hard_links: crate::inplace::HardLinks,
+    /// Explicit path of the in-sandbox launch gate (default: located next to the running executable).
+    confine_shim: Option<PathBuf>,
 }
 
 fn arg_ok(a: &str) -> bool {
@@ -165,6 +169,8 @@ impl CommandPolicy {
             workbench: false,
             observe: Default::default(),
             checkpoint: Default::default(),
+            hard_links: Default::default(),
+            confine_shim: None,
         }
     }
 
@@ -195,6 +201,28 @@ impl CommandPolicy {
         self
     }
 
+    /// Allow commands to write hard-linked files (operator decision, recorded in every execution).
+    pub fn with_hard_links(mut self, h: crate::inplace::HardLinks) -> Self {
+        self.hard_links = h;
+        self
+    }
+
+    pub fn hard_links(&self) -> crate::inplace::HardLinks {
+        self.hard_links
+    }
+
+    /// Use this launch gate binary (tests, packaged installs).
+    pub fn with_confine_shim(mut self, p: PathBuf) -> Self {
+        self.confine_shim = Some(p);
+        self
+    }
+
+    pub fn confine_shim(&self) -> Option<PathBuf> {
+        self.confine_shim
+            .clone()
+            .or_else(crate::confine_host::locate_shim)
+    }
+
     pub fn checkpoint_policy(&self) -> &crate::checkpoint::CheckpointPolicy {
         &self.checkpoint
     }
@@ -222,6 +250,8 @@ impl CommandPolicy {
             workbench: false,
             observe: Default::default(),
             checkpoint: Default::default(),
+            hard_links: Default::default(),
+            confine_shim: None,
         }
     }
 
@@ -1133,7 +1163,13 @@ pub fn run_process(
     // pinned; what the command writes is the working copy (reviewed through the task's git diff).
     let mut mount: Option<crate::inplace::InPlaceMount> = None;
     let report = if in_place {
-        match crate::inplace::prepare(ctx.ws) {
+        match crate::inplace::prepare_with(
+            ctx.ws,
+            &crate::inplace::PrepareOptions {
+                hard_links: ctx.policy.hard_links(),
+                ..Default::default()
+            },
+        ) {
             Ok(m) => {
                 mount = Some(m);
                 crate::stage::StageReport::default()
@@ -1237,6 +1273,17 @@ pub fn run_process(
             ro_binds.push((hosts, "/etc/hosts".to_owned()));
         }
     }
+    // M3C: an in-place command runs behind the launch gate (namespace verification + Landlock), or not at all.
+    let confine = if in_place {
+        match build_confine(ctx, cmd.install) {
+            Ok(c) => Some(c),
+            Err(m) => {
+                return failed(hooks, &run_dir, ToolErrorCode::SandboxUnavailable, m);
+            }
+        }
+    } else {
+        None
+    };
     let spec = SandboxSpec {
         id: ctx.execution_id.to_owned(),
         program: cmd.program.clone(),
@@ -1256,6 +1303,7 @@ pub fn run_process(
         net: cmd.install,
         limits: limits.clone(),
         cgroup_base: base.clone(),
+        confine,
     };
     let sbx_digest = sandbox_digest(&spec);
     let unit = crate::sandbox::cgroup_leaf_name(ctx.execution_id);
@@ -1371,6 +1419,19 @@ pub fn run_process(
             sb.insert("writeBack".into(), "in-place".into());
             sb.insert("rootMount".into(), "descriptor-bound".into());
             sb.insert("protected".into(), m.summary.clone());
+            if let Some(c) = &spec.confine {
+                sb.insert(
+                    "confinement".into(),
+                    serde_json::json!({
+                        "launchGate": "verifies the namespace, applies Landlock, then executes the command",
+                        "landlockAbi": crate::confine::landlock_abi(),
+                        "minAbi": c.min_abi,
+                        "scopingRequired": c.require_scope,
+                        "scoping": crate::confine::landlock_abi().is_some_and(|a| a >= crate::confine::SCOPE_ABI),
+                        "gateSha256": c.shim_sha256,
+                    }),
+                );
+            }
         }
         o.insert(
             "effects".into(),
@@ -1661,6 +1722,42 @@ fn finish_observation(
         crate::checkpoint::finish(ck_store, ctx.execution_id);
     }
     rec
+}
+
+/// The launch-gate configuration of an in-place command, or the reason there cannot be one (fail closed).
+fn build_confine(
+    ctx: &ProcessContext<'_>,
+    net: bool,
+) -> Result<crate::sandbox::ConfineSpec, String> {
+    let abi = crate::confine::landlock_abi().ok_or_else(|| {
+        "kernel confinement (Landlock) is unavailable on this machine; in-place execution refused (nothing was run and no weaker backend was used)".to_owned()
+    })?;
+    if abi < crate::confine::MIN_ABI {
+        return Err(format!(
+            "Landlock ABI {abi} is below the required {}; in-place execution refused (nothing was run)",
+            crate::confine::MIN_ABI
+        ));
+    }
+    if net && abi < crate::confine::SCOPE_ABI {
+        return Err(format!(
+            "a command with network access needs abstract-socket and signal scoping (Landlock ABI {}); this kernel has {abi}; refused (nothing was run)",
+            crate::confine::SCOPE_ABI
+        ));
+    }
+    let shim = ctx.policy.confine_shim().ok_or_else(|| {
+        "the confinement launch gate (nexus-confine) was not found next to the running executable; in-place execution refused (nothing was run)".to_owned()
+    })?;
+    let sha = crate::confine_host::shim_is_trustworthy(&shim)
+        .map_err(|e| format!("{e}; in-place execution refused (nothing was run)"))?;
+    let root = crate::observe::root_identity(ctx.ws)
+        .ok_or_else(|| "cannot identify the workspace root; refused".to_owned())?;
+    Ok(crate::sandbox::ConfineSpec {
+        shim,
+        shim_sha256: sha,
+        root: (root.dev, root.ino),
+        min_abi: crate::confine::MIN_ABI,
+        require_scope: net,
+    })
 }
 
 /// Bounded description of a checkpoint attempt for the journal and the effects record.

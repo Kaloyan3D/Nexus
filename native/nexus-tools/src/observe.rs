@@ -170,6 +170,11 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Dependency/build directory names (tier 2).
+pub fn is_bulk_name_pub(n: &str) -> bool {
+    is_bulk_name(n)
+}
+
 fn is_bulk_name(n: &str) -> bool {
     BULK_NAMES.contains(&n)
 }
