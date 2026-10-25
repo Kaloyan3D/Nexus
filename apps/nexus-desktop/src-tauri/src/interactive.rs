@@ -534,6 +534,77 @@ impl Runtime {
         ic::project_adopt(&self.sock(), run_id).map_err(|e| e.message)
     }
 
+    /// Set the project's standing permissions (filesystem, network, approval behaviour). The broker
+    /// produces the exact consent text for these choices; THIS process shows it in a native dialog and
+    /// only a "yes" returns its digest to the broker. The renderer supplies the choices and nothing else:
+    /// it cannot confirm, cannot name a digest, and a refusal (a capability this build lacks) is raised
+    /// before any dialog.
+    pub fn project_set_grant(
+        &self,
+        d: &dyn Dialogs,
+        id: &str,
+        fs: &str,
+        net: &str,
+        approval: &str,
+        expires_in_secs: Option<u64>,
+    ) -> Result<serde_json::Value, String> {
+        let sock = self.sock();
+        let pv = ic::project_grant_preview(&sock, id, fs, net, approval, expires_in_secs)
+            .map_err(|e| e.message)?;
+        let text = pv["text"]
+            .as_str()
+            .ok_or("the broker returned no text")?
+            .to_owned();
+        let digest = pv["textSha256"]
+            .as_str()
+            .ok_or("the broker returned no digest")?
+            .to_owned();
+        if !d.confirm("Change this project's permissions", &text)? {
+            return Err("cancelled".into());
+        }
+        ic::project_grant_set(
+            &sock,
+            id,
+            fs,
+            net,
+            approval,
+            expires_in_secs,
+            &digest,
+            "desktop",
+        )
+        .map_err(|e| e.message)
+    }
+
+    /// Revoke (`clear == false`) or remove (`clear == true`) the project's standing permissions after a
+    /// native confirmation.
+    pub fn project_end_grant(
+        &self,
+        d: &dyn Dialogs,
+        id: &str,
+        clear: bool,
+    ) -> Result<serde_json::Value, String> {
+        let (title, text) = if clear {
+            (
+                "Remove this project's permissions",
+                "The project returns to the defaults (commands run on a throw-away copy, no network, automatic approval). Tasks that are running under the removed permissions stop being allowed to act.",
+            )
+        } else {
+            (
+                "Revoke this project's permissions",
+                "New tasks are refused until you grant permissions again, and tasks that are running stop being allowed to act. Nothing already applied is undone.",
+            )
+        };
+        if !d.confirm(title, text)? {
+            return Err("cancelled".into());
+        }
+        if clear {
+            ic::project_grant_clear(&self.sock(), id, "desktop")
+        } else {
+            ic::project_grant_revoke(&self.sock(), id, "desktop")
+        }
+        .map_err(|e| e.message)
+    }
+
     pub fn project_forget(&self, d: &dyn Dialogs, id: &str) -> Result<serde_json::Value, String> {
         if !d.confirm("Remove project from Nexus", "Nexus will forget this project and delete its private snapshot. Your own folder is not touched.")? {
             return Err("cancelled".into());

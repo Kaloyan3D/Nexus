@@ -1218,6 +1218,26 @@ impl Broker {
         }
     }
 
+    /// Standing grants: preview / set / revoke / clear. Only the user's own clients reach these (the broker
+    /// socket is uid-gated; the model and its sandbox have no path to it). The grant itself is stored in
+    /// the operator registry and enforced by the daemon; nothing here grants anything by itself.
+    fn project_grant_verb(&self, client: &str, cmd: &str, params: &Value) -> CmdResult {
+        let env = self.cfg.registry_env().ok_or((
+            "not-available",
+            "this broker cannot manage permissions (not in the interactive profile)".to_owned(),
+        ))?;
+        let id = params
+            .get("projectId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        match cmd {
+            "project-grant-preview" => crate::projects::grant_preview(&env, id, params),
+            "project-grant" => crate::projects::grant_set(&env, client, id, params),
+            "project-grant-revoke" => crate::projects::grant_revoke(&env, client, id, params),
+            _ => crate::projects::grant_clear(&env, client, id, params),
+        }
+    }
+
     /// The consent the user has given (if any) plus the exact text a new consent
     /// must present. Interactive profile only.
     fn consent_status(&self) -> CmdResult {
@@ -1429,6 +1449,10 @@ impl Broker {
             "intent-resumable" => self.resumable(client, run_id),
             "project-open" | "project-list" | "project-forget" | "project-refresh"
             | "project-workspace" | "project-policy" => self.project_verb(cmd, params),
+            "project-grant-preview"
+            | "project-grant"
+            | "project-grant-revoke"
+            | "project-grant-clear" => self.project_grant_verb(client, cmd, params),
             "project-adopt" => self.project_adopt(client, run_id),
             "provider-consent-status" => self.consent_status(),
             "provider-consent-grant" => self.consent_grant(client, params),

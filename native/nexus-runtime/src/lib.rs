@@ -394,6 +394,8 @@ fn start_daemon(home: &Home, tools: &Tools) -> Result<std::process::Child, Strin
             "--enable-writes",
             "--enable-process",
             "--autonomous-workspace-policy",
+            // standing permissions per project (a project without a grant behaves exactly as before)
+            "--standing-grants",
         ])
         .arg("--workspace-bases")
         .arg(home.code_base())

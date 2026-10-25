@@ -174,6 +174,9 @@ pub fn record_from_entry(e: &ToolJournalEntry) -> ToolRecordV1 {
                 "outcome",
                 "leftoverProcessesKilled",
                 "runDirRemoved",
+                // standing grant / filesystem scope the command ran under (absent for legacy runs)
+                "grant",
+                "fsScope",
             ] {
                 if let Some(v) = p.get(k) {
                     m.insert(k.to_owned(), v.clone());

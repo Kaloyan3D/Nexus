@@ -219,6 +219,11 @@ fn read_and_write_grants_cannot_start_a_process_and_scopes_do_not_cross() {
         approver_id: "attacker".into(),
         independent: true,
         fs_scope: "scratch".into(),
+        grant_id: String::new(),
+        grant_version: 0,
+        grant_digest: String::new(),
+        net_scope: String::new(),
+        approval: String::new(),
     };
     if std_policy
         .resolve(&nexus_tools::ProcessArgs {

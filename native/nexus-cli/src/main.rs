@@ -1853,6 +1853,7 @@ fn cmd_project(args: &[String], cfg: &ClientConfig) -> ExitCode {
                 Err(e) => emit_err(cfg.json, &e),
             }
         }
+        "grant" => project_grant_cmd(args, &positional, cfg),
         "set-clients" => {
             let Some(id) = positional.first() else {
                 return fail(
@@ -1913,7 +1914,7 @@ fn cmd_project(args: &[String], cfg: &ClientConfig) -> ExitCode {
         }
         _ => fail(
             cfg,
-            "usage: nexus project <add|list|show|remove|repin|set-scope|set-clients|open|workspace|ls|policy|refresh|forget> ...",
+            "usage: nexus project <add|list|show|remove|repin|set-scope|set-clients|open|workspace|ls|policy|refresh|forget|grant> ...",
         ),
     }
 }
@@ -2261,6 +2262,145 @@ fn cmd_code(args: &[String], cfg: &ClientConfig) -> ExitCode {
 
 /// `nexus tools depcache <admit|verify|list|stats|gc> --cache <dir> ...`
 /// Operator-only, offline. Never reachable from the daemon or a model.
+/// `3600`, `90s`, `30m`, `12h`, `7d` -> seconds.
+fn parse_duration_secs(v: &str) -> Option<u64> {
+    let (num, mul) = match v.chars().last()? {
+        's' => (&v[..v.len() - 1], 1u64),
+        'm' => (&v[..v.len() - 1], 60),
+        'h' => (&v[..v.len() - 1], 3600),
+        'd' => (&v[..v.len() - 1], 86_400),
+        c if c.is_ascii_digit() => (v, 1),
+        _ => return None,
+    };
+    num.parse::<u64>().ok().filter(|n| *n > 0)?.checked_mul(mul)
+}
+
+/// The user's explicit confirmation of a permission change: `--yes`, or an interactive terminal where
+/// the person types `yes`. Anything else (a pipe, a script without `--yes`) refuses.
+fn confirm_in_terminal(args: &[String], what: &str) -> bool {
+    if args.iter().any(|a| a == "--yes") {
+        return true;
+    }
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        eprintln!("confirmation required: run this in a terminal, or pass --yes to confirm {what} explicitly");
+        return false;
+    }
+    eprint!("Type 'yes' to confirm {what}: ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut line);
+    line.trim() == "yes"
+}
+
+/// `nexus project grant <id> show | set --fs F --net N --approval A [--expires 7d] | revoke | clear`
+/// Standing grants (permissions). Through the broker, like the Desktop's native backend; the model has no
+/// path to either.
+fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig) -> ExitCode {
+    use nexus_client::intent_client as ic;
+    const USAGE: &str = "usage: nexus project grant <id> show | set --fs scratch|workspace --net offline|install --approval auto|ask [--expires 7d] [--yes] | revoke [--yes] | clear [--yes]";
+    let sock = flag_value(args, "--broker-socket")
+        .map(PathBuf::from)
+        .unwrap_or_else(ic::default_broker_socket);
+    let (Some(id), Some(action)) = (positional.first(), positional.get(1)) else {
+        return fail(cfg, USAGE);
+    };
+    match action.as_str() {
+        "show" => match ic::project_list(&sock, false) {
+            Ok(v) => {
+                let p = v["projects"]
+                    .as_array()
+                    .and_then(|a| a.iter().find(|p| p["projectId"] == id.as_str()));
+                match p {
+                    Some(p) => {
+                        let g = p.get("grant").cloned().unwrap_or(serde_json::Value::Null);
+                        let human = if g.is_null() {
+                            format!("{id}: no standing grant (defaults: scratch, offline, automatic approval)")
+                        } else {
+                            format!(
+                                "{id}: {} v{} fs={} net={} approval={} expires={}",
+                                g["status"].as_str().unwrap_or("?"),
+                                g["version"],
+                                g["fs"].as_str().unwrap_or("?"),
+                                g["net"].as_str().unwrap_or("?"),
+                                g["approval"].as_str().unwrap_or("?"),
+                                g["expiresAtMs"]
+                            )
+                        };
+                        emit(cfg, &g, &human);
+                        ExitCode::Ok
+                    }
+                    None => fail(cfg, "no such project"),
+                }
+            }
+            Err(e) => emit_err(cfg.json, &e),
+        },
+        "set" => {
+            let fs = flag_value(args, "--fs").unwrap_or_else(|| "scratch".into());
+            let net = flag_value(args, "--net").unwrap_or_else(|| "offline".into());
+            let approval = flag_value(args, "--approval").unwrap_or_else(|| "auto".into());
+            let expires = match flag_value(args, "--expires") {
+                None => None,
+                Some(v) => match parse_duration_secs(&v) {
+                    Some(n) => Some(n),
+                    None => return fail(cfg, "--expires must look like 3600, 30m, 12h or 7d"),
+                },
+            };
+            let pv = match ic::project_grant_preview(&sock, id, &fs, &net, &approval, expires) {
+                Ok(v) => v,
+                Err(e) => return emit_err(cfg.json, &e),
+            };
+            eprintln!(
+                "{}
+",
+                pv["text"].as_str().unwrap_or("")
+            );
+            if !confirm_in_terminal(args, "these permissions") {
+                return fail(cfg, "not confirmed; nothing was changed");
+            }
+            let digest = pv["textSha256"].as_str().unwrap_or("");
+            match ic::project_grant_set(&sock, id, &fs, &net, &approval, expires, digest, "cli") {
+                Ok(v) => {
+                    emit(
+                        cfg,
+                        &v,
+                        &serde_json::to_string_pretty(&v).unwrap_or_default(),
+                    );
+                    ExitCode::Ok
+                }
+                Err(e) => emit_err(cfg.json, &e),
+            }
+        }
+        "revoke" | "clear" => {
+            let what = if action.as_str() == "revoke" {
+                "revoking this project's permissions (running tasks stop being allowed to act)"
+            } else {
+                "removing this project's permissions (it returns to the defaults)"
+            };
+            if !confirm_in_terminal(args, what) {
+                return fail(cfg, "not confirmed; nothing was changed");
+            }
+            let r = if action.as_str() == "revoke" {
+                ic::project_grant_revoke(&sock, id, "cli")
+            } else {
+                ic::project_grant_clear(&sock, id, "cli")
+            };
+            match r {
+                Ok(v) => {
+                    emit(
+                        cfg,
+                        &v,
+                        &serde_json::to_string_pretty(&v).unwrap_or_default(),
+                    );
+                    ExitCode::Ok
+                }
+                Err(e) => emit_err(cfg.json, &e),
+            }
+        }
+        _ => fail(cfg, USAGE),
+    }
+}
+
 fn fail(cfg: &ClientConfig, m: &str) -> ExitCode {
     emit_err(cfg.json, &nexus_client::ClientError::usage(m))
 }

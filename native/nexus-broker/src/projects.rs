@@ -128,13 +128,29 @@ fn seq_of(rec: &ProjectRecord) -> u64 {
         .unwrap_or(0)
 }
 
+/// The project's standing grant as shown to the user (absent when the project has none).
+pub fn grant_view(rec: &ProjectRecord, now_ms: i64) -> Option<Value> {
+    let st = rec.grant.as_ref()?;
+    let g = &st.current;
+    Some(json!({
+        "grantId": g.grant_id, "version": g.version, "digest": g.digest(&rec.id),
+        "fs": g.fs, "net": g.net, "approval": g.approval,
+        "expiresAtMs": g.expires_at_ms, "createdAtMs": g.created_at_ms, "createdBy": g.created_by,
+        "status": st.status(now_ms).as_str(),
+        "revokedAtMs": st.revoked_at_ms,
+        "history": st.history.iter().rev().take(10).map(|e| json!({
+            "atMs": e.at_ms, "kind": e.kind, "version": e.version, "by": e.by
+        })).collect::<Vec<_>>(),
+    }))
+}
+
 pub fn view(rec: &ProjectRecord, changed: Option<bool>) -> Value {
     let kinds: Vec<Value> = rec
         .origin
         .as_deref()
         .map(|_| rec.kinds.iter().map(|k| kind_view(k)).collect())
         .unwrap_or_default();
-    json!({
+    let mut v = json!({
         "projectId": rec.id,
         "label": rec.label.clone().unwrap_or_else(|| rec.id.clone()),
         "managed": rec.managed,
@@ -147,7 +163,141 @@ pub fn view(rec: &ProjectRecord, changed: Option<bool>) -> Value {
         "snapshotAtMs": rec.updated_at_ms,
         "originDirty": rec.snapshot_origin_dirty,
         "changedSinceSnapshot": changed,
+    });
+    if let Some(g) = grant_view(rec, now_ms()) {
+        v["grant"] = g;
+    }
+    v
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+type VerbErr = (&'static str, String);
+
+fn spec_of(params: &Value) -> Result<nexus_tools::grant::GrantSpec, VerbErr> {
+    let s = |k: &str, d: &str| {
+        params
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or(d)
+            .to_owned()
+    };
+    let expires_at_ms = match params.get("expiresInSecs") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let secs = v.as_u64().filter(|n| *n > 0).ok_or((
+                "bad-request",
+                "expiresInSecs must be a positive number".to_owned(),
+            ))?;
+            Some(now_ms().saturating_add((secs as i64).saturating_mul(1000)))
+        }
+    };
+    Ok(nexus_tools::grant::GrantSpec {
+        fs: s("fs", "scratch"),
+        net: s("net", "offline"),
+        approval: s("approval", "auto"),
+        expires_at_ms,
     })
+}
+
+fn actor(client: &str, params: &Value) -> String {
+    let surface: String = params
+        .get("surface")
+        .and_then(|v| v.as_str())
+        .unwrap_or("client")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(12)
+        .collect();
+    format!("{surface}:{client}")
+}
+
+fn grant_project(env: &Env<'_>, id: &str) -> Result<ProjectRecord, VerbErr> {
+    registry::load(env.registry_dir, env.trust)
+        .map_err(|e| ("registry", e.to_string()))?
+        .get(id)
+        .cloned()
+        .ok_or(("not-found", "no such project".to_owned()))
+}
+
+/// What the user would be asked to confirm: the exact text (its digest is what `grant_set` requires back),
+/// and the refusal, if any, BEFORE anything is shown. Pure; changes nothing.
+pub fn grant_preview(env: &Env<'_>, id: &str, params: &Value) -> Result<Value, VerbErr> {
+    let rec = grant_project(env, id)?;
+    let spec = spec_of(params)?;
+    nexus_tools::grant::validate_spec(&spec, rec.workspace_mode == WorkspaceMode::Direct, now_ms())
+        .map_err(|e| (e.code, e.message))?;
+    let label = rec.label.clone().unwrap_or_else(|| rec.id.clone());
+    let text = nexus_tools::grant::consent_text(&label, &spec);
+    Ok(json!({
+        "projectId": rec.id,
+        "text": text, "textSha256": nexus_tools::grant::text_digest(&text),
+        "fs": spec.fs, "net": spec.net, "approval": spec.approval, "expiresAtMs": spec.expires_at_ms,
+        "replaces": grant_view(&rec, now_ms()),
+    }))
+}
+
+/// Store the grant. The caller must return the digest of the exact text the broker serves for these
+/// choices: a UI that showed something else cannot create a grant.
+pub fn grant_set(env: &Env<'_>, client: &str, id: &str, params: &Value) -> Result<Value, VerbErr> {
+    let rec = grant_project(env, id)?;
+    let spec = spec_of(params)?;
+    let label = rec.label.clone().unwrap_or_else(|| rec.id.clone());
+    let text = nexus_tools::grant::consent_text(&label, &spec);
+    let want = nexus_tools::grant::text_digest(&text);
+    if params.get("textSha256").and_then(|v| v.as_str()) != Some(want.as_str()) {
+        return Err((
+            "consent-mismatch",
+            "the confirmation does not match the text for these permissions; nothing was changed"
+                .into(),
+        ));
+    }
+    let rec = registry::set_grant(
+        env.registry_dir,
+        env.trust,
+        id,
+        &spec,
+        &actor(client, params),
+        &want,
+    )
+    .map_err(|e| (grant_code(&e), e.message))?;
+    Ok(json!({ "project": view(&rec, None) }))
+}
+
+pub fn grant_revoke(
+    env: &Env<'_>,
+    client: &str,
+    id: &str,
+    params: &Value,
+) -> Result<Value, VerbErr> {
+    let rec = registry::revoke_grant(env.registry_dir, env.trust, id, &actor(client, params))
+        .map_err(|e| (grant_code(&e), e.message))?;
+    Ok(json!({ "project": view(&rec, None) }))
+}
+
+pub fn grant_clear(
+    env: &Env<'_>,
+    client: &str,
+    id: &str,
+    params: &Value,
+) -> Result<Value, VerbErr> {
+    let rec = registry::clear_grant(env.registry_dir, env.trust, id, &actor(client, params))
+        .map_err(|e| (grant_code(&e), e.message))?;
+    Ok(json!({ "project": view(&rec, None) }))
+}
+
+fn grant_code(e: &registry::RegError) -> &'static str {
+    match e.code {
+        "not-found" => "not-found",
+        "no-grant" | "already-revoked" => "bad-request",
+        "not-available" | "bad-grant" => "bad-request",
+        _ => "registry",
+    }
 }
 
 fn kind_view(id: &str) -> Value {

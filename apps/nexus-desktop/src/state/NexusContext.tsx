@@ -160,6 +160,8 @@ export interface NexusState {
   forgetProject: (projectId: string) => Promise<void>;
   setProjectPolicy: (projectId: string, policy: { installs?: boolean; trusted?: boolean }) => Promise<void>;
   setProjectEditMode: (projectId: string, mode: WorkspaceMode) => Promise<void>;
+  setProjectPermissions: (projectId: string, grant: { fs: string; net: string; approval: string; expiresInSecs?: number | null }) => Promise<void>;
+  endProjectPermissions: (projectId: string, clear: boolean) => Promise<void>;
 }
 
 function newIdempotencyKey(): string {
@@ -632,6 +634,20 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     },
     [guarded, nativeApi, refreshProjects],
   );
+  const setProjectPermissions = useCallback(
+    async (id: string, grant: { fs: string; net: string; approval: string; expiresInSecs?: number | null }) => {
+      await guarded("project", () => nativeApi.projectSetPermissions(id, grant));
+      await refreshProjects(false);
+    },
+    [guarded, nativeApi, refreshProjects],
+  );
+  const endProjectPermissions = useCallback(
+    async (id: string, clear: boolean) => {
+      await guarded("project", () => nativeApi.projectEndPermissions(id, clear));
+      await refreshProjects(false);
+    },
+    [guarded, nativeApi, refreshProjects],
+  );
   const forgetProject = useCallback(async (id: string) => void (await guarded("project", () => nativeApi.projectForget(id))), [guarded, nativeApi]);
 
   // ---- A7.1 conversations -----------------------------------------------------------
@@ -851,6 +867,8 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     forgetProject,
     setProjectPolicy,
     setProjectEditMode,
+    setProjectPermissions,
+    endProjectPermissions,
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
