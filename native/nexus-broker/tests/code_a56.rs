@@ -16942,7 +16942,7 @@ fn fixture_unified(responder: Responder, env: &[(&str, &str)]) -> Fx {
             "@APPROVER_CAP@".to_owned(),
             "--approver-uids".to_owned(),
             "@UID@".to_owned(),
-            "--allow-nonindependent-approver-test-only".to_owned(),
+            "--approver-same-user".to_owned(),
         ],
     )
 }
@@ -17564,4 +17564,389 @@ fn perm_the_cli_changes_permissions_only_after_an_explicit_confirmation() {
     assert_eq!(code, 0);
     assert!(grant_of(&fx, "other").is_null());
     b.shutdown();
+}
+
+#[test]
+fn perm_widening_never_reaches_a_running_task() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_unified(
+        script(
+            vec![
+                (
+                    "proc_run",
+                    r#"{"program":"sh","args":["-c","sleep 6.1; echo one"]}"#.to_owned(),
+                ),
+                (
+                    "proc_run",
+                    r#"{"program":"sh","args":["-c","echo w > w.txt"]}"#.to_owned(),
+                ),
+            ],
+            "Done.",
+        ),
+        &[],
+    );
+    let b = start_interactive(&fx, "pw");
+    user_sets_grant(b.socket_path(), "other", "scratch", "offline", "auto", None);
+    let sock = b.socket_path().to_owned();
+    let r = ic::submit(
+        &sock,
+        &code_intent_for("other", "go", "perm-widen-00000001", |_| {}),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(60);
+    while !running_cmd("sleep\x006.1") {
+        assert!(Instant::now() < end, "the first command never started");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // the user WIDENS the permissions while the task runs
+    user_sets_grant(&sock, "other", "workspace", "install", "auto", None);
+    assert_eq!(grant_of(&fx, "other")["version"], 2);
+    let run = wait_terminal(&sock, &r.run_id, 120);
+    assert_eq!(
+        run.state, "completed",
+        "a widening must not stop a running task: {run:?}"
+    );
+    // the second command still ran under what the task started with (a throw-away copy)
+    let meta: Vec<String> = std::fs::read_dir(fx.worktrees.join(".meta"))
+        .map(|d| {
+            d.flatten()
+                .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !working_copy(&fx).unwrap().join("w.txt").exists(),
+        "the running task gained the in-place scope: meta={meta:?} run={:?}",
+        statuses(&run)
+    );
+    b.shutdown();
+}
+
+#[test]
+fn perm_narrowing_applies_from_the_next_operation_and_never_kills_the_running_command() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_unified(
+        script(
+            vec![
+                ("proc_run", r#"{"program":"sh","args":["-c","echo a > a.txt; sleep 6.2; echo finished-first"]}"#.to_owned()),
+                ("proc_run", r#"{"program":"sh","args":["-c","echo b > b.txt"]}"#.to_owned()),
+            ],
+            "Done.",
+        ),
+        &[],
+    );
+    let b = start_interactive(&fx, "pm");
+    user_sets_grant(
+        b.socket_path(),
+        "other",
+        "workspace",
+        "offline",
+        "auto",
+        None,
+    );
+    let sock = b.socket_path().to_owned();
+    let r = ic::submit(
+        &sock,
+        &code_intent_for("other", "go", "perm-narrow-0000001", |l| {
+            l.max_runtime_secs = Some(30)
+        }),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(60);
+    while !running_cmd("sleep\x006.2") {
+        assert!(Instant::now() < end, "the first command never started");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // the user NARROWS the approval behaviour: from now on every operation of this task needs a person
+    user_sets_grant(&sock, "other", "workspace", "offline", "ask", None);
+    let run = wait_terminal(&sock, &r.run_id, 120);
+    let wc = working_copy(&fx).unwrap();
+    assert!(wc.join("a.txt").exists());
+    let first = run
+        .tool_activity
+        .iter()
+        .find(|a| a.tool == "proc_run")
+        .unwrap();
+    assert_eq!(
+        first.status, "executed",
+        "narrowing killed the command that was already running: {first:?}"
+    );
+    // nobody answers: the next operation was held for a person, never decided by the policy, never run
+    assert!(
+        !wc.join("b.txt").exists(),
+        "an operation ran without the person the narrowed permissions require"
+    );
+    let icap = std::fs::read_to_string(&fx.cap).unwrap().trim().to_owned();
+    let list = nexus_client::issuer::issuer_call(
+        &fx.daemon_socket,
+        &icap,
+        "approval-list",
+        json!({"limit": 50}),
+    )
+    .unwrap();
+    let rows = list["approvals"].as_array().unwrap();
+    assert!(
+        rows.iter()
+            .any(|r| r["decisionKind"] != "automated-policy" && r["grant"]["approval"] == "ask"),
+        "no approval was held for a person: {rows:?}"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn perm_clearing_the_permissions_also_ends_a_command_in_progress() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_unified(
+        script(
+            vec![(
+                "proc_run",
+                r#"{"program":"sh","args":["-c","echo c > c.txt; sleep 78"]}"#.to_owned(),
+            )],
+            "Done.",
+        ),
+        &[],
+    );
+    let b = start_interactive(&fx, "pq");
+    user_sets_grant(
+        b.socket_path(),
+        "other",
+        "workspace",
+        "offline",
+        "auto",
+        None,
+    );
+    let sock = b.socket_path().to_owned();
+    let r = ic::submit(
+        &sock,
+        &code_intent_for("other", "go", "perm-clear-000000001", |_| {}),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(60);
+    while !running_cmd("sleep\x0078") {
+        assert!(Instant::now() < end, "the command never started");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let t0 = Instant::now();
+    ic::project_grant_clear(&sock, "other", "desktop").unwrap();
+    while running_cmd("sleep\x0078") && t0.elapsed() < Duration::from_secs(30) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !running_cmd("sleep\x0078"),
+        "the command survived the removal of its permissions"
+    );
+    let run = wait_terminal(&sock, &r.run_id, 90);
+    assert!(run.terminal);
+    b.shutdown();
+}
+
+#[test]
+fn perm_ask_is_refused_before_a_grant_is_stored_when_no_approver_channel_exists() {
+    // the interactive profile WITHOUT an approver channel (the Desktop of milestone 2)
+    let fx = fixture_full(
+        m1_script(),
+        Box::new(|_| {}),
+        &[],
+        true,
+        true,
+        None,
+        &["--standing-grants".to_owned()],
+    );
+    let b = start_interactive(&fx, "pz");
+    let sock = b.socket_path().to_owned();
+    let e =
+        ic::project_grant_preview(&sock, "other", "scratch", "offline", "ask", None).unwrap_err();
+    assert!(
+        e.message.contains("not available") && e.message.contains("approver channel"),
+        "{e:?}"
+    );
+    let e = ic::project_grant_set(
+        &sock,
+        "other",
+        "scratch",
+        "offline",
+        "ask",
+        None,
+        &"0".repeat(64),
+        "cli",
+    )
+    .unwrap_err();
+    assert!(e.message.contains("approver channel"), "{e:?}");
+    assert!(
+        grant_of(&fx, "other").is_null(),
+        "an unanswerable Ask was stored"
+    );
+    // the other choices still work, and the capability is reported for the UI
+    user_sets_grant(&sock, "other", "scratch", "offline", "auto", None);
+    let l = ic::project_list(&sock, false).unwrap();
+    assert_eq!(l["permissions"]["known"], true);
+    assert_eq!(l["permissions"]["askAvailable"], false);
+    assert!(l["permissions"]["askReason"]
+        .as_str()
+        .unwrap()
+        .contains("approver channel"));
+    b.shutdown();
+}
+
+/// Drive the REAL `nexus-approver` binary through a pseudo-terminal, exactly as a person at a terminal
+/// would: it prints the daemon-authored request, the person types the review code (approve) or `deny`.
+fn terminal_approver(fx: &Fx, approval_id: &str, answer: &str) -> String {
+    const PY: &str = r#"
+import os, pty, re, select, sys, time
+binary, sock, cap, aid, mode = sys.argv[1:6]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(binary, [binary, "--socket", sock, "--cap-file", cap, "review", aid])
+buf = b""
+sent = False
+end = time.time() + 40
+while time.time() < end:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if not r:
+        continue
+    try:
+        d = os.read(fd, 4096)
+    except OSError:
+        break
+    if not d:
+        break
+    buf += d
+    m = re.search(rb"Type the review code \(([0-9a-f]+)\)", buf)
+    if m and not sent:
+        os.write(fd, (m.group(1).decode() if mode == "approve" else "deny").encode() + b"\n")
+        sent = True
+print(buf.decode(errors="replace"))
+"#;
+    let out = Command::new("python3")
+        .arg("-c")
+        .arg(PY)
+        .arg(native_bin("nexus-approver"))
+        .arg(&fx.daemon_socket)
+        .arg(&fx.approver_cap)
+        .arg(approval_id)
+        .arg(answer)
+        .output()
+        .expect("python3 pty driver");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn pending_approval_id(fx: &Fx, secs: u64) -> String {
+    let icap = std::fs::read_to_string(&fx.cap).unwrap().trim().to_owned();
+    let end = Instant::now() + Duration::from_secs(secs);
+    loop {
+        if let Ok(l) = nexus_client::issuer::issuer_call(
+            &fx.daemon_socket,
+            &icap,
+            "approval-list",
+            json!({"limit": 20}),
+        ) {
+            if let Some(a) = l["approvals"]
+                .as_array()
+                .and_then(|a| a.iter().find(|a| a["state"] == "pending"))
+            {
+                return a["approvalId"].as_str().unwrap().to_owned();
+            }
+        }
+        assert!(Instant::now() < end, "no approval became pending");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn perm_the_real_terminal_approver_approves_and_denies_an_ask_operation() {
+    if !sandbox_ready() {
+        return;
+    }
+    for (answer, runs) in [("approve", true), ("deny", false)] {
+        let fx = fixture_unified(
+            script(
+                vec![(
+                    "proc_run",
+                    r#"{"program":"sh","args":["-c","echo via-approver > v.txt"]}"#.to_owned(),
+                )],
+                "Done.",
+            ),
+            &[],
+        );
+        let b = start_interactive(&fx, "pt");
+        user_sets_grant(
+            b.socket_path(),
+            "other",
+            "workspace",
+            "offline",
+            "ask",
+            None,
+        );
+        let r = ic::submit(
+            b.socket_path(),
+            &code_intent_for("other", "go", &format!("perm-term-{answer}-0001"), |_| {}),
+        )
+        .unwrap()
+        .run;
+        let id = pending_approval_id(&fx, 60);
+        // nothing has run while the operation waits
+        let seen = ic::status(b.socket_path(), &r.run_id).unwrap();
+        assert_eq!(seen.state, "approval-pending", "{seen:?}");
+        assert!(seen.pending_approval.is_some());
+        assert!(working_copy(&fx)
+            .map(|w| !w.join("v.txt").exists())
+            .unwrap_or(true));
+        let screen = terminal_approver(&fx, &id, answer);
+        assert!(
+            screen.contains(if runs {
+                "recorded: approved"
+            } else {
+                "recorded: denied"
+            }),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("echo via-approver"),
+            "the approver did not show the exact command: {screen}"
+        );
+        let run = wait_terminal(b.socket_path(), &r.run_id, 120);
+        let wc = working_copy(&fx).unwrap();
+        assert_eq!(wc.join("v.txt").exists(), runs, "{answer}: {run:?}");
+        let a = run
+            .tool_activity
+            .iter()
+            .find(|a| a.tool == "proc_run")
+            .unwrap();
+        assert_eq!(
+            a.approval_outcome.as_deref(),
+            Some(if runs { "approved" } else { "denied" }),
+            "{a:?}"
+        );
+        assert_ne!(a.approval_actor.as_deref(), Some("automated-policy"));
+        // the Kernel's record: decided by a person at the approver, same-user (not independent), never the policy
+        let icap = std::fs::read_to_string(&fx.cap).unwrap().trim().to_owned();
+        let l = nexus_client::issuer::issuer_call(
+            &fx.daemon_socket,
+            &icap,
+            "approval-list",
+            json!({"limit": 20}),
+        )
+        .unwrap();
+        let row = l["approvals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["approvalId"] == id.as_str())
+            .unwrap();
+        assert_eq!(
+            row["humanAuthMechanism"], "approver-uid-terminal-review-code",
+            "{row}"
+        );
+        assert_ne!(row["decisionKind"], "automated-policy");
+        b.shutdown();
+    }
 }

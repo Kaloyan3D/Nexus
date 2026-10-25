@@ -32,10 +32,10 @@ single coherent **Ask / Auto** flow. Not implemented, by instruction: Full Acces
 | network | `offline`, `install` (existing dependency-install class) | `controlled`, `full` |
 | approval | `auto`, `ask` | — |
 
-**Immutable while running, can only shrink.** The task's record holds the grant's identity (id, version, digest) and values at creation;
-a newer version never widens it and never stops it. It stops at: revocation, removal, a *new lineage* (grant again after revocation),
-its frozen expiry, or a shorter expiry set later. The check is a registry read per operation, plus a rate-limited (250 ms) check inside the
-process supervisor so a **running** command is killed on revocation.
+**Immutable while running, can only shrink (corrected in M2.1: see `NEXUS-PERMISSIONS-M2.1-REPORT.md` §3).** A task freezes the grant's
+identity and values at creation. At every operation it holds the *stricter, per axis,* of what it froze and what its grant lineage allows now:
+widening never reaches it, narrowing applies from its next operation, and revocation, removal, a new lineage (granting again after a
+revocation), its frozen expiry or a shorter expiry stop it - including a command already running (the supervisor re-checks every 250 ms).
 
 **Separation of trusted approval from model-requested operations.** The model proposes only `{program, args, cwd}` (unknown keys, including
 `fsScope`/`grant`/`net`/`approval`/`unsandboxed`, are refused). The operation description is built by the daemon from its own record. The
@@ -92,7 +92,7 @@ Not run: the JS suites outside the gate and a Desktop window (no JS behaviour ou
 * **Revocation is immediate, including in-flight commands**, because it is cheap and the alternative (let a revoked task finish its running command) contradicts "revoked permissions are rejected". It is not a transaction: an operation already past the final check may complete.
 * **Expired / revoked / replaced ⇒ refusal, never a fallback to defaults**, and this applies to read-only runs of that project too (a refusal at task creation). "Use defaults" (`clear`) is an explicit user action.
 * **Write approvals carry the grant** in the sealed approval request (reviewed and journaled) but the *write* scope binding is not versioned: the Kernel-sealed scope with the grant is the **process** scope. Edits are covered by the execution-time validity check.
-* **Ask in the Desktop** is available through the existing trusted terminal approver (`nexus-approver`); the Desktop never holds approval authority (its renderer guard tests are unchanged). The Desktop-run daemon is not provisioned with an approver channel, so an `ask` project is refused at task creation with a message that names the missing channel — the UI lets the user choose `ask` but does not yet know whether the channel exists. Provisioning it (and hiding the option otherwise) is the first follow-up.
+* **Ask in the Desktop** (closed in M2.1): the Desktop-run daemon now has an approver channel and the UI offers `ask` only when the runtime says it can be answered; the Desktop still never holds approval authority.
 * The registry is the user's own file (same trust boundary as before: not signed; owner-only). A same-uid attacker who can write it is the user; the model's sandbox cannot see it.
 * Under a grant the per-project `installs` flag no longer matters (the network axis governs); the checkbox still edits the legacy flag.
 * The operator flag `--isolated-exec-scope` (M1) remains the default for projects **without** a grant; a grant's filesystem axis overrides it.

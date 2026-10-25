@@ -4,6 +4,7 @@ import type { PendingApproval } from "../../lib/contracts";
 import { useNow } from "../../lib/useViewport";
 import { Badge, Button } from "../../components/ui/primitives";
 import { CopyButton } from "../conversation/ConversationPanel";
+import { useNexus } from "../../state/NexusContext";
 
 const short = (h?: string | null) => (h ? h.slice(0, 10) : "—");
 
@@ -22,6 +23,9 @@ function clock(seconds: number): string {
  */
 export function ApprovalBanner({ approval }: { approval: PendingApproval }) {
   const now = useNow(1000);
+  const { runtimeState } = useNexus();
+  // this installation's real approver command (paths only - never the credential), when it knows it
+  const approverCommand = runtimeState?.approverCommand ? `${runtimeState.approverCommand}${approval.approvalId}` : null;
   const [open, setOpen] = useState(false);
   const expired = approval.expiresAtMs != null && now >= approval.expiresAtMs;
   const left = approval.expiresAtMs != null ? Math.max(0, Math.round((approval.expiresAtMs - now) / 1000)) : null;
@@ -68,7 +72,8 @@ export function ApprovalBanner({ approval }: { approval: PendingApproval }) {
           <p className="nv-note">
             The approver sees the exact {isCommand ? "argument vector and sandbox policy" : "diff"} (request digest <span className="nv-mono">{short(approval.requestDigest)}</span>).
           </p>
-          <pre className="nv-msg__pre" aria-label="Approver command">{`nexus-approver --socket <daemon socket> --cap-file <approver credential file> review ${approval.approvalId}`}</pre>
+          <pre className="nv-msg__pre" aria-label="Approver command">{approverCommand ?? `nexus-approver --socket <daemon socket> --cap-file <approver credential file> review ${approval.approvalId}`}</pre>
+          {approverCommand && <CopyButton text={approverCommand} label="Copy approver command" />}
         </div>
       )}
     </section>

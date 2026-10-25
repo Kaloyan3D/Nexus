@@ -313,6 +313,19 @@ describe("Approval banner (A6.1.2)", () => {
     expect(within(banner).queryByRole("textbox")).not.toBeInTheDocument();
   });
 
+  it("shows this installation's real approver command (paths only) and a copy button when the runtime knows it", async () => {
+    const cmd = "/opt/nexus/bin/nexus-approver --socket /home/u/.local/share/nexus/daemon/n.sock --cap-file /home/u/.local/share/nexus/approver/approver.cap review ";
+    const { user } = await openRun(codeRun({ state: "approval-pending", terminal: false, pendingApproval: pa() }), {
+      runtimeState: async () => ({ mode: "external" as const, phase: "ready" as const, message: null, home: null, providerConnected: true, consent: { given: true, providerId: null, remoteModelId: null, text: null }, canOpenProjects: false, approverCommand: cmd }),
+    });
+    const banner = await screen.findByRole("region", { name: "Pending approval" });
+    await user.click(within(banner).getByRole("button", { name: "Details" }));
+    expect(within(banner).getByLabelText("Approver command")).toHaveTextContent(`${cmd}ap9`);
+    expect(within(banner).getByRole("button", { name: "Copy approver command" })).toBeInTheDocument();
+    // still no authority in the renderer
+    for (const bad of [/^approve/i, /^deny/i]) expect(within(banner).queryByRole("button", { name: bad })).not.toBeInTheDocument();
+  });
+
   it("expands to the model's proposal, labelled as NOT the authoritative request, with restrictions and the approver command", async () => {
     const { user } = await openRun(codeRun({ state: "approval-pending", terminal: false, pendingApproval: pa() }));
     const banner = await screen.findByRole("region", { name: "Pending approval" });

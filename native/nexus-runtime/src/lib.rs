@@ -56,6 +56,14 @@ impl Home {
     pub fn issuer_cap(&self) -> PathBuf {
         self.daemon_dir().join("issuer.cap")
     }
+    /// The approver credential lives in its own private directory, apart from the issuer's and the
+    /// daemon's. Only the trusted terminal approver reads it; the broker, the renderer and the model do not.
+    pub fn approver_dir(&self) -> PathBuf {
+        self.root.join("approver")
+    }
+    pub fn approver_cap(&self) -> PathBuf {
+        self.approver_dir().join("approver.cap")
+    }
     pub fn broker_dir(&self) -> PathBuf {
         self.root.join("broker")
     }
@@ -107,6 +115,8 @@ pub struct Tools {
     pub broker: PathBuf,
     pub node: PathBuf,
     pub repo_root: PathBuf,
+    /// The trusted terminal approver, when installed next to the other binaries (for the hint shown to the user).
+    pub approver: Option<PathBuf>,
 }
 
 impl Tools {
@@ -160,6 +170,7 @@ impl Tools {
             broker: find("nexus-broker")?,
             node,
             repo_root,
+            approver: find("nexus-approver").ok(),
         })
     }
 }
@@ -230,6 +241,7 @@ pub fn bootstrap(home: &Home) -> Result<(), String> {
     private_dir(&home.root)?;
     for d in [
         home.daemon_dir(),
+        home.approver_dir(),
         home.broker_dir(),
         home.registry_data(),
         home.projects_registry(),
@@ -396,7 +408,14 @@ fn start_daemon(home: &Home, tools: &Tools) -> Result<std::process::Child, Strin
             "--autonomous-workspace-policy",
             // standing permissions per project (a project without a grant behaves exactly as before)
             "--standing-grants",
+            // Ask: pending operations are decided by the person in the trusted terminal approver
+            // (`nexus-approver`), which alone holds this credential. Same OS user, separate credential.
+            "--approver-same-user",
+            "--approver-uids",
+            &me,
         ])
+        .arg("--approver-cap")
+        .arg(home.approver_cap())
         .arg("--workspace-bases")
         .arg(home.code_base())
         .arg("--worktree-root")

@@ -547,6 +547,8 @@ export interface RuntimeState {
   /** The broker can open project folders (interactive profile). */
   canOpenProjects: boolean;
   updatePending?: boolean;
+  /** How to decide a pending operation of a project that asks: the trusted terminal approver, with this installation's real paths. */
+  approverCommand?: string | null;
 }
 
 export interface ProjectKindView {
@@ -556,6 +558,21 @@ export interface ProjectKindView {
 }
 
 export type WorkspaceMode = "direct" | "isolated";
+
+/** What this installation can really do with permissions (asked of the runtime, never assumed). */
+export interface PermissionSupport {
+  /** false = the runtime could not be asked just now; nothing is offered or changed meanwhile. */
+  known: boolean;
+  standingGrants: boolean;
+  /** An approver channel exists, so "Ask me first" can be answered. */
+  askAvailable: boolean;
+  askReason: string | null;
+}
+
+export interface ProjectListReply {
+  projects: ProjectView[];
+  permissions?: PermissionSupport;
+}
 
 export type GrantStatus = "active" | "expired" | "revoked";
 

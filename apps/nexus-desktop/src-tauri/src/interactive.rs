@@ -37,6 +37,10 @@ pub struct RuntimeState {
     /// Nexus was updated while a task is running: the runtime restarts by itself when
     /// the task finishes; new tasks wait until then.
     pub update_pending: bool,
+    /// How the person decides a pending operation of a project that asks: the trusted terminal approver,
+    /// with this installation's real paths (the credential file's PATH, never its content). Absent when
+    /// the approver is not installed or the runtime is operator-run.
+    pub approver_command: Option<String>,
 }
 
 pub type ActivityProbe = Box<dyn Fn() -> Result<usize, String> + Send + Sync>;
@@ -373,6 +377,17 @@ impl Runtime {
             },
             can_open_projects: false,
             update_pending: self.update_pending.load(Ordering::SeqCst),
+            approver_command: match (&self.home, &self.tools, self.external) {
+                (Some(h), Ok(t), false) => t.approver.as_ref().map(|bin| {
+                    format!(
+                        "{} --socket {} --cap-file {} review ",
+                        bin.display(),
+                        h.daemon_socket().display(),
+                        h.approver_cap().display()
+                    )
+                }),
+                _ => None,
+            },
         };
         if phase == "ready" {
             if let Ok(c) = ic::consent_status(&self.sock()) {

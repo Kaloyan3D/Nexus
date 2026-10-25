@@ -2850,10 +2850,12 @@ fn task_fs_scope(daemon: &Daemon, task: &str) -> nexus_tools::exec_contract::FsS
         // Direct + in-place execution is a later stage; it is never inferred.
         return FsScope::Scratch;
     }
-    // a task that holds a standing grant runs under the grant's filesystem scope
-    if let Some(g) = meta.get("grant").filter(|g| !g.is_null()) {
-        return match g.get("fs").and_then(|v| v.as_str()) {
-            Some("workspace") => FsScope::Workspace,
+    // a task that holds a standing grant runs under the grant's filesystem scope - the stricter of what it
+    // froze and what is granted now (any failure to establish that is the narrowest scope; the operation
+    // itself is refused elsewhere)
+    if meta.get("grant").is_some_and(|g| !g.is_null()) {
+        return match grant_may_act(daemon, task) {
+            Ok(Some(g)) if g.fs == "workspace" => FsScope::Workspace,
             _ => FsScope::Scratch,
         };
     }
@@ -2970,8 +2972,10 @@ fn grant_may_act(
     let rec = file
         .get(pid)
         .ok_or("the task's project is no longer registered")?;
-    nexus_tools::registry::task_may_act(rec, &frozen, now_ms_i64()).map_err(|e| e.message)?;
-    Ok(Some(frozen))
+    // What the task holds now: its frozen identity, each axis the stricter of frozen and current.
+    let now = nexus_tools::registry::task_permissions_now(rec, &frozen, now_ms_i64())
+        .map_err(|e| e.message)?;
+    Ok(Some(now))
 }
 
 /// The grant identity and axes as declared in a reviewed operation (and sealed by the Kernel).
@@ -5262,6 +5266,195 @@ mod isolation_tests {
         nexus_tools::registry::clear_grant(&regdir, &t, "p", "test").unwrap();
         assert!(grant_may_act(&d, &task).unwrap_err().contains("removed"));
         drop(keep);
+    }
+
+    /// One transition of the project's grant, applied to the registry while a task that froze
+    /// `scratch/offline/auto` ... or the given axes is running; what that task holds afterwards.
+    fn after(
+        frozen_axes: (&str, &str, &str),
+        change: impl Fn(&std::path::Path, &nexus_tools::registry::Trust),
+    ) -> (
+        Daemon,
+        String,
+        String,
+        nexus_tools::grant::Frozen,
+        Result<Option<nexus_tools::grant::Frozen>, String>,
+        tempfile::TempDir,
+    ) {
+        let (d, keep, task, digest, f, regdir) =
+            grant_rig(frozen_axes.0, frozen_axes.1, frozen_axes.2);
+        let t = nexus_tools::registry::Trust::default();
+        change(&regdir, &t);
+        let now = grant_may_act(&d, &task);
+        (d, task, digest, f, now, keep)
+    }
+
+    fn spec_of(fs: &str, net: &str, ap: &str) -> nexus_tools::grant::GrantSpec {
+        nexus_tools::grant::GrantSpec {
+            fs: fs.into(),
+            net: net.into(),
+            approval: ap.into(),
+            expires_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn widening_or_replacing_with_the_same_permissions_never_changes_a_running_task() {
+        let t = ("scratch", "offline", "ask");
+        // widen every axis
+        let (d, task, _dg, f, now, _k) = after(t, |r, tr| {
+            nexus_tools::registry::set_grant(
+                r,
+                tr,
+                "p",
+                &spec_of("workspace", "install", "auto"),
+                "u",
+                "c",
+            )
+            .unwrap();
+        });
+        let now = now.unwrap().unwrap();
+        assert_eq!(
+            (now.fs.as_str(), now.net.as_str(), now.approval.as_str()),
+            ("scratch", "offline", "ask"),
+            "gained something"
+        );
+        assert_eq!(
+            (now.grant_id, now.version, now.digest),
+            (f.grant_id.clone(), f.version, f.digest.clone())
+        );
+        assert_eq!(
+            task_fs_scope(&d, &task),
+            nexus_tools::exec_contract::FsScope::Scratch
+        );
+        // replace with an identical grant (a new version of the same lineage)
+        let (_d, _t, _g, f2, now, _k) = after(("workspace", "install", "auto"), |r, tr| {
+            nexus_tools::registry::set_grant(
+                r,
+                tr,
+                "p",
+                &spec_of("workspace", "install", "auto"),
+                "u",
+                "c",
+            )
+            .unwrap();
+        });
+        assert_eq!(now.unwrap().unwrap(), f2);
+    }
+
+    #[test]
+    fn narrowing_applies_to_a_running_task_from_its_next_operation() {
+        use nexus_tools::exec_contract::FsScope;
+        // filesystem: workspace -> scratch
+        let (d, task, digest, f, now, _k) = after(("workspace", "install", "auto"), |r, tr| {
+            nexus_tools::registry::set_grant(
+                r,
+                tr,
+                "p",
+                &spec_of("scratch", "install", "auto"),
+                "u",
+                "c",
+            )
+            .unwrap();
+        });
+        let eff = now.unwrap().unwrap();
+        assert_eq!(eff.fs, "scratch");
+        assert_eq!(task_fs_scope(&d, &task), FsScope::Scratch);
+        let cfg = d.autonomous.clone().unwrap();
+        // an operation built from the OLD (in-place) declaration is no longer the task's
+        let old = granted_proc(Some(&f), "none", "in-place-task-copy", Some("workspace"));
+        assert!(evaluate_autonomous_policy(
+            &d,
+            &cfg,
+            &sub(&task, &digest, "proc.run", "process", &[], old)
+        )
+        .is_err());
+        // ... one built from what it holds now is fine
+        let cur = granted_proc(Some(&eff), "none", "none", None);
+        assert!(evaluate_autonomous_policy(
+            &d,
+            &cfg,
+            &sub(&task, &digest, "proc.run", "process", &[], cur)
+        )
+        .is_ok());
+        // network: install -> offline
+        let (d, task, digest, f, now, _k) = after(("scratch", "install", "auto"), |r, tr| {
+            nexus_tools::registry::set_grant(
+                r,
+                tr,
+                "p",
+                &spec_of("scratch", "offline", "auto"),
+                "u",
+                "c",
+            )
+            .unwrap();
+        });
+        let eff = now.unwrap().unwrap();
+        assert_eq!(eff.net, "offline");
+        let cfg = d.autonomous.clone().unwrap();
+        let inst = granted_proc(Some(&eff), "install", "none", None);
+        assert!(evaluate_autonomous_policy(
+            &d,
+            &cfg,
+            &sub(&task, &digest, "proc.run", "process", &[], inst)
+        )
+        .unwrap_err()
+        .contains("not permitted"));
+        let _ = f;
+        // approval: auto -> ask - the policy now refuses to decide it; a person is needed
+        let (d, task, digest, _f, now, _k) = after(("scratch", "offline", "auto"), |r, tr| {
+            nexus_tools::registry::set_grant(
+                r,
+                tr,
+                "p",
+                &spec_of("scratch", "offline", "ask"),
+                "u",
+                "c",
+            )
+            .unwrap();
+        });
+        let eff = now.unwrap().unwrap();
+        assert_eq!(eff.approval, "ask");
+        let cfg = d.autonomous.clone().unwrap();
+        let op = granted_proc(Some(&eff), "none", "none", None);
+        assert!(evaluate_autonomous_policy(
+            &d,
+            &cfg,
+            &sub(&task, &digest, "proc.run", "process", &[], op)
+        )
+        .unwrap_err()
+        .contains("person"));
+    }
+
+    #[test]
+    fn revocation_regranting_and_clearing_each_end_a_running_task() {
+        let ax = ("workspace", "install", "auto");
+        let (_d, _t, _g, _f, now, _k) = after(ax, |r, tr| {
+            nexus_tools::registry::revoke_grant(r, tr, "p", "u").unwrap();
+        });
+        assert!(now.unwrap_err().contains("revoked"));
+        let (_d, _t, _g, _f, now, _k) = after(ax, |r, tr| {
+            nexus_tools::registry::revoke_grant(r, tr, "p", "u").unwrap();
+            nexus_tools::registry::set_grant(
+                r,
+                tr,
+                "p",
+                &spec_of("workspace", "install", "auto"),
+                "u",
+                "c",
+            )
+            .unwrap();
+        });
+        assert!(
+            now.unwrap_err().contains("replaced"),
+            "a fresh grant after a revocation must not revive the old task"
+        );
+        let (_d, _t, _g, _f, now, _k) = after(ax, |r, tr| {
+            nexus_tools::registry::clear_grant(r, tr, "p", "u").unwrap();
+        });
+        assert!(now.unwrap_err().contains("removed"));
+        // (expiry - frozen or shortened later - is covered by the registry tests and
+        // `the_expiry_frozen_into_a_task_ends_it_without_any_registry_change`)
     }
 
     #[test]

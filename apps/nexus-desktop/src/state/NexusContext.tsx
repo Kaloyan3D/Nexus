@@ -25,6 +25,7 @@ import type {
   ModelSelection,
   ProjectOpenReply,
   ProjectView,
+  PermissionSupport,
   RegistryTarget,
   ThreadMode,
   AdaptiveSetupReport,
@@ -154,6 +155,8 @@ export interface NexusState {
   retryRuntime: () => Promise<void>;
   /** Projects Nexus knows (opened from the Desktop or registered by an operator). */
   projects: ProjectView[];
+  /** What this installation can do with permissions (ask needs an approver channel). */
+  permissionSupport: PermissionSupport | null;
   refreshProjects: (withChanges?: boolean) => Promise<void>;
   openProject: () => Promise<ProjectOpenReply | null>;
   refreshProject: (projectId: string) => Promise<void>;
@@ -598,12 +601,16 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
   const revokeConsent = useCallback(async () => void (await guarded("consent", () => nativeApi.providerRevoke())), [guarded, nativeApi]);
   const retryRuntime = useCallback(async () => void (await guarded("start", () => nativeApi.runtimeStart())), [guarded, nativeApi]);
   const [projects, setProjects] = useState<ProjectView[]>([]);
+  const [permissionSupport, setPermissionSupport] = useState<PermissionSupport | null>(null);
   const refreshProjects = useCallback(
     async (withChanges?: boolean) => {
       try {
-        setProjects((await nativeApi.projectList(withChanges)).projects);
+        const r = await nativeApi.projectList(withChanges);
+        setProjects(r.projects);
+        setPermissionSupport(r.permissions ?? null);
       } catch {
         setProjects([]);
+        setPermissionSupport(null);
       }
     },
     [nativeApi],
@@ -612,7 +619,11 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     let alive = true;
     nativeApi
       .projectList()
-      .then((r) => alive && setProjects(r.projects))
+      .then((r) => {
+        if (!alive) return;
+        setProjects(r.projects);
+        setPermissionSupport(r.permissions ?? null);
+      })
       .catch(() => alive && setProjects([]));
     return () => {
       alive = false;
@@ -861,6 +872,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     revokeConsent,
     retryRuntime,
     projects,
+    permissionSupport,
     refreshProjects,
     openProject,
     refreshProject,

@@ -37,7 +37,7 @@ export function grantSummary(p: ProjectView): string {
  * The model cannot create, widen or renew a permission; this panel is the only Desktop path to one.
  */
 function PermissionsEditor({ p }: { p: ProjectView }) {
-  const { setProjectPermissions, endProjectPermissions, setupBusy } = useNexus();
+  const { setProjectPermissions, endProjectPermissions, setupBusy, permissionSupport } = useNexus();
   const [open, setOpen] = useState(false);
   const g = p.grant;
   const [fs, setFs] = useState<string>(g?.fs ?? "scratch");
@@ -46,6 +46,10 @@ function PermissionsEditor({ p }: { p: ProjectView }) {
   const [expiry, setExpiry] = useState<number>(0);
   const busy = setupBusy === "project";
   const inPlaceBlocked = p.workspaceMode === "direct";
+  // what this installation can really do (asked of the runtime): never offer an "ask" nobody can answer
+  const supportKnown = permissionSupport?.known === true && permissionSupport.standingGrants;
+  const askOk = supportKnown && permissionSupport?.askAvailable === true;
+  const askWhy = permissionSupport?.askReason ?? "this installation could not confirm that an approver is available";
   return (
     <div>
       <Badge tone={g && g.status !== "active" ? "warning" : g ? "purple" : "neutral"} title="What commands of this project's tasks may do">
@@ -74,9 +78,14 @@ function PermissionsEditor({ p }: { p: ProjectView }) {
             Approval{" "}
             <select className="nv-select nv-select--quiet" aria-label={`Approval behaviour for ${p.label}`} value={approval} onChange={(e) => setApproval(e.target.value)}>
               <option value="auto">{APPROVAL_LABEL.auto}</option>
-              <option value="ask">{APPROVAL_LABEL.ask}</option>
+              <option value="ask" disabled={!askOk}>{APPROVAL_LABEL.ask}{!askOk ? " (not available)" : ""}</option>
             </select>
           </label>
+          {!askOk && (
+            <p className="nv-note" role="note" aria-label={`Why Ask is unavailable for ${p.label}`}>
+              “Ask me first” is not available: {supportKnown ? askWhy : (permissionSupport?.askReason ?? "the Nexus runtime could not be asked just now")}.
+            </p>
+          )}
           <label className="nv-note">
             Valid for{" "}
             <select className="nv-select nv-select--quiet" aria-label={`Lifetime of the permissions for ${p.label}`} value={expiry} onChange={(e) => setExpiry(Number(e.target.value))}>
@@ -86,7 +95,7 @@ function PermissionsEditor({ p }: { p: ProjectView }) {
             </select>
           </label>
           <div>
-            <Button size="sm" variant="primary" disabled={busy} onClick={() => void setProjectPermissions(p.projectId, { fs, net, approval, expiresInSecs: EXPIRY_CHOICES[expiry]?.secs ?? null })}>
+            <Button size="sm" variant="primary" disabled={busy || !supportKnown || (approval === "ask" && !askOk)} onClick={() => void setProjectPermissions(p.projectId, { fs, net, approval, expiresInSecs: EXPIRY_CHOICES[expiry]?.secs ?? null })}>
               Apply…
             </Button>{" "}
             {g && g.status !== "revoked" && (
@@ -100,7 +109,8 @@ function PermissionsEditor({ p }: { p: ProjectView }) {
               </Button>
             )}
           </div>
-          {g && <p className="nv-note">Version {g.version}{g.expiresAtMs ? ` · expires ${new Date(g.expiresAtMs).toLocaleString()}` : ""} · applies to new tasks only.</p>}
+          {g && <p className="nv-note">Version {g.version}{g.expiresAtMs ? ` · expires ${new Date(g.expiresAtMs).toLocaleString()}` : ""}.</p>}
+          <p className="nv-note">Widening applies to new tasks only; a running task never gains anything. Narrowing applies to a running task from its next operation. Revoking or removing stops it, including a command in progress.</p>
         </div>
       )}
     </div>
@@ -180,9 +190,15 @@ function OpenedProjects() {
                   {p.originDirty ? " · had uncommitted changes" : ""}
                 </td>
                 <td>
-                  <label className="nv-note" title="Lets Nexus download this project's dependencies (npm ci, pip install, ...) inside its sandbox. Everything else runs without network.">
-                    <input type="checkbox" checked={p.installs === true} onChange={(e) => void setProjectPolicy(p.projectId, { installs: e.target.checked })} disabled={setupBusy === "project"} aria-label={`Allow dependency installs for ${p.label}`} /> installs
-                  </label>{" "}
+                  {p.grant ? (
+                    <span className="nv-note" title="This project has standing permissions: they decide whether dependencies may be installed (their Network setting). The older per-project switch is not used while they exist.">
+                      installs: {p.grant.status !== "active" ? "stopped (permissions " + p.grant.status + ")" : p.grant.net === "install" ? "allowed by Permissions" : "not allowed by Permissions"}
+                    </span>
+                  ) : (
+                    <label className="nv-note" title="Lets Nexus download this project's dependencies (npm ci, pip install, ...) inside its sandbox. Everything else runs without network.">
+                      <input type="checkbox" checked={p.installs === true} onChange={(e) => void setProjectPolicy(p.projectId, { installs: e.target.checked })} disabled={setupBusy === "project"} aria-label={`Allow dependency installs for ${p.label}`} /> installs
+                    </label>
+                  )}{" "}
                   {p.workspaceMode !== "direct" && (
                     <>
                   <label className="nv-note" title="Trusted workspace: when a task finishes and its checks pass, Nexus applies the change to your folder by itself (all-or-nothing, only if your folder did not change meanwhile). Nothing is committed or pushed.">
