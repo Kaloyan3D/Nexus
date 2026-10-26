@@ -1340,6 +1340,37 @@ fn run(args: &[String]) -> i32 {
                 }
             }
             let p = p.with_forbidden_paths(forbidden);
+            // M5: the egress service of Controlled Internet. Limits are operator settings; the test hooks
+            // (repeatable) exist for acceptance tests and are refused by the production profile.
+            let mut eg = nexus_tools::egress_host::EgressSettings::default();
+            if let Some(n) = flag_str(args, "--egress-max-bytes").and_then(|v| v.parse().ok()) {
+                eg.limits.max_total_bytes = n;
+            }
+            if let Some(n) = flag_str(args, "--egress-max-connections").and_then(|v| v.parse().ok())
+            {
+                eg.limits.max_conns = n;
+            }
+            if let Some(n) = flag_str(args, "--egress-idle-secs").and_then(|v| v.parse().ok()) {
+                eg.limits.idle_secs = n;
+            }
+            let mut it = args.iter();
+            while let Some(a) = it.next() {
+                let (Some(kv), true) = (it.clone().next(), a.starts_with("--egress-test-")) else {
+                    continue;
+                };
+                if let Some((k, v)) = kv.split_once('=') {
+                    match a.as_str() {
+                        "--egress-test-resolve" => {
+                            eg.test_resolve.insert(k.to_owned(), v.to_owned());
+                        }
+                        "--egress-test-connect" => {
+                            eg.test_connect.insert(k.to_owned(), v.to_owned());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let p = p.with_egress_settings(eg);
             // M3C.4: hard-linked files are read-only for in-place commands unless the operator opts in.
             let p = if args.iter().any(|a| a == "--allow-hardlinked-writes") {
                 p.with_hard_links(nexus_tools::inplace::HardLinks::Allow)

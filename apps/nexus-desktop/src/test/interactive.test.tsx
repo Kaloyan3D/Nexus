@@ -20,7 +20,7 @@ const rt = (over: Partial<RuntimeState> = {}): RuntimeState => ({
   ...over,
 });
 
-const support = (over: Partial<{ known: boolean; standingGrants: boolean; askAvailable: boolean; askReason: string | null }> = {}) => ({
+const support = (over: Partial<{ known: boolean; standingGrants: boolean; askAvailable: boolean; askReason: string | null; inPlaceAvailable: boolean; controlledAvailable: boolean; controlledReason: string | null }> = {}) => ({
   known: true, standingGrants: true, askAvailable: true, askReason: null as string | null, ...over,
 });
 
@@ -273,6 +273,34 @@ describe("Projects page and evidence (A6.1.4)", () => {
     await user.selectOptions(within(table).getByLabelText("Approval behaviour for tinycsv"), "ask");
     await user.click(within(table).getByRole("button", { name: "Apply…" }));
     expect(setPerm).toHaveBeenCalledWith("tinycsv-6c94b7", expect.objectContaining({ approval: "ask" }));
+  });
+
+  it("Controlled Internet sends the owner's destinations only, says it limits where not what, and is disabled with a reason when the gatekeeper is missing", async () => {
+    const setPerm = vi.fn(async () => ({}));
+    const list = vi.fn(async () => ({ projects: [project({ workspaceMode: "direct" })], permissions: support({ inPlaceAvailable: true, controlledAvailable: true }) }));
+    const user = userEvent.setup();
+    mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetPermissions: setPerm }), "#/projects");
+    const table = await screen.findByRole("table", { name: "Opened projects" });
+    await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
+    await user.selectOptions(within(table).getByLabelText("Command filesystem scope for tinycsv"), "workspace");
+    await user.selectOptions(within(table).getByLabelText("Network scope for tinycsv"), "controlled");
+    expect(within(table).getByText(/limits WHERE they connect, not WHAT they send/)).toBeInTheDocument();
+    await user.click(within(table).getByLabelText("Allow the npm preset for tinycsv"));
+    await user.type(within(table).getByLabelText("Allowed hosts for tinycsv"), "api.example.org:443");
+    await user.type(within(table).getByLabelText("Allowed local ports for tinycsv"), "5432 8080");
+    await user.click(within(table).getByRole("button", { name: "Apply…" }));
+    expect(setPerm).toHaveBeenCalledWith("tinycsv-6c94b7", expect.objectContaining({ fs: "workspace", net: "controlled", netPresets: ["npm"], allowHosts: ["api.example.org:443"], allowLocalPorts: [5432, 8080] }));
+  });
+
+  it("Controlled Internet is not offered when this machine has no network gatekeeper", async () => {
+    const list = vi.fn(async () => ({ projects: [project()], permissions: support({ inPlaceAvailable: true, controlledAvailable: false, controlledReason: "the network gatekeeper `nexus-egress` was not found next to nexusd" }) }));
+    const user = userEvent.setup();
+    mount(fakeApi({ runtimeState: async () => rt(), projectList: list }), "#/projects");
+    const table = await screen.findByRole("table", { name: "Opened projects" });
+    await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
+    const opt = within(table).getByRole("option", { name: /Only the internet destinations I list/ }) as HTMLOptionElement;
+    expect(opt.disabled).toBe(true);
+    expect(opt.textContent).toMatch(/nexus-egress/);
   });
 
   it("nothing can be applied while the runtime cannot say what it supports", async () => {

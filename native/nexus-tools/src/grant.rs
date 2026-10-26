@@ -56,6 +56,10 @@ pub struct ExecPolicy {
     /// `off` (default) | `read-only`: bind the verified main git directory of a linked worktree read-only.
     #[serde(default = "off_str")]
     pub git_worktree: String,
+    /// Controlled Internet (M5): the destinations commands may reach. Meaningful only with network scope
+    /// `controlled`; part of the grant digest, so the Kernel seals it with the grant.
+    #[serde(default, skip_serializing_if = "crate::netpolicy::NetPolicy::is_empty")]
+    pub net: crate::netpolicy::NetPolicy,
 }
 
 fn off_str() -> String {
@@ -68,6 +72,7 @@ impl Default for ExecPolicy {
             checkpoint: "best-effort".into(),
             hard_links: "protect".into(),
             git_worktree: "off".into(),
+            net: Default::default(),
         }
     }
 }
@@ -90,6 +95,13 @@ impl ExecPolicy {
                 "hard-link policy must be protect or allow",
             ));
         }
+        if !matches!(self.git_worktree.as_str(), "off" | "read-only") {
+            return Err(gerr(
+                "bad-grant",
+                "git worktree access must be off or read-only",
+            ));
+        }
+        self.net.validate().map_err(|m| gerr("bad-grant", m))?;
         Ok(())
     }
 
@@ -223,6 +235,10 @@ impl StandingGrant {
             if self.exec.git_worktree != "off" {
                 v["exec"]["gitWorktree"] = self.exec.git_worktree.clone().into();
             }
+            if !self.exec.net.is_empty() {
+                v["exec"]["netPolicy"] =
+                    serde_json::to_value(self.exec.net.canonical()).unwrap_or_default();
+            }
         }
         hex::encode(Sha256::digest(
             nexus_contracts::canonical_json(&v).as_bytes(),
@@ -304,6 +320,25 @@ pub fn validate_spec(
         .ok_or_else(|| gerr("bad-grant", "approval must be ask or auto"))?;
     let _ = project_is_direct;
     spec.exec.validate()?;
+    if net == NetScope::Controlled {
+        if fs != FsScope::Workspace {
+            return Err(gerr(
+                "bad-grant",
+                "Controlled Internet is available to commands that run in place (filesystem scope: workspace)",
+            ));
+        }
+        if spec.exec.net.is_empty() {
+            return Err(gerr(
+                "bad-grant",
+                "Controlled Internet needs at least one allowed destination (a host name, or a port of a service on this machine)",
+            ));
+        }
+    } else if !spec.exec.net.is_empty() {
+        return Err(gerr(
+            "bad-grant",
+            "allowed destinations apply only to Controlled Internet (network: controlled)",
+        ));
+    }
     if fs != FsScope::Workspace && !spec.exec.is_default() {
         return Err(gerr(
             "bad-grant",
@@ -336,9 +371,43 @@ pub fn consent_text_for(project_label: &str, spec: &GrantSpec, direct: bool) -> 
         "workspace" => "Commands Nexus runs for this project (builds, tests, formatters, code generators, dependency installs) change the task's working copy directly: what they create or modify stays there and becomes part of the patch you review. They cannot see or change anything outside the project.",
         _ => "Commands Nexus runs for this project work on a throw-away copy; whatever they write is discarded (edits are made with Nexus's own file tools).",
     };
+    let controlled_text;
     let net = match spec.net.as_str() {
         "install" => {
             "Dependency installation (npm, pip, cargo, ...) may use the internet. Nothing else may."
+        }
+        "controlled" => {
+            let p = spec.exec.net.canonical();
+            let hosts = p
+                .hosts
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{} (port {})",
+                        r.host,
+                        r.ports
+                            .iter()
+                            .map(u16::to_string)
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let local =
+                if p.local_ports.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                    " Commands may also reach services running on THIS machine at these ports: {}.",
+                    p.local_ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
+                )
+                };
+            controlled_text = format!(
+                "Commands may use the internet ONLY to reach: {}.{local} Every connection goes through Nexus's network gatekeeper, which refuses any other destination, IP addresses, and names that resolve to your own network or to cloud-metadata addresses. It checks WHERE a command connects, not WHAT it sends: encrypted traffic is not inspected, and anything a command can read (including your source code and any secrets it can see) can be sent to a destination you allow here. Allow only destinations you trust with that.",
+                if hosts.is_empty() { "(no internet hosts)".to_owned() } else { hosts }
+            );
+            controlled_text.as_str()
         }
         _ => "Commands have no network access.",
     };
@@ -351,7 +420,7 @@ pub fn consent_text_for(project_label: &str, spec: &GrantSpec, direct: bool) -> 
         None => "This permission does not expire until you revoke it.",
     };
     let mut extra = String::new();
-    if spec.fs == "workspace" && (direct || !spec.exec.is_default()) {
+    if spec.fs == "workspace" && (direct || !spec.exec.is_default() || spec.net == "controlled") {
         let ck = match spec.exec.checkpoint.as_str() {
             "required" => "Before every command Nexus must save a complete checkpoint of your project files; if it cannot, the command does not run.",
             "off" => "No checkpoint is taken before commands: what a command changes cannot be restored by Nexus.",
@@ -385,8 +454,9 @@ fn rank_fs(s: &str) -> u8 {
 fn rank_net(s: &str) -> u8 {
     match s {
         "offline" => 0,
-        "install" => 1,
-        _ => 2,
+        "controlled" => 1,
+        "install" => 2, // the legacy install class reaches the whole internet: the widest implemented
+        _ => 3,
     }
 }
 
@@ -397,8 +467,21 @@ pub fn narrowed(frozen: &Frozen, current: &StandingGrant) -> Frozen {
     if rank_fs(&current.fs) < rank_fs(&f.fs) {
         f.fs = current.fs.clone();
     }
+    let frozen_was_controlled = f.net == "controlled";
     if rank_net(&current.net) < rank_net(&f.net) {
         f.net = current.net.clone();
+    }
+    // Controlled Internet: what a running task may reach is what BOTH its frozen and its current policy allow
+    if f.net == "controlled" {
+        f.exec.net = if frozen_was_controlled && current.net == "controlled" {
+            frozen.exec.net.intersect(&current.exec.net)
+        } else if frozen_was_controlled {
+            frozen.exec.net.clone() // (the current grant is the wider install class: never wider than frozen)
+        } else {
+            current.exec.net.clone() // frozen was the legacy install class, narrowed to the current policy
+        };
+    } else {
+        f.exec.net = Default::default();
     }
     // checkpoint: required > best-effort > off; hard links: protect > allow
     let rank_ck = |s: &str| match s {
@@ -614,6 +697,7 @@ mod tests {
                 checkpoint: c.into(),
                 hard_links: h.into(),
                 git_worktree: w.into(),
+                ..Default::default()
             };
             assert_ne!(b.digest("p"), legacy, "{c} {h} {w}");
         }
@@ -626,12 +710,14 @@ mod tests {
             checkpoint: "best-effort".into(),
             hard_links: "allow".into(),
             git_worktree: "read-only".into(),
+            ..Default::default()
         };
         let mut cur = g();
         cur.exec = ExecPolicy {
             checkpoint: "required".into(),
             hard_links: "protect".into(),
             git_worktree: "off".into(),
+            ..Default::default()
         };
         let n = narrowed(&frozen, &cur);
         assert_eq!(
@@ -648,12 +734,14 @@ mod tests {
             checkpoint: "required".into(),
             hard_links: "protect".into(),
             git_worktree: "off".into(),
+            ..Default::default()
         };
         let mut loose = g();
         loose.exec = ExecPolicy {
             checkpoint: "off".into(),
             hard_links: "allow".into(),
             git_worktree: "read-only".into(),
+            ..Default::default()
         };
         let n = narrowed(&strict, &loose);
         assert_eq!(
@@ -683,6 +771,7 @@ mod tests {
             checkpoint: "required".into(),
             hard_links: "allow".into(),
             git_worktree: "read-only".into(),
+            ..Default::default()
         };
         let t = consent_text_for("proj", &sp, true);
         assert!(

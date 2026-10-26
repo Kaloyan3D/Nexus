@@ -1143,6 +1143,72 @@ pub fn project_grant_set_with(
     call(socket, "project-grant", p, 30_000)
 }
 
+/// Destinations of a Controlled Internet grant (`net: controlled`): presets, `host[:port,port]` rules and
+/// ports of services on the user's own machine.
+#[derive(Debug, Clone, Default)]
+pub struct NetChoice {
+    pub presets: Vec<String>,
+    pub hosts: Vec<String>,
+    pub local_ports: Vec<u16>,
+}
+
+impl NetChoice {
+    fn add_to(&self, p: &mut serde_json::Value) {
+        if !self.presets.is_empty() {
+            p["netPreset"] = serde_json::json!(self.presets);
+        }
+        if !self.hosts.is_empty() {
+            p["allowHosts"] = serde_json::json!(self.hosts);
+        }
+        if !self.local_ports.is_empty() {
+            p["allowLocalPorts"] = serde_json::json!(self.local_ports);
+        }
+    }
+}
+
+/// As [`project_grant_preview_with`], additionally naming Controlled Internet destinations.
+#[allow(clippy::too_many_arguments)]
+pub fn project_grant_preview_net(
+    socket: &Path,
+    project_id: &str,
+    fs: &str,
+    net: &str,
+    approval: &str,
+    expires_in_secs: Option<u64>,
+    exec: Option<(&str, &str)>,
+    dest: &NetChoice,
+) -> Result<serde_json::Value, ClientError> {
+    let mut p = serde_json::json!({ "projectId": project_id, "fs": fs, "net": net, "approval": approval, "expiresInSecs": expires_in_secs });
+    if let Some((c, h)) = exec {
+        p["checkpoint"] = c.into();
+        p["hardLinks"] = h.into();
+    }
+    dest.add_to(&mut p);
+    call(socket, "project-grant-preview", p, 30_000)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn project_grant_set_net(
+    socket: &Path,
+    project_id: &str,
+    fs: &str,
+    net: &str,
+    approval: &str,
+    expires_in_secs: Option<u64>,
+    text_sha256: &str,
+    surface: &str,
+    exec: Option<(&str, &str)>,
+    dest: &NetChoice,
+) -> Result<serde_json::Value, ClientError> {
+    let mut p = serde_json::json!({ "projectId": project_id, "fs": fs, "net": net, "approval": approval, "expiresInSecs": expires_in_secs, "textSha256": text_sha256, "surface": surface });
+    if let Some((c, h)) = exec {
+        p["checkpoint"] = c.into();
+        p["hardLinks"] = h.into();
+    }
+    dest.add_to(&mut p);
+    call(socket, "project-grant", p, 30_000)
+}
+
 /// The persisted effects record of an in-place execution.
 pub fn exec_effects(socket: &Path, execution_id: &str) -> Result<serde_json::Value, ClientError> {
     call(

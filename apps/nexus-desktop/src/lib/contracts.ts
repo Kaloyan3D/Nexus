@@ -570,6 +570,9 @@ export interface PermissionSupport {
   /** In-place commands (Landlock + launch gate) can run on this machine; absent = not reported. */
   inPlaceAvailable?: boolean;
   inPlaceReason?: string | null;
+  /** Controlled Internet (the network gatekeeper) can run on this machine; absent = not reported. */
+  controlledAvailable?: boolean;
+  controlledReason?: string | null;
 }
 
 export interface ProjectListReply {
@@ -586,7 +589,9 @@ export interface ProjectGrantView {
   digest: string;
   /** `scratch`: commands work on a throw-away copy. `workspace`: they change the task's working copy in place. */
   fs: "scratch" | "workspace";
-  net: "offline" | "install";
+  net: "offline" | "controlled" | "install";
+  /** Controlled Internet: the destinations commands may reach (an allowlist of WHERE, not of what is sent). */
+  netPolicy?: { hosts: { host: string; ports: number[] }[]; local_ports?: number[] };
   /** `auto`: inside the grant, no prompt. `ask`: every operation waits for the independent approver. */
   approval: "ask" | "auto";
   expiresAtMs: number | null;

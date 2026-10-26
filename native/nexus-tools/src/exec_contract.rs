@@ -73,7 +73,10 @@ pub enum NetScope {
 
 impl NetScope {
     pub fn is_implemented(self) -> bool {
-        matches!(self, NetScope::Offline | NetScope::Install)
+        matches!(
+            self,
+            NetScope::Offline | NetScope::Install | NetScope::Controlled
+        )
     }
 
     pub fn as_str(self) -> &'static str {
@@ -294,7 +297,7 @@ impl ExecBackend for LinuxBwrapBackend {
             } else {
                 vec![FsScope::Scratch]
             },
-            net_scopes: vec![NetScope::Offline, NetScope::Install],
+            net_scopes: vec![NetScope::Offline, NetScope::Install, NetScope::Controlled],
             pinned_root_mount: fd,
             subpath_readonly: fd,
             hide_existing_entries: fd,
@@ -326,7 +329,7 @@ mod tests {
             } else {
                 vec![FsScope::Scratch]
             },
-            net_scopes: vec![NetScope::Offline, NetScope::Install],
+            net_scopes: vec![NetScope::Offline, NetScope::Install, NetScope::Controlled],
             pinned_root_mount: fd,
             subpath_readonly: fd,
             hide_existing_entries: fd,
@@ -383,13 +386,11 @@ mod tests {
             check_grant(&caps(true), &full),
             Err(ExecRefusal::NotImplemented("Full Access"))
         ));
-        for net in [NetScope::Controlled, NetScope::Full] {
-            let g = ExecGrant {
-                net,
-                ..Default::default()
-            };
-            assert!(check_grant(&caps(true), &g).is_err(), "{net:?}");
-        }
+        let g = ExecGrant {
+            net: NetScope::Full,
+            ..Default::default()
+        };
+        assert!(check_grant(&caps(true), &g).is_err());
     }
 
     #[test]

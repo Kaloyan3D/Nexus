@@ -95,6 +95,8 @@ pub const PROCESS_SCOPE_DOMAIN_V3: &str = "nexus-process-scope/v3";
 /// Network scopes a process scope can seal.
 pub const NET_SCOPE_OFFLINE: &str = "offline";
 pub const NET_SCOPE_INSTALL: &str = "install";
+/// Controlled Internet (M5): connections only through the egress service, to the destinations of the grant.
+pub const NET_SCOPE_CONTROLLED: &str = "controlled";
 /// Approval behaviours a process scope can seal.
 pub const APPROVAL_ASK: &str = "ask";
 pub const APPROVAL_AUTO: &str = "auto";
@@ -153,7 +155,10 @@ impl DeclaredScope {
                 if id.is_empty() || id.len() > 64 || digest.len() != 64 || version == 0 {
                     return Err("the grant identity is malformed".into());
                 }
-                if net != NET_SCOPE_OFFLINE && net != NET_SCOPE_INSTALL {
+                if net != NET_SCOPE_OFFLINE
+                    && net != NET_SCOPE_INSTALL
+                    && net != NET_SCOPE_CONTROLLED
+                {
                     return Err("unsupported network scope in a grant".into());
                 }
                 if approval != APPROVAL_ASK && approval != APPROVAL_AUTO {
@@ -2169,8 +2174,8 @@ mod process_scope_compat_tests {
             "fs differs from the operation's"
         );
         assert!(
-            bad(base("scratch", "controlled", "auto"), None),
-            "network scope not implemented"
+            !bad(base("scratch", "controlled", "auto"), None),
+            "Controlled Internet is implemented"
         );
         assert!(bad(base("scratch", "full", "auto"), None));
         assert!(bad(base("scratch", "offline", "maybe"), None));

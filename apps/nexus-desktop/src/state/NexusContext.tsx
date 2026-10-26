@@ -163,7 +163,7 @@ export interface NexusState {
   forgetProject: (projectId: string) => Promise<void>;
   setProjectPolicy: (projectId: string, policy: { installs?: boolean; trusted?: boolean }) => Promise<void>;
   setProjectEditMode: (projectId: string, mode: WorkspaceMode) => Promise<void>;
-  setProjectPermissions: (projectId: string, grant: { fs: string; net: string; approval: string; expiresInSecs?: number | null }) => Promise<void>;
+  setProjectPermissions: (projectId: string, grant: { fs: string; net: string; approval: string; expiresInSecs?: number | null; netPresets?: string[]; allowHosts?: string[]; allowLocalPorts?: number[] }) => Promise<void>;
   endProjectPermissions: (projectId: string, clear: boolean) => Promise<void>;
 }
 
@@ -646,7 +646,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     [guarded, nativeApi, refreshProjects],
   );
   const setProjectPermissions = useCallback(
-    async (id: string, grant: { fs: string; net: string; approval: string; expiresInSecs?: number | null }) => {
+    async (id: string, grant: { fs: string; net: string; approval: string; expiresInSecs?: number | null; netPresets?: string[]; allowHosts?: string[]; allowLocalPorts?: number[] }) => {
       await guarded("project", () => nativeApi.projectSetPermissions(id, grant));
       await refreshProjects(false);
     },

@@ -131,6 +131,9 @@ pub struct SandboxSpec {
     /// Read-only binds of directories OUTSIDE the workspace, by verified descriptor (`(fd, sandbox path)`):
     /// the external git directory of a linked worktree. Only valid together with `pinned_root`.
     pub fd_ro_binds: Vec<(std::os::fd::RawFd, String)>,
+    /// Controlled Internet: the command keeps its own (empty) network namespace; its only way out is the egress
+    /// service's unix socket, reached through a bridge the launch gate starts on loopback inside the sandbox.
+    pub egress: Option<EgressSpec>,
     /// Share the host network namespace (dependency installation only). Everything else
     /// runs in a fresh, empty network namespace.
     pub net: bool,
@@ -141,6 +144,22 @@ pub struct SandboxSpec {
     /// Scratch runs keep their historical argv and digest.
     pub confine: Option<ConfineSpec>,
 }
+
+/// The sandbox side of one execution's egress service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgressSpec {
+    /// Host path of the service's unix socket (bound at `egress::SANDBOX_SOCKET` inside the sandbox).
+    pub socket: PathBuf,
+    /// Loopback port of the HTTP proxy bridge inside the sandbox.
+    pub http_port: u16,
+    /// Loopback ports forwarded to granted services on the user's machine.
+    pub forward_ports: Vec<u16>,
+    /// Digest of the destination policy this execution was authorized with (recorded in the sandbox digest).
+    pub policy_digest: String,
+}
+
+/// Where the egress socket appears inside the sandbox.
+pub const SANDBOX_EGRESS_SOCKET: &str = "/nexus/egress.sock";
 
 /// The launch gate of an in-place execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +210,16 @@ impl ConfineSpec {
             require_scope: self.require_scope,
             root: Some(self.root),
             expect,
+            egress_sock: spec
+                .egress
+                .as_ref()
+                .map(|_| SANDBOX_EGRESS_SOCKET.to_owned()),
+            bridge_http: spec.egress.as_ref().map(|e| e.http_port),
+            bridge_forward: spec
+                .egress
+                .as_ref()
+                .map(|e| e.forward_ports.clone())
+                .unwrap_or_default(),
         }
     }
 }
@@ -433,6 +462,10 @@ pub fn seccomp_program() -> Vec<u8> {
     Vec::new()
 }
 
+pub(crate) fn seccomp_filter_fd() -> Result<std::os::fd::OwnedFd, ToolError> {
+    seccomp_fd()
+}
+
 fn seccomp_fd() -> Result<std::os::fd::OwnedFd, ToolError> {
     let prog = seccomp_program();
     if prog.is_empty() {
@@ -582,6 +615,11 @@ pub fn bwrap_argv(spec: &SandboxSpec) -> Vec<String> {
         a.push(c.shim.to_string_lossy().into_owned());
         a.push(crate::confine::SANDBOX_PATH.to_owned());
     }
+    if let Some(e) = &spec.egress {
+        a.push("--bind".to_owned());
+        a.push(e.socket.to_string_lossy().into_owned());
+        a.push(SANDBOX_EGRESS_SOCKET.to_owned());
+    }
     // The synthetic root itself becomes read-only: only /tmp and /work/out
     // (size-limited tmpfs mounts) remain writable.
     a.push("--remount-ro".to_owned());
@@ -622,6 +660,10 @@ pub fn sandbox_digest(spec: &SandboxSpec) -> String {
     if let Some(c) = &spec.confine {
         h.update(b"confine\0");
         h.update(c.shim_sha256.as_bytes());
+    }
+    if let Some(e) = &spec.egress {
+        h.update(b"egress\0");
+        h.update(e.policy_digest.as_bytes());
     }
     hex::encode(h.finalize())
 }
@@ -780,6 +822,7 @@ pub fn preflight() -> SandboxCapabilities {
             },
             cgroup_base: cgroup_base().unwrap_or_default(),
             fd_ro_binds: Vec::new(),
+            egress: None,
             confine: None,
         };
         struct Never;
@@ -983,6 +1026,10 @@ pub fn run_sandboxed(
         if spec.pinned_root.is_none() {
             return Err(refuse("the launch gate needs a pinned workspace root"));
         }
+    }
+    if spec.egress.is_some() && (spec.confine.is_none() || spec.net) {
+        // Controlled Internet exists only behind the launch gate and never together with the host network
+        return Err(refuse("Controlled Internet needs the launch gate and an isolated network namespace; refusing to run"));
     }
     if spec.pinned_root.is_none() && !spec.src_dir.is_dir() {
         return Err(refuse("staged snapshot directory is missing"));

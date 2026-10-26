@@ -1353,6 +1353,24 @@ fn check_within_grant(
                     return Err("installing dependencies (network) is not permitted by this project's permissions".into());
                 }
             }
+            Some("controlled") => {
+                if f.net_scope() != nexus_tools::exec_contract::NetScope::Controlled {
+                    return Err(
+                        "Controlled Internet is not permitted by this project's permissions".into(),
+                    );
+                }
+                // the destination policy the operation was reviewed with is the one the task holds now
+                if sandbox
+                    .and_then(|s| s.get("netPolicyDigest"))
+                    .and_then(|v| v.as_str())
+                    != Some(f.exec.net.digest().as_str())
+                {
+                    return Err(
+                        "the operation's network destinations are not the ones this task holds"
+                            .into(),
+                    );
+                }
+            }
             _ => {
                 return Err(
                     "this command would use the network in a way the permissions do not allow"
@@ -1493,6 +1511,11 @@ fn evaluate_autonomous_policy(
                 // dependency installation: the only networked class, only where the
                 // project's policy allows it
                 Some("install") => installs_ok,
+                // Controlled Internet: only for a task that froze it (the grant check above already compared the
+                // reviewed destination policy with the one the task holds)
+                Some("controlled") => frozen.as_ref().is_some_and(|g| {
+                    g.net_scope() == nexus_tools::exec_contract::NetScope::Controlled
+                }),
                 _ => false,
             };
             // The scope the operation declares must be the scope of THIS task (the daemon's own record),
@@ -1764,6 +1787,9 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         };
         let b = prepared.budgets();
         let in_place = prepared.fs_scope() == nexus_tools::exec_contract::FsScope::Workspace;
+        let controlled = frozen
+            .as_ref()
+            .is_some_and(|g| g.net_scope() == nexus_tools::exec_contract::NetScope::Controlled);
         let mut op = serde_json::json!({
             "kind": "proc.run",
             "program": resolved.name,
@@ -1773,7 +1799,7 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "cwd": resolved.cwd,
             "sandbox": {
                 "backend": "bubblewrap+seccomp+cgroup-v2",
-                "network": if resolved.install { "install" } else { "none" },
+                "network": if controlled { "controlled" } else if resolved.install { "install" } else { "none" },
                 "workspace": if daemon.command_policy.is_workbench() { "throw-away copy of the snapshot" } else { "read-only snapshot" },
                 "writeBack": "none",
                 "env": "allowlist", "shell": resolved.name == "sh",
@@ -1799,6 +1825,14 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         }
         if let Some(g) = &frozen {
             op["grant"] = grant_declaration(g);
+            if controlled {
+                // Controlled Internet: the destinations this command may reach are part of the REVIEWED, sealed
+                // operation (by digest) and shown to a person who is asked
+                op["sandbox"]["netPolicyDigest"] = g.exec.net.digest().into();
+                op["sandbox"]["netDestinations"] =
+                    serde_json::to_value(g.exec.net.canonical()).unwrap_or_default();
+                op["networkEffects"] = "connections go through the egress service to the allowed destinations only; encrypted content is not inspected".into();
+            }
         }
         sub_common(
             "process",
@@ -2333,6 +2367,15 @@ impl nexus_tools::process::ProcessHooks for DaemonProcessHooks<'_> {
             );
         }
     }
+    fn net_policy(&mut self) -> Option<nexus_tools::netpolicy::NetPolicy> {
+        controlled_policy_now(self.daemon, &self.task)
+    }
+    fn net_narrowed(&mut self, started: &nexus_tools::netpolicy::NetPolicy) -> bool {
+        match controlled_policy_now(self.daemon, &self.task) {
+            Some(now) => !now.covers(started),
+            None => !started.is_empty(),
+        }
+    }
     fn exec_policy(&mut self) -> Option<nexus_tools::grant::ExecPolicy> {
         // the owner's policy as this task holds it NOW (frozen at creation, only ever narrowed)
         match grant_may_act(self.daemon, &self.task) {
@@ -2343,6 +2386,7 @@ impl nexus_tools::process::ProcessHooks for DaemonProcessHooks<'_> {
                 checkpoint: "required".into(),
                 hard_links: "protect".into(),
                 git_worktree: "off".into(),
+                net: Default::default(),
             }),
         }
     }
@@ -2937,13 +2981,28 @@ fn resolve_task_permissions(
     };
     // belt and braces: values this build cannot enforce are refused even if a registry carries them
     if !matches!(frozen.fs_scope(), FsScope::Scratch | FsScope::Workspace)
-        || !matches!(frozen.net_scope(), NetScope::Offline | NetScope::Install)
+        || !matches!(
+            frozen.net_scope(),
+            NetScope::Offline | NetScope::Install | NetScope::Controlled
+        )
         || nexus_tools::exec_contract::Approval::parse(&frozen.approval).is_none()
     {
         return Err((
             "scope-refused",
             "the project's permissions name a capability this build does not provide".into(),
         ));
+    }
+    if frozen.net_scope() == NetScope::Controlled {
+        let c = controlled_availability(daemon);
+        if c["available"] != true {
+            return Err((
+                "scope-refused",
+                format!(
+                    "the project's permissions allow Controlled Internet, which this machine cannot provide: {}; nothing was started and no weaker network mode was used",
+                    c["reason"].as_str().unwrap_or("unavailable")
+                ),
+            ));
+        }
     }
     if frozen.fs_scope() == FsScope::Workspace
         && (daemon.autonomous.is_none() || !daemon.process_enabled)
@@ -2987,6 +3046,42 @@ fn task_meta(daemon: &Daemon, task: &str) -> Option<serde_json::Value> {
         return None;
     }
     serde_json::from_str(&std::fs::read_to_string(wt_meta_path(root, task)).ok()?).ok()
+}
+
+/// The destination policy a task holds NOW under Controlled Internet: `None` = the task was not started under
+/// Controlled Internet. A task that froze Controlled Internet whose grant can no longer be read, or whose grant
+/// no longer allows it, holds the EMPTY policy (everything is refused) - never the legacy network.
+fn controlled_policy_now(daemon: &Daemon, task: &str) -> Option<nexus_tools::netpolicy::NetPolicy> {
+    use nexus_tools::exec_contract::NetScope;
+    let meta = task_meta(daemon, task)?;
+    let frozen = frozen_of_meta(&meta).ok().flatten()?;
+    if frozen.net_scope() != NetScope::Controlled {
+        return None;
+    }
+    Some(match grant_may_act(daemon, task) {
+        Ok(Some(now)) if now.net_scope() == NetScope::Controlled => now.exec.net.canonical(),
+        _ => nexus_tools::netpolicy::NetPolicy::default(),
+    })
+}
+
+/// Can this machine provide Controlled Internet? The reason names the first missing piece.
+fn controlled_availability(daemon: &Daemon) -> serde_json::Value {
+    let reason = (|| -> Option<String> {
+        if let Some(r) = in_place_availability(daemon)["reason"].as_str() {
+            return Some(r.to_owned());
+        }
+        let bin = daemon
+            .command_policy
+            .egress_settings()
+            .bin
+            .clone()
+            .or_else(nexus_tools::confine_host::locate_egress);
+        match bin {
+            None => Some("the network gatekeeper `nexus-egress` was not found next to nexusd; reinstall Nexus".into()),
+            Some(p) => nexus_tools::confine_host::egress_is_trustworthy(&p).err(),
+        }
+    })();
+    serde_json::json!({ "available": reason.is_none(), "reason": reason })
 }
 
 /// May this task still act? A task without a grant always may (as before). A task with one may only
@@ -4514,6 +4609,7 @@ fn do_status(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "writesEnabled": daemon.writes_enabled,
             "processEnabled": daemon.process_enabled,
             "inPlaceExecution": in_place_availability(daemon),
+            "controlledInternet": controlled_availability(daemon),
             "sandbox": daemon.sandbox_caps.as_ref().map(|c| serde_json::json!({
                 "available": c.available, "backend": c.backend,
                 "cgroupMemoryController": c.cgroup_memory_controller,

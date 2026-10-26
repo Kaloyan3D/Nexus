@@ -734,6 +734,7 @@ async fn project_set_edit_mode(
 /// Set the project's standing permissions. The native backend shows the broker's exact consent text and
 /// needs the person's "yes"; the renderer only chooses the three axes and an optional lifetime.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn project_set_grant(
     rt: tauri::State<'_, Arc<interactive::Runtime>>,
     dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
@@ -742,8 +743,18 @@ async fn project_set_grant(
     net: String,
     approval: String,
     expires_in_secs: Option<u64>,
+    net_presets: Option<Vec<String>>,
+    allow_hosts: Option<Vec<String>>,
+    allow_local_ports: Option<Vec<u16>>,
 ) -> Result<serde_json::Value, UiError> {
     let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    // Destinations are the owner's choice made in this panel and shown in the consent dialog; the broker
+    // validates every entry (and refuses them for any network other than Controlled Internet).
+    let dest = nexus_client::intent_client::NetChoice {
+        presets: net_presets.unwrap_or_default(),
+        hosts: allow_hosts.unwrap_or_default(),
+        local_ports: allow_local_ports.unwrap_or_default(),
+    };
     tauri::async_runtime::spawn_blocking(move || {
         rt.project_set_grant(
             d.as_ref(),
@@ -752,6 +763,7 @@ async fn project_set_grant(
             &net,
             &approval,
             expires_in_secs,
+            &dest,
         )
     })
     .await

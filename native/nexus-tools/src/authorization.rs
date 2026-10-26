@@ -626,13 +626,25 @@ fn run_tool(ctx: &mut ExecCtx<'_>, args: &ToolArgs) -> Result<serde_json::Value,
 
 // ------------------------------------------------------------ A3.4
 
+/// Narrowing probe of an embedder (tests, harnesses): has the destination policy been narrowed since `started`?
+pub type NarrowProbe<'a> = &'a dyn Fn(&crate::netpolicy::NetPolicy) -> bool;
+
 struct KernelProcessHooks<'a> {
     kernel: &'a mut Kernel,
     verified: &'a VerifiedToolGrant,
     last: Option<nexus_store::ToolJournalEntry>,
+    /// Controlled Internet, supplied by the embedder (the daemon has its own hooks).
+    net: Option<crate::netpolicy::NetPolicy>,
+    narrow: Option<NarrowProbe<'a>>,
 }
 
 impl crate::process::ProcessHooks for KernelProcessHooks<'_> {
+    fn net_policy(&mut self) -> Option<crate::netpolicy::NetPolicy> {
+        self.net.clone()
+    }
+    fn net_narrowed(&mut self, started: &crate::netpolicy::NetPolicy) -> bool {
+        self.narrow.is_some_and(|f| f(started))
+    }
     fn journal(&mut self, phase: &str, payload: serde_json::Value) -> Result<(), ToolError> {
         let e = self
             .kernel
@@ -717,11 +729,39 @@ pub fn execute_process_in(
     scope_max_wall_ms: u64,
     env: Option<&crate::process::ProjectEnv>,
 ) -> Result<ToolExecutionOutcome, ToolError> {
+    execute_process_net(
+        kernel,
+        call,
+        cancel,
+        policy,
+        run_root,
+        scope_max_wall_ms,
+        env,
+        None,
+        None,
+    )
+}
+
+/// As [`execute_process_in`], for an execution that holds a Controlled Internet destination policy.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_process_net<'a>(
+    kernel: &mut Kernel,
+    call: &AuthorizedToolCall,
+    cancel: &CancellationToken,
+    policy: &crate::process::CommandPolicy,
+    run_root: &std::path::Path,
+    scope_max_wall_ms: u64,
+    env: Option<&crate::process::ProjectEnv>,
+    net: Option<crate::netpolicy::NetPolicy>,
+    narrow: Option<NarrowProbe<'a>>,
+) -> Result<ToolExecutionOutcome, ToolError> {
     let started = begin(kernel, call, cancel)?;
     let mut hooks = KernelProcessHooks {
         kernel,
         verified: &started.verified,
         last: None,
+        net,
+        narrow,
     };
     let result = run_process_call(
         call,

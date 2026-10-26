@@ -43,6 +43,7 @@ fn rig() -> Rig {
         repo_root: repo,
         approver: None,
         confine: None,
+        egress: None,
     };
     Rig {
         _tmp: tmp,

@@ -13,7 +13,13 @@ use std::path::PathBuf;
 #[test]
 fn the_desktop_runtime_has_a_private_approver_channel_and_manages_permissions_through_it() {
     let native = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../native/target/debug");
-    for n in ["nexusd", "nexus-broker", "nexus-approver", "nexus-confine"] {
+    for n in [
+        "nexusd",
+        "nexus-broker",
+        "nexus-approver",
+        "nexus-confine",
+        "nexus-egress",
+    ] {
         assert!(
             native.join(n).is_file(),
             "build the native workspace first ({n})"
@@ -22,7 +28,13 @@ fn the_desktop_runtime_has_a_private_approver_channel_and_manages_permissions_th
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
-    for n in ["nexusd", "nexus-broker", "nexus-approver", "nexus-confine"] {
+    for n in [
+        "nexusd",
+        "nexus-broker",
+        "nexus-approver",
+        "nexus-confine",
+        "nexus-egress",
+    ] {
         std::fs::copy(native.join(n), bin.join(n)).unwrap();
     }
     std::env::remove_var("NEXUS_BROKER_SOCKET");
@@ -102,8 +114,16 @@ fn the_desktop_runtime_has_a_private_approver_channel_and_manages_permissions_th
     assert_eq!(l["permissions"]["askAvailable"], true, "{l}");
 
     // Ask, then Auto, then revoke, then remove - each through the native confirmation
-    rt.project_set_grant(&d, &id, "workspace", "offline", "ask", None)
-        .expect("ask");
+    rt.project_set_grant(
+        &d,
+        &id,
+        "workspace",
+        "offline",
+        "ask",
+        None,
+        &Default::default(),
+    )
+    .expect("ask");
     let g = ic::project_list(&sock, false).unwrap()["projects"][0]["grant"].clone();
     assert_eq!(
         (
@@ -117,8 +137,16 @@ fn the_desktop_runtime_has_a_private_approver_channel_and_manages_permissions_th
         g["createdBy"].as_str().unwrap().split(':').next(),
         Some("desktop")
     );
-    rt.project_set_grant(&d, &id, "workspace", "offline", "auto", Some(3600))
-        .expect("auto");
+    rt.project_set_grant(
+        &d,
+        &id,
+        "workspace",
+        "offline",
+        "auto",
+        Some(3600),
+        &Default::default(),
+    )
+    .expect("auto");
     let g = ic::project_list(&sock, false).unwrap()["projects"][0]["grant"].clone();
     assert_eq!(
         (g["approval"].as_str(), g["version"].as_u64()),

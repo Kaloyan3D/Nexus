@@ -135,7 +135,7 @@ pub fn grant_view(rec: &ProjectRecord, now_ms: i64) -> Option<Value> {
     Some(json!({
         "grantId": g.grant_id, "version": g.version, "digest": g.digest(&rec.id),
         "fs": g.fs, "net": g.net, "approval": g.approval,
-        "checkpoint": g.exec.checkpoint, "hardLinks": g.exec.hard_links, "gitWorktree": g.exec.git_worktree,
+        "netPolicy": g.exec.net, "checkpoint": g.exec.checkpoint, "hardLinks": g.exec.hard_links, "gitWorktree": g.exec.git_worktree,
         "expiresAtMs": g.expires_at_ms, "createdAtMs": g.created_at_ms, "createdBy": g.created_by,
         "status": st.status(now_ms).as_str(),
         "revokedAtMs": st.revoked_at_ms,
@@ -207,8 +207,73 @@ fn spec_of(params: &Value) -> Result<nexus_tools::grant::GrantSpec, VerbErr> {
             checkpoint: s("checkpoint", "best-effort"),
             hard_links: s("hardLinks", "protect"),
             git_worktree: s("gitWorktree", "off"),
+            net: net_policy_of(params)?,
         },
     })
+}
+
+/// The destinations of a Controlled Internet grant from request parameters: `netPreset` (names, expanded into
+/// explicit hosts here), `allowHosts` (`host` or `host:80,443`), `allowLocalPorts`. Nothing is implied.
+fn net_policy_of(params: &Value) -> Result<nexus_tools::netpolicy::NetPolicy, VerbErr> {
+    use nexus_tools::netpolicy::{preset, HostRule, NetPolicy};
+    let bad = |m: String| ("bad-request", m);
+    let mut pol = NetPolicy::default();
+    for n in params
+        .get("netPreset")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let n = n
+            .as_str()
+            .ok_or_else(|| bad("netPreset names must be text".into()))?;
+        pol.hosts.extend(preset(n).ok_or_else(|| {
+            bad(format!(
+                "unknown destination preset {n:?} (known: {})",
+                nexus_tools::netpolicy::PRESETS.join(", ")
+            ))
+        })?);
+    }
+    for h in params
+        .get("allowHosts")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let h = h
+            .as_str()
+            .ok_or_else(|| bad("allowHosts entries must be text".into()))?;
+        let (host, ports) = match h.split_once(':') {
+            Some((host, ps)) => {
+                let ports = ps
+                    .split(',')
+                    .map(|p| {
+                        p.parse::<u16>()
+                            .map_err(|_| bad(format!("{h:?}: {p:?} is not a port")))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                (host, ports)
+            }
+            None => (h, Vec::new()),
+        };
+        pol.hosts.push(HostRule {
+            host: host.to_ascii_lowercase(),
+            ports,
+        });
+    }
+    for p in params
+        .get("allowLocalPorts")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let p = p
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .ok_or_else(|| bad("allowLocalPorts entries must be ports".into()))?;
+        pol.local_ports.push(p);
+    }
+    Ok(pol.canonical())
 }
 
 fn actor(client: &str, params: &Value) -> String {
@@ -249,6 +314,7 @@ pub fn grant_preview(env: &Env<'_>, id: &str, params: &Value) -> Result<Value, V
         "text": text, "textSha256": nexus_tools::grant::text_digest(&text),
         "fs": spec.fs, "net": spec.net, "approval": spec.approval, "expiresAtMs": spec.expires_at_ms,
         "checkpoint": spec.exec.checkpoint, "hardLinks": spec.exec.hard_links,
+        "netPolicy": spec.exec.net,
         "direct": rec.workspace_mode == WorkspaceMode::Direct,
         "replaces": grant_view(&rec, now_ms()),
     }))

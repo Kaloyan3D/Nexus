@@ -14,7 +14,16 @@ const FS_LABEL: Record<string, string> = {
   scratch: "Commands work on a throw-away copy",
   workspace: "Commands change the task's working copy",
 };
-const NET_LABEL: Record<string, string> = { offline: "No network", install: "Network for dependency installs" };
+const NET_LABEL: Record<string, string> = { offline: "No network", controlled: "Only the internet destinations I list", install: "Network for dependency installs" };
+const PRESET_CHOICES = ["npm", "pnpm", "yarn", "cargo", "pip", "github", "gitlab", "go"];
+
+/** `host` or `host:443,8443` lines (comma/space/newline separated) -> entries for the consent dialog; the broker validates every one. */
+export function parseHosts(text: string): string[] {
+  return text.split(/[\s;]+/).map((s) => s.trim()).filter(Boolean);
+}
+export function parsePorts(text: string): number[] {
+  return text.split(/[\s,;]+/).map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0 && n < 65536);
+}
 const APPROVAL_LABEL: Record<string, string> = { auto: "Runs without asking (inside these permissions)", ask: "Asks me first (approver terminal)" };
 const EXPIRY_CHOICES: { label: string; secs: number | null }[] = [
   { label: "until I revoke it", secs: null },
@@ -23,12 +32,20 @@ const EXPIRY_CHOICES: { label: string; secs: number | null }[] = [
   { label: "30 days", secs: 30 * 86_400 },
 ];
 
+/** The destinations of a Controlled Internet grant, for a badge: where commands may connect (not what they may send). */
+export function destinationSummary(g: NonNullable<ProjectView["grant"]>): string {
+  const hosts = g.netPolicy?.hosts.map((h) => h.host) ?? [];
+  const local = g.netPolicy?.local_ports ?? [];
+  const shown = hosts.slice(0, 3).join(", ") + (hosts.length > 3 ? ` +${hosts.length - 3}` : "");
+  return [shown, local.length ? `local ${local.join("/")}` : ""].filter(Boolean).join(" · ") || "none";
+}
+
 /** A short summary of the project's standing permissions (nothing here changes them). */
 export function grantSummary(p: ProjectView): string {
   const g = p.grant;
   if (!g) return "Default permissions";
   const s = g.status === "active" ? "" : ` · ${g.status}`;
-  return `${g.fs === "workspace" ? "In-place commands" : "Copy only"} · ${g.net === "install" ? "installs online" : "offline"} · ${g.approval === "ask" ? "asks" : "automatic"}${s}`;
+  return `${g.fs === "workspace" ? "In-place commands" : "Copy only"} · ${g.net === "install" ? "installs online" : g.net === "controlled" ? `internet: ${destinationSummary(g)}` : "offline"} · ${g.approval === "ask" ? "asks" : "automatic"}${s}`;
 }
 
 /**
@@ -43,6 +60,9 @@ function PermissionsEditor({ p }: { p: ProjectView }) {
   const [fs, setFs] = useState<string>(g?.fs ?? "scratch");
   const [net, setNet] = useState<string>(g?.net ?? "offline");
   const [approval, setApproval] = useState<string>(g?.approval ?? "auto");
+  const [presets, setPresets] = useState<string[]>([]);
+  const [hostsText, setHostsText] = useState<string>(g?.netPolicy?.hosts.map((h) => `${h.host}:${h.ports.join(",")}`).join(" ") ?? "");
+  const [portsText, setPortsText] = useState<string>((g?.netPolicy?.local_ports ?? []).join(" "));
   const [expiry, setExpiry] = useState<number>(0);
   const busy = setupBusy === "project";
   // In-place commands need Landlock and the launch gate on this machine (asked of the runtime). For a project that
@@ -50,6 +70,9 @@ function PermissionsEditor({ p }: { p: ProjectView }) {
   const inPlaceBlocked = permissionSupport?.known === true && permissionSupport.inPlaceAvailable === false;
   const inPlaceWhy = permissionSupport?.inPlaceReason ?? "this machine cannot confine them";
   const direct = p.workspaceMode === "direct";
+  // Controlled Internet needs the network gatekeeper on this machine and commands that run in place
+  const controlledBlocked = permissionSupport?.known === true && permissionSupport.controlledAvailable === false;
+  const controlledWhy = permissionSupport?.controlledReason ?? "this machine cannot run the network gatekeeper";
   // what this installation can really do (asked of the runtime): never offer an "ask" nobody can answer
   const supportKnown = permissionSupport?.known === true && permissionSupport.standingGrants;
   const askOk = supportKnown && permissionSupport?.askAvailable === true;
@@ -75,9 +98,30 @@ function PermissionsEditor({ p }: { p: ProjectView }) {
             Network{" "}
             <select className="nv-select nv-select--quiet" aria-label={`Network scope for ${p.label}`} value={net} onChange={(e) => setNet(e.target.value)}>
               <option value="offline">{NET_LABEL.offline}</option>
+              <option value="controlled" disabled={controlledBlocked || fs !== "workspace"}>{NET_LABEL.controlled}{controlledBlocked ? ` (not available: ${controlledWhy})` : fs !== "workspace" ? " (needs commands that change the project in place)" : ""}</option>
               <option value="install">{NET_LABEL.install}</option>
             </select>
           </label>
+          {net === "controlled" && (
+            <fieldset className="nv-stack" style={{ gap: 4, border: "none", padding: 0 }} aria-label={`Allowed internet destinations for ${p.label}`}>
+              <span className="nv-note">Commands may connect only to these destinations. This limits WHERE they connect, not WHAT they send: anything a command can read can be sent to a destination you allow.</span>
+              <span className="nv-note">
+                {PRESET_CHOICES.map((n) => (
+                  <label key={n} style={{ marginRight: 8 }}>
+                    <input type="checkbox" checked={presets.includes(n)} onChange={(e) => setPresets(e.target.checked ? [...presets, n] : presets.filter((x) => x !== n))} aria-label={`Allow the ${n} preset for ${p.label}`} /> {n}
+                  </label>
+                ))}
+              </span>
+              <label className="nv-note">
+                Hosts{" "}
+                <input className="nv-input" value={hostsText} onChange={(e) => setHostsText(e.target.value)} placeholder="registry.example.org:443 *.cdn.example.org" aria-label={`Allowed hosts for ${p.label}`} />
+              </label>
+              <label className="nv-note">
+                Ports of services on this computer{" "}
+                <input className="nv-input" value={portsText} onChange={(e) => setPortsText(e.target.value)} placeholder="5432 8080" aria-label={`Allowed local ports for ${p.label}`} />
+              </label>
+            </fieldset>
+          )}
           <label className="nv-note">
             Approval{" "}
             <select className="nv-select nv-select--quiet" aria-label={`Approval behaviour for ${p.label}`} value={approval} onChange={(e) => setApproval(e.target.value)}>
@@ -99,7 +143,7 @@ function PermissionsEditor({ p }: { p: ProjectView }) {
             </select>
           </label>
           <div>
-            <Button size="sm" variant="primary" disabled={busy || !supportKnown || (approval === "ask" && !askOk)} onClick={() => void setProjectPermissions(p.projectId, { fs, net, approval, expiresInSecs: EXPIRY_CHOICES[expiry]?.secs ?? null })}>
+            <Button size="sm" variant="primary" disabled={busy || !supportKnown || (approval === "ask" && !askOk)} onClick={() => void setProjectPermissions(p.projectId, { fs, net, approval, expiresInSecs: EXPIRY_CHOICES[expiry]?.secs ?? null, ...(net === "controlled" ? { netPresets: presets, allowHosts: parseHosts(hostsText), allowLocalPorts: parsePorts(portsText) } : {}) })}>
               Apply…
             </Button>{" "}
             {g && g.status !== "revoked" && (
@@ -196,7 +240,7 @@ function OpenedProjects() {
                 <td>
                   {p.grant ? (
                     <span className="nv-note" title="This project has standing permissions: they decide whether dependencies may be installed (their Network setting). The older per-project switch is not used while they exist.">
-                      installs: {p.grant.status !== "active" ? "stopped (permissions " + p.grant.status + ")" : p.grant.net === "install" ? "allowed by Permissions" : "not allowed by Permissions"}
+                      installs: {p.grant.status !== "active" ? "stopped (permissions " + p.grant.status + ")" : p.grant.net === "install" ? "allowed by Permissions" : p.grant.net === "controlled" ? "only the destinations in Permissions" : "not allowed by Permissions"}
                     </span>
                   ) : (
                     <label className="nv-note" title="Lets Nexus download this project's dependencies (npm ci, pip install, ...) inside its sandbox. Everything else runs without network.">
