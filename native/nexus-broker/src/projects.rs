@@ -135,6 +135,7 @@ pub fn grant_view(rec: &ProjectRecord, now_ms: i64) -> Option<Value> {
     Some(json!({
         "grantId": g.grant_id, "version": g.version, "digest": g.digest(&rec.id),
         "fs": g.fs, "net": g.net, "approval": g.approval,
+        "checkpoint": g.exec.checkpoint, "hardLinks": g.exec.hard_links, "gitWorktree": g.exec.git_worktree,
         "expiresAtMs": g.expires_at_ms, "createdAtMs": g.created_at_ms, "createdBy": g.created_by,
         "status": st.status(now_ms).as_str(),
         "revokedAtMs": st.revoked_at_ms,
@@ -202,6 +203,11 @@ fn spec_of(params: &Value) -> Result<nexus_tools::grant::GrantSpec, VerbErr> {
         net: s("net", "offline"),
         approval: s("approval", "auto"),
         expires_at_ms,
+        exec: nexus_tools::grant::ExecPolicy {
+            checkpoint: s("checkpoint", "best-effort"),
+            hard_links: s("hardLinks", "protect"),
+            git_worktree: s("gitWorktree", "off"),
+        },
     })
 }
 
@@ -233,11 +239,17 @@ pub fn grant_preview(env: &Env<'_>, id: &str, params: &Value) -> Result<Value, V
     nexus_tools::grant::validate_spec(&spec, rec.workspace_mode == WorkspaceMode::Direct, now_ms())
         .map_err(|e| (e.code, e.message))?;
     let label = rec.label.clone().unwrap_or_else(|| rec.id.clone());
-    let text = nexus_tools::grant::consent_text(&label, &spec);
+    let text = nexus_tools::grant::consent_text_for(
+        &label,
+        &spec,
+        rec.workspace_mode == WorkspaceMode::Direct,
+    );
     Ok(json!({
         "projectId": rec.id,
         "text": text, "textSha256": nexus_tools::grant::text_digest(&text),
         "fs": spec.fs, "net": spec.net, "approval": spec.approval, "expiresAtMs": spec.expires_at_ms,
+        "checkpoint": spec.exec.checkpoint, "hardLinks": spec.exec.hard_links,
+        "direct": rec.workspace_mode == WorkspaceMode::Direct,
         "replaces": grant_view(&rec, now_ms()),
     }))
 }
@@ -247,8 +259,14 @@ pub fn grant_preview(env: &Env<'_>, id: &str, params: &Value) -> Result<Value, V
 pub fn grant_set(env: &Env<'_>, client: &str, id: &str, params: &Value) -> Result<Value, VerbErr> {
     let rec = grant_project(env, id)?;
     let spec = spec_of(params)?;
+    nexus_tools::grant::validate_spec(&spec, rec.workspace_mode == WorkspaceMode::Direct, now_ms())
+        .map_err(|e| (e.code, e.message))?;
     let label = rec.label.clone().unwrap_or_else(|| rec.id.clone());
-    let text = nexus_tools::grant::consent_text(&label, &spec);
+    let text = nexus_tools::grant::consent_text_for(
+        &label,
+        &spec,
+        rec.workspace_mode == WorkspaceMode::Direct,
+    );
     let want = nexus_tools::grant::text_digest(&text);
     if params.get("textSha256").and_then(|v| v.as_str()) != Some(want.as_str()) {
         return Err((

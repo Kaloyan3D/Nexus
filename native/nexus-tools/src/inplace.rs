@@ -31,6 +31,8 @@ fn refuse(msg: impl Into<String>) -> ToolError {
 pub struct InPlaceMount {
     root: OwnedFd,
     entries: Vec<(Protect, Option<OwnedFd>)>,
+    /// Verified external git directory of a linked worktree, bound read-only at its own path.
+    extra_ro: Vec<(OwnedFd, String)>,
     /// What was hidden/read-only, for the audit record.
     pub summary: serde_json::Value,
 }
@@ -38,6 +40,14 @@ pub struct InPlaceMount {
 impl InPlaceMount {
     pub fn root_fd(&self) -> RawFd {
         self.root.as_raw_fd()
+    }
+
+    /// `(descriptor, sandbox path)` of directories outside the workspace that are bound read-only.
+    pub fn fd_ro_binds(&self) -> Vec<(RawFd, String)> {
+        self.extra_ro
+            .iter()
+            .map(|(f, p)| (f.as_raw_fd(), p.clone()))
+            .collect()
     }
 
     pub fn protect(&self) -> Vec<Protect> {
@@ -84,6 +94,30 @@ fn unescape_mountinfo(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Filesystems where in-place execution is refused, by `statfs.f_type`, with the reason shown to the user.
+/// Observation relies on `ctime`, inode identity and link counts, and the launch gate on ordinary mount
+/// semantics; user-space (FUSE) and network filesystems or FAT-family ones do not reliably provide them.
+pub fn filesystem_support(f_type: i64) -> Result<&'static str, &'static str> {
+    const NET_OR_USERSPACE: &str = "this project is on a user-space (FUSE) or network filesystem, where Nexus cannot rely on stable inode identity, change times and link counts, or on the mount semantics of the confinement; use the isolated workspace for this project, or move it to a local filesystem";
+    const FAT_LIKE: &str = "this project is on a FAT/NTFS-family filesystem, which does not keep the change times, permissions and links that observation and recovery rely on; use the isolated workspace for this project, or move it to a Linux filesystem";
+    match f_type {
+        0x9123683e => Ok("btrfs"),
+        0xef53 => Ok("ext2/3/4"),
+        0x58465342 => Ok("xfs"),
+        0x01021994 => Ok("tmpfs"),
+        0xf2f52010 => Ok("f2fs"),
+        0x794c7630 => Ok("overlayfs"),
+        0x2fc12fc1 => Ok("zfs"),
+        0x65735546 => Err(NET_OR_USERSPACE), // FUSE (also fuseblk)
+        0x6969 | 0xff534d42 | 0xfe534d42 | 0x01021997 | 0x5346414f | 0x00c36400 | 0x0bd00bd0
+        | 0x73757245 => {
+            Err(NET_OR_USERSPACE) // NFS, CIFS, SMB2, 9p, AFS, Ceph, Lustre, Coda
+        }
+        0x4d44 | 0x2011bab0 | 0x5346544e | 0x7366746e => Err(FAT_LIKE), // FAT, exFAT, NTFS
+        _ => Ok("other (not specifically validated)"),
+    }
+}
+
 /// What to do about regular files that have more than one link (their content may also be reachable by a
 /// name outside the workspace, which confinement cannot see or stop).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -105,6 +139,10 @@ pub struct PrepareOptions {
     pub max_ms: u64,
     /// Protected entries (masks and read-only mounts) one execution may carry.
     pub max_protect: usize,
+    /// Owner opt-in: bind the verified external git directory of a linked worktree read-only.
+    pub git_worktree: bool,
+    /// Directories that are never exposed (Nexus's own data).
+    pub forbidden: Vec<std::path::PathBuf>,
 }
 
 impl Default for PrepareOptions {
@@ -114,6 +152,8 @@ impl Default for PrepareOptions {
             max_entries: 2_000_000,
             max_ms: 15_000,
             max_protect: 1024,
+            git_worktree: false,
+            forbidden: Vec::new(),
         }
     }
 }
@@ -194,6 +234,17 @@ pub fn prepare_with(ws: &Workspace, opts: &PrepareOptions) -> Result<InPlaceMoun
             return Err(refuse("cannot inspect the workspace root"));
         }
         st.st_dev
+    };
+    // 1b. The filesystem the project lives on.
+    let fs_name = {
+        let mut sf: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatfs(root.as_raw_fd(), &mut sf) } != 0 {
+            return Err(refuse("cannot inspect the filesystem of the workspace"));
+        }
+        match filesystem_support(sf.f_type as i64) {
+            Ok(n) => n,
+            Err(why) => return Err(refuse(format!("{why} (nothing was run)"))),
+        }
     };
     // 2. No mounts below the root.
     let mi = std::fs::read_to_string("/proc/self/mountinfo")
@@ -399,10 +450,26 @@ pub fn prepare_with(ws: &Workspace, opts: &PrepareOptions) -> Result<InPlaceMoun
     ro.sort();
     hidden.sort();
     hard.sort();
-    let git = git_summary(&root);
+    let mut git = git_summary(&root);
+    let mut extra_ro: Vec<(OwnedFd, String)> = Vec::new();
+    if git["kind"] == "linked-worktree-file" {
+        match resolve_worktree_git(ws, &root, opts) {
+            Ok(Some((fd, dest, note))) => {
+                git["metadata"] = format!("read-only; the main repository's git directory {dest} is bound read-only ({note})").into();
+                git["externalGitDir"] = dest.clone().into();
+                extra_ro.push((fd, dest));
+            }
+            Ok(None) => {
+                git["externalGitDir"] =
+                    "not mounted (not allowed by the project's permissions)".into()
+            }
+            Err(why) => git["externalGitDir"] = format!("not mounted: {why}").into(),
+        }
+    }
     Ok(InPlaceMount {
         root,
         entries,
+        extra_ro,
         summary: serde_json::json!({
             "readOnly": ro, "hidden": hidden, "hiddenScan": "recursive",
             "hardLinkedReadOnly": hard, "hardLinks": match opts.hard_links { HardLinks::Protect => "protect", HardLinks::Allow => "allowed-by-operator" },
@@ -410,8 +477,142 @@ pub fn prepare_with(ws: &Workspace, opts: &PrepareOptions) -> Result<InPlaceMoun
             "specialFilesMasked": sockets, "nestedGit": git_nested,
             "entriesExamined": examined, "nonUtf8Skipped": non_utf8, "unreadableDirs": unreadable,
             "git": git,
+            "filesystem": fs_name,
         }),
     })
+}
+
+/// The smallest safe way to give a linked worktree its git metadata, read-only. The `.git` file is
+/// attacker-controlled content (a cloned repository can contain any path), so nothing it names is trusted
+/// until the NAMED directory says, independently, that it belongs to this worktree - exactly the
+/// back-pointer Git itself records:
+///
+/// 1. `gitdir: D` must be absolute and name a real directory (no symlink anywhere in the path) owned by this
+///    user, laid out as `<C>/worktrees/<name>` with `C` a directory named `.git`;
+/// 2. `D/gitdir` must contain the path of THIS worktree's `.git` file (a repository that does not claim this
+///    worktree cannot be exposed by a forged pointer);
+/// 3. `D/commondir`, if present, must resolve to `C`;
+/// 4. `C` must not lie inside the workspace or inside any directory Nexus keeps for itself.
+///
+/// `Ok(None)` = not enabled by the owner. The result is a descriptor of `C` (opened component by component
+/// without following links and compared with what was verified), bound read-only at its own path.
+fn resolve_worktree_git(
+    ws: &Workspace,
+    root: &OwnedFd,
+    opts: &PrepareOptions,
+) -> Result<Option<(OwnedFd, String, &'static str)>, String> {
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+    if !opts.git_worktree {
+        return Ok(None);
+    }
+    let read_small = |p: &std::path::Path| -> Option<String> {
+        let mut t = String::new();
+        std::fs::File::open(p)
+            .ok()?
+            .take(4096)
+            .read_to_string(&mut t)
+            .ok()?;
+        Some(t)
+    };
+    let gitfile = format!("/proc/self/fd/{}/.git", root.as_raw_fd());
+    let text = read_small(std::path::Path::new(&gitfile)).ok_or("the .git file cannot be read")?;
+    let target = text
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("gitdir:"))
+        .map(|t| t.trim().to_owned())
+        .ok_or("the .git file does not name a git directory")?;
+    if !target.starts_with('/') || target.contains('\0') {
+        return Err("the git directory it names is not an absolute path".into());
+    }
+    let d = std::path::PathBuf::from(&target);
+    let canon =
+        std::fs::canonicalize(&d).map_err(|_| "the git directory it names does not exist")?;
+    if canon != d {
+        return Err(
+            "the git directory it names is reached through a link or a non-canonical path".into(),
+        );
+    }
+    let me = unsafe { libc::geteuid() };
+    let md = std::fs::symlink_metadata(&d).map_err(|_| "cannot inspect the git directory")?;
+    if !md.is_dir() || md.uid() != me {
+        return Err("the git directory it names is not a directory owned by you".into());
+    }
+    let parent = d.parent().ok_or("unexpected layout")?;
+    let common = parent.parent().ok_or("unexpected layout")?;
+    if parent.file_name().and_then(|n| n.to_str()) != Some("worktrees")
+        || common.file_name().and_then(|n| n.to_str()) != Some(".git")
+    {
+        return Err("the git directory it names is not <repository>/.git/worktrees/<name>".into());
+    }
+    // the back-pointer
+    let back = read_small(&d.join("gitdir"))
+        .ok_or("that git directory does not point back to a worktree")?;
+    let expected = format!("{}/.git", ws.root_path().trim_end_matches('/'));
+    if back.lines().next().map(str::trim) != Some(expected.as_str()) {
+        return Err("that git directory belongs to a different worktree".into());
+    }
+    if let Some(cd) = read_small(&d.join("commondir")) {
+        let resolved =
+            std::fs::canonicalize(d.join(cd.trim())).map_err(|_| "its commondir does not exist")?;
+        if resolved != common {
+            return Err("its commondir is not the repository it sits in".into());
+        }
+    }
+    let cmd = std::fs::symlink_metadata(common)
+        .map_err(|_| "cannot inspect the repository's git directory")?;
+    if !cmd.is_dir() || cmd.uid() != me {
+        return Err("the repository's git directory is not a directory owned by you".into());
+    }
+    let wsroot = std::path::Path::new(ws.root_path());
+    if common.starts_with(wsroot) || wsroot.starts_with(common) {
+        return Err("the repository's git directory overlaps the workspace".into());
+    }
+    for f in &opts.forbidden {
+        let f = std::fs::canonicalize(f).unwrap_or_else(|_| f.clone());
+        if common.starts_with(&f) || f.starts_with(common) {
+            return Err("the repository's git directory overlaps Nexus's own data".into());
+        }
+    }
+    // Open it component by component without following links, then compare with what was verified.
+    let mut cur = unsafe {
+        libc::open(
+            c"/".as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if cur < 0 {
+        return Err("cannot open /".into());
+    }
+    for comp in common.components().skip(1) {
+        let c = CString::new(comp.as_os_str().as_encoded_bytes()).map_err(|_| "bad path")?;
+        let next = unsafe {
+            libc::openat(
+                cur,
+                c.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        unsafe { libc::close(cur) };
+        if next < 0 {
+            return Err("the repository's git directory changed while it was being opened".into());
+        }
+        cur = next;
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(cur) };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0
+        || st.st_ino != cmd.ino()
+        || st.st_dev != cmd.dev()
+    {
+        return Err("the repository's git directory is not the object that was verified".into());
+    }
+    Ok(Some((
+        fd,
+        common.to_string_lossy().into_owned(),
+        "verified back-pointer",
+    )))
 }
 
 /// How the top-level `.git` looks. A linked worktree's `.git` is a FILE pointing at a git directory that
@@ -461,6 +662,25 @@ fn git_summary(root: &OwnedFd) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_space_network_and_fat_filesystems_are_refused_with_a_reason() {
+        for (t, name) in [
+            (0x9123683e_i64, "btrfs"),
+            (0xef53, "ext2/3/4"),
+            (0x01021994, "tmpfs"),
+            (0x58465342, "xfs"),
+        ] {
+            assert_eq!(filesystem_support(t).unwrap(), name);
+        }
+        for t in [0x65735546_i64, 0x6969, 0xff534d42, 0x4d44, 0x5346544e] {
+            let why = filesystem_support(t).unwrap_err();
+            assert!(why.contains("use the isolated workspace"), "{t:x}: {why}");
+        }
+        assert!(filesystem_support(0x1234)
+            .unwrap()
+            .contains("not specifically validated"));
+    }
 
     #[test]
     fn mountinfo_parsing_finds_only_mounts_strictly_below_the_root() {

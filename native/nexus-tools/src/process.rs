@@ -45,6 +45,11 @@ pub trait ProcessHooks {
     /// An in-place execution's effects record was persisted (before its end is journaled). The daemon feeds
     /// it to the Direct Workspace evidence of a task that has one; the default keeps nothing.
     fn effects(&mut self, _record: &crate::observe::EffectsRecord) {}
+    /// The owner's checkpoint and hard-link policy for this execution (from the task's frozen grant). `None` =
+    /// the daemon-wide defaults of the command policy. Only the daemon can supply it; no argument can.
+    fn exec_policy(&mut self) -> Option<crate::grant::ExecPolicy> {
+        None
+    }
 }
 
 // ------------------------------------------------------------ policy
@@ -146,6 +151,8 @@ pub struct CommandPolicy {
     hard_links: crate::inplace::HardLinks,
     /// Explicit path of the in-sandbox launch gate (default: located next to the running executable).
     confine_shim: Option<PathBuf>,
+    /// Nexus's own directories (never exposed through a linked worktree's git pointer).
+    forbidden: Vec<PathBuf>,
 }
 
 fn arg_ok(a: &str) -> bool {
@@ -171,6 +178,7 @@ impl CommandPolicy {
             checkpoint: Default::default(),
             hard_links: Default::default(),
             confine_shim: None,
+            forbidden: Vec::new(),
         }
     }
 
@@ -209,6 +217,15 @@ impl CommandPolicy {
 
     pub fn hard_links(&self) -> crate::inplace::HardLinks {
         self.hard_links
+    }
+
+    pub fn with_forbidden_paths(mut self, v: Vec<PathBuf>) -> Self {
+        self.forbidden = v;
+        self
+    }
+
+    pub fn forbidden_paths(&self) -> &[PathBuf] {
+        &self.forbidden
     }
 
     /// Use this launch gate binary (tests, packaged installs).
@@ -252,6 +269,7 @@ impl CommandPolicy {
             checkpoint: Default::default(),
             hard_links: Default::default(),
             confine_shim: None,
+            forbidden: Vec::new(),
         }
     }
 
@@ -1161,16 +1179,31 @@ pub fn run_process(
     };
     // In place: nothing is staged. The task's own working copy is bound by the descriptor the Workspace
     // pinned; what the command writes is the working copy (reviewed through the task's git diff).
+    let exec_override = if in_place { hooks.exec_policy() } else { None };
+    // where the time goes (milliseconds), recorded with the effects of every in-place command
+    let mut timing: std::collections::BTreeMap<String, u64> = Default::default();
+    let t_scan = std::time::Instant::now();
     let mut mount: Option<crate::inplace::InPlaceMount> = None;
     let report = if in_place {
         match crate::inplace::prepare_with(
             ctx.ws,
             &crate::inplace::PrepareOptions {
-                hard_links: ctx.policy.hard_links(),
+                hard_links: exec_override
+                    .as_ref()
+                    .map(|x| x.hard_link_policy())
+                    .unwrap_or_else(|| ctx.policy.hard_links()),
+                git_worktree: exec_override
+                    .as_ref()
+                    .is_some_and(|x| x.git_worktree == "read-only"),
+                forbidden: ctx.policy.forbidden_paths().to_vec(),
                 ..Default::default()
             },
         ) {
             Ok(m) => {
+                timing.insert(
+                    "protectionScanMs".into(),
+                    t_scan.elapsed().as_millis() as u64,
+                );
                 mount = Some(m);
                 crate::stage::StageReport::default()
             }
@@ -1300,6 +1333,7 @@ pub fn run_process(
         src_writable: ctx.policy.is_workbench(),
         pinned_root: mount.as_ref().map(|m| m.root_fd()),
         protect: mount.as_ref().map(|m| m.protect()).unwrap_or_default(),
+        fd_ro_binds: mount.as_ref().map(|m| m.fd_ro_binds()).unwrap_or_default(),
         net: cmd.install,
         limits: limits.clone(),
         cgroup_base: base.clone(),
@@ -1321,18 +1355,28 @@ pub fn run_process(
     let eff_dir = crate::observe::effects_dir(ctx.run_root);
     let obs_budget = ctx.policy.observe_budget().clone();
     let mut observation: Option<(crate::observe::Manifest, bool, bool, u64)> = None;
-    let ck_pol = ctx.policy.checkpoint_policy().clone();
+    let mut ck_pol = ctx.policy.checkpoint_policy().clone();
+    if let Some(x) = &exec_override {
+        ck_pol.mode = x.checkpoint_mode();
+    }
     let ck_store = crate::checkpoint::store_dir(ctx.run_root);
     let mut ck: Option<Result<crate::checkpoint::Index, crate::checkpoint::Failure>> = None;
     if in_place {
         let started = crate::observe::now_ms();
+        let t_pre = std::time::Instant::now();
         let pre = crate::observe::observe(ctx.ws, &obs_budget);
+        timing.insert(
+            "preObservationMs".into(),
+            t_pre.elapsed().as_millis() as u64,
+        );
         let persisted = crate::observe::write_pre(&eff_dir, ctx.execution_id, &pre).is_ok();
         let leads = crate::observe::path_still_leads_to(ctx.ws);
         // 2c. Preserve what the command could change, outside its writable view, before it exists.
         if ck_pol.mode != crate::checkpoint::Mode::Off {
             crash_point("checkpoint-before");
+            let t_ck = std::time::Instant::now();
             let r = crate::checkpoint::create(ctx.ws, &ck_store, ctx.execution_id, &pre, &ck_pol);
+            timing.insert("checkpointMs".into(), t_ck.elapsed().as_millis() as u64);
             let complete = matches!(&r, Ok(i) if i.status == "complete");
             if ck_pol.mode == crate::checkpoint::Mode::Required && !complete {
                 let why = match &r {
@@ -1462,10 +1506,12 @@ pub fn run_process(
         )?;
         return Ok(cancelled_result());
     }
+    let t_run = std::time::Instant::now();
     let outcome = {
         let mut control = Control { cancel, hooks };
         run_sandboxed(&spec, &mut control)
     };
+    timing.insert("launchAndRunMs".into(), t_run.elapsed().as_millis() as u64);
     // A successful install keeps its node_modules for the commands that follow.
     let mut env_note = serde_json::Value::Null;
     if let (true, false, Ok(o), Some(e)) = (cmd.install, in_place, &outcome, ctx.env) {
@@ -1518,6 +1564,7 @@ pub fn run_process(
             ck.as_ref(),
             &ck_store,
             &ck_pol,
+            std::mem::take(&mut timing),
         ));
     }
     let out = match outcome {
@@ -1669,8 +1716,10 @@ fn finish_observation(
     ck: Option<&Result<crate::checkpoint::Index, crate::checkpoint::Failure>>,
     ck_store: &Path,
     ck_pol: &crate::checkpoint::CheckpointPolicy,
+    mut timing: std::collections::BTreeMap<String, u64>,
 ) -> crate::observe::EffectsRecord {
     use crate::observe as ob;
+    let t_post = std::time::Instant::now();
     let post = ob::observe(ctx.ws, budget);
     crash_point("proc-during-observation");
     let (mut fx, changed) = ob::diff(&pre, &post, budget);
@@ -1704,10 +1753,16 @@ fn finish_observation(
         checkpoint: ck_value,
         recoverability: recov,
         post_state,
+        timing_ms: Default::default(),
         attribution: "temporal".into(),
         note: ob::ATTRIBUTION_NOTE.into(),
         digest: String::new(),
     };
+    timing.insert(
+        "postObservationMs".into(),
+        t_post.elapsed().as_millis() as u64,
+    );
+    rec.timing_ms = timing;
     rec.digest = rec.compute_digest();
     if ob::write_record(dir, &rec).is_err() {
         // The evidence could not be stored: say so rather than pretend.
@@ -1929,6 +1984,7 @@ fn recover_effects(
         post: Some(ob::ManifestBrief::of(&post)),
         process: state,
         post_state: ob::post_state_of(&post, &fx),
+        timing_ms: Default::default(),
         checkpoint: ck_value,
         recoverability: recov,
         effects: fx,

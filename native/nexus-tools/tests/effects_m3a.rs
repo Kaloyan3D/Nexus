@@ -485,6 +485,7 @@ fn synthetic(start: u64, end: u64) -> observe::EffectsRecord {
         checkpoint: None,
         recoverability: None,
         post_state: Default::default(),
+        timing_ms: Default::default(),
         outcome: "observed".into(),
         outcome_reasons: vec![],
         attribution: "temporal".into(),

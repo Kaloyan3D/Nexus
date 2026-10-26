@@ -258,18 +258,6 @@ pub fn validate_record(p: &ProjectRecord) -> Result<(), RegError> {
             ));
         }
     }
-    // A live grant for in-place commands cannot coexist with the direct workspace (not implemented).
-    if let Some(g) = &p.grant {
-        if g.revoked_at_ms.is_none()
-            && g.current.fs == "workspace"
-            && p.workspace_mode == WorkspaceMode::Direct
-        {
-            return Err(err(
-                "bad-workspace-mode",
-                "this project's permissions allow commands to change the working copy in place, which is not available for the direct workspace; change the permissions first",
-            ));
-        }
-    }
     validate_write_allow(&p.write_allow)
 }
 
@@ -890,6 +878,18 @@ pub fn set_workspace_mode(
     mutate(dir, trust, |f| {
         match f.projects.iter_mut().find(|p| p.id == id && p.managed) {
             Some(p) => {
+                // A live in-place grant was consented to for the OTHER kind of workspace (a disposable copy
+                // vs the user's real folder): it never carries over. Re-grant after switching.
+                if mode != p.workspace_mode
+                    && p.grant
+                        .as_ref()
+                        .is_some_and(|g| g.revoked_at_ms.is_none() && g.current.fs == "workspace")
+                {
+                    return Err(err(
+                        "bad-workspace-mode",
+                        "this project's permissions let commands change the working copy in place; they were agreed for the other kind of workspace and do not carry over. Revoke or change them first, then switch, then grant again",
+                    ));
+                }
                 p.workspace_mode = mode;
                 p.updated_at_ms = now_ms();
                 // validated by `mutate` (a Direct project needs its origin folder)
@@ -1013,6 +1013,7 @@ pub fn set_grant(
             expires_at_ms: spec.expires_at_ms,
             created_by: by.chars().take(64).collect(),
             consent_sha256: consent_sha256.chars().take(64).collect(),
+            exec: spec.exec.clone(),
         };
         let digest = cur.digest(id);
         audit_grant(
@@ -1022,6 +1023,7 @@ pub fn set_grant(
                 "grantId": cur.grant_id, "version": cur.version, "digest": digest,
                 "previousDigest": prev, "fs": cur.fs, "net": cur.net, "approval": cur.approval,
                 "expiresAtMs": cur.expires_at_ms, "by": cur.created_by, "consentSha256": cur.consent_sha256,
+                "checkpoint": cur.exec.checkpoint, "hardLinks": cur.exec.hard_links, "gitWorktree": cur.exec.git_worktree,
             }),
         )?;
         let mut st = crate::grant::GrantState {
@@ -1133,6 +1135,7 @@ pub fn clear_grant(
 
 /// The permissions a NEW task of this project runs under.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Resolved {
     /// No grant: the long-standing defaults apply.
     Legacy,

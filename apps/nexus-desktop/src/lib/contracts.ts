@@ -567,6 +567,9 @@ export interface PermissionSupport {
   /** An approver channel exists, so "Ask me first" can be answered. */
   askAvailable: boolean;
   askReason: string | null;
+  /** In-place commands (Landlock + launch gate) can run on this machine; absent = not reported. */
+  inPlaceAvailable?: boolean;
+  inPlaceReason?: string | null;
 }
 
 export interface ProjectListReply {

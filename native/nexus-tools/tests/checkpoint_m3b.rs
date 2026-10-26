@@ -83,6 +83,7 @@ fn run_sim(s: &Sim, id: &str, p: &CheckpointPolicy, cmd: impl FnOnce(&Path)) -> 
         post: Some(observe::ManifestBrief::of(&post)),
         process: state,
         post_state: observe::post_state_of(&post, &fx),
+        timing_ms: Default::default(),
         checkpoint: ck.as_ref().ok().map(|i| i.brief()),
         recoverability: Some(recov),
         effects: fx,
@@ -446,7 +447,9 @@ fn a_missing_or_corrupted_checkpoint_refuses_or_reports_never_manufactures_recov
         "blob-missing",
         "other-workspace",
     ] {
-        let s = sim(&[("a.txt", "one\n"), ("b.txt", "two\n")]);
+        // a.txt is large (its own blob file); b.txt is small (stored in a pack)
+        let big = format!("one\n{}", "x".repeat(70_000));
+        let s = sim(&[("a.txt", big.as_str()), ("b.txt", "two\n")]);
         let id = format!("bad-{case}");
         run_sim(&s, &id, &pol(Mode::BestEffort), |root| {
             std::fs::write(root.join("a.txt"), "ONE\n").unwrap();
@@ -465,6 +468,15 @@ fn a_missing_or_corrupted_checkpoint_refuses_or_reports_never_manufactures_recov
             }
             "blob-corrupt" => std::fs::write(blob_of("a.txt"), "evil\n").unwrap(),
             "blob-missing" => std::fs::remove_file(blob_of("a.txt")).unwrap(),
+            "pack-corrupt" => {
+                // damage b.txt's span inside its pack
+                let blob = idx.entries["b.txt"].blob.clone().unwrap();
+                let (pack, off) = blob.split_once('@').expect("a small file is packed");
+                let mut bytes = std::fs::read(ck.join("files").join(pack)).unwrap();
+                let off: usize = off.parse().unwrap();
+                bytes[off] ^= 0xff;
+                std::fs::write(ck.join("files").join(pack), bytes).unwrap();
+            }
             _ => {}
         }
         let rep = if case == "other-workspace" {
@@ -1063,6 +1075,7 @@ fn bench_checkpoint() {
                     post: Some(observe::ManifestBrief::of(&post)),
                     process: state,
                     post_state: observe::post_state_of(&post, &fx),
+                    timing_ms: Default::default(),
                     checkpoint: Some(idx.brief()),
                     recoverability: Some(recov),
                     effects: fx,

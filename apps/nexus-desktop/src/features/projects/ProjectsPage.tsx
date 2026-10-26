@@ -45,7 +45,11 @@ function PermissionsEditor({ p }: { p: ProjectView }) {
   const [approval, setApproval] = useState<string>(g?.approval ?? "auto");
   const [expiry, setExpiry] = useState<number>(0);
   const busy = setupBusy === "project";
-  const inPlaceBlocked = p.workspaceMode === "direct";
+  // In-place commands need Landlock and the launch gate on this machine (asked of the runtime). For a project that
+  // edits its real folder they change YOUR files, which the consent dialog says in so many words.
+  const inPlaceBlocked = permissionSupport?.known === true && permissionSupport.inPlaceAvailable === false;
+  const inPlaceWhy = permissionSupport?.inPlaceReason ?? "this machine cannot confine them";
+  const direct = p.workspaceMode === "direct";
   // what this installation can really do (asked of the runtime): never offer an "ask" nobody can answer
   const supportKnown = permissionSupport?.known === true && permissionSupport.standingGrants;
   const askOk = supportKnown && permissionSupport?.askAvailable === true;
@@ -64,7 +68,7 @@ function PermissionsEditor({ p }: { p: ProjectView }) {
             Commands{" "}
             <select className="nv-select nv-select--quiet" aria-label={`Command filesystem scope for ${p.label}`} value={fs} onChange={(e) => setFs(e.target.value)}>
               <option value="scratch">{FS_LABEL.scratch}</option>
-              <option value="workspace" disabled={inPlaceBlocked}>{FS_LABEL.workspace}{inPlaceBlocked ? " (not available for direct editing yet)" : ""}</option>
+              <option value="workspace" disabled={inPlaceBlocked}>{direct ? "Commands change my real project files directly" : FS_LABEL.workspace}{inPlaceBlocked ? ` (not available: ${inPlaceWhy})` : ""}</option>
             </select>
           </label>
           <label className="nv-note">

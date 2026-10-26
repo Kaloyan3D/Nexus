@@ -1050,6 +1050,29 @@ fn run(args: &[String]) -> i32 {
                 ),
             );
         }
+        // M3C/M4: commands that change a project in place need Landlock and the launch gate. An operator who
+        // asked for them explicitly (--isolated-exec-scope workspace) gets a refusal to start; otherwise the
+        // daemon starts, says so, and refuses such tasks one by one with the reason.
+        let gate = nexus_tools::confine_host::locate_shim()
+            .map(|p| nexus_tools::confine_host::shim_is_trustworthy(&p).map(|_| ()))
+            .unwrap_or_else(|| Err("nexus-confine was not found next to nexusd".to_owned()));
+        let landlock_ok = caps
+            .landlock_abi
+            .is_some_and(|a| a >= nexus_tools::confine::MIN_ABI);
+        if !landlock_ok || gate.is_err() {
+            let why = format!(
+                "in-place execution is unavailable: {}",
+                if !landlock_ok {
+                    "this kernel has no usable Landlock".to_owned()
+                } else {
+                    gate.clone().err().unwrap_or_default()
+                }
+            );
+            if isolated_exec_scope == nexus_tools::exec_contract::FsScope::Workspace {
+                return fatal("confinement-unavailable", &why);
+            }
+            log_line_startup(&why);
+        }
         Some(caps)
     } else {
         None
@@ -1309,6 +1332,14 @@ fn run(args: &[String]) -> i32 {
             }
             ck.force_copy = args.iter().any(|a| a == "--checkpoint-force-copy");
             let p = p.with_checkpoint(ck);
+            // never exposed through a linked worktree's git pointer: Nexus's own directories
+            let mut forbidden = vec![layout.dir.clone()];
+            for f in ["--worktree-root", "--project-registry", "--project-envs"] {
+                if let Some(d) = flag(args, f) {
+                    forbidden.push(d);
+                }
+            }
+            let p = p.with_forbidden_paths(forbidden);
             // M3C.4: hard-linked files are read-only for in-place commands unless the operator opts in.
             let p = if args.iter().any(|a| a == "--allow-hardlinked-writes") {
                 p.with_hard_links(nexus_tools::inplace::HardLinks::Allow)

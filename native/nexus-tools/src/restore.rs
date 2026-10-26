@@ -58,6 +58,29 @@ pub struct RestoreReport {
     pub note: String,
 }
 
+impl RestoreReport {
+    pub fn counts(&self) -> serde_json::Value {
+        serde_json::json!({
+            "restored": self.restored.len(), "skipped": self.skipped.len(),
+            "conflicted": self.conflicted.len(), "unrecoverable": self.unrecoverable.len(),
+        })
+    }
+
+    /// Digest of what the report says would happen (independent of the dry-run flag): the confirmation a
+    /// person must give back before it is applied.
+    pub fn confirm_digest(&self) -> String {
+        let v = serde_json::json!({
+            "executionId": self.execution_id, "refused": self.refused,
+            "restored": self.restored, "skipped": self.skipped,
+            "conflicted": self.conflicted, "unrecoverable": self.unrecoverable,
+            "truncated": self.record_lists_truncated,
+        });
+        hex::encode(Sha256::digest(
+            nexus_contracts::canonical_json(&v).as_bytes(),
+        ))
+    }
+}
+
 const NOTE: &str = "Restoration is not atomic. Each path was decided on its own against the checkpoint, the recorded post-command state and the current filesystem; a path changed by anyone afterwards is reported as a conflict and left untouched.";
 
 fn refuse(id: &str, dry: bool, why: &str) -> RestoreReport {
