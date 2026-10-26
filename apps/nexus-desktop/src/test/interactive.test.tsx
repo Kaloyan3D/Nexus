@@ -312,14 +312,28 @@ describe("Projects page and evidence (A6.1.4)", () => {
     expect(setPolicy).not.toHaveBeenCalled();
   });
 
-  it("in-place commands cannot be chosen for a project that edits its real folder directly", async () => {
-    const list = vi.fn(async () => ({ projects: [project({ workspaceMode: "direct" })] }));
+  it("a project that edits its real folder can choose in-place commands, labelled as changing the real files", async () => {
+    const list = vi.fn(async () => ({ projects: [project({ workspaceMode: "direct" })], permissions: { ...support(), inPlaceAvailable: true, inPlaceReason: null } }));
     const user = userEvent.setup();
     mount(fakeApi({ runtimeState: async () => rt(), projectList: list }), "#/projects");
     const table = await screen.findByRole("table", { name: "Opened projects" });
     await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
-    const opt = within(table).getByRole("option", { name: /Commands change the task's working copy/ }) as HTMLOptionElement;
+    const opt = within(table).getByRole("option", { name: /Commands change my real project files directly/ }) as HTMLOptionElement;
+    expect(opt.disabled).toBe(false);
+  });
+
+  it("in-place commands are not offered when this machine cannot confine them, and the reason is shown", async () => {
+    const list = vi.fn(async () => ({
+      projects: [project({ workspaceMode: "direct" })],
+      permissions: { ...support(), inPlaceAvailable: false, inPlaceReason: "the launch gate `nexus-confine` was not found next to nexusd; reinstall Nexus" },
+    }));
+    const user = userEvent.setup();
+    mount(fakeApi({ runtimeState: async () => rt(), projectList: list }), "#/projects");
+    const table = await screen.findByRole("table", { name: "Opened projects" });
+    await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
+    const opt = within(table).getByRole("option", { name: /Commands change my real project files directly/ }) as HTMLOptionElement;
     expect(opt.disabled).toBe(true);
+    expect(opt.textContent).toMatch(/nexus-confine/);
   });
 
   it("a policy grant is labelled as automated, never as an approval by a person", async () => {

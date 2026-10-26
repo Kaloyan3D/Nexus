@@ -117,6 +117,10 @@ pub struct Tools {
     pub repo_root: PathBuf,
     /// The trusted terminal approver, when installed next to the other binaries (for the hint shown to the user).
     pub approver: Option<PathBuf>,
+    /// The launch gate for in-place commands, from the same directory as `nexusd` (they are released together;
+    /// the daemon checks that it speaks the protocol it needs). Absent = in-place commands are refused by the
+    /// daemon with a message that names it.
+    pub confine: Option<PathBuf>,
 }
 
 impl Tools {
@@ -171,6 +175,7 @@ impl Tools {
             node,
             repo_root,
             approver: find("nexus-approver").ok(),
+            confine: find("nexus-confine").ok(),
         })
     }
 }
@@ -389,6 +394,9 @@ fn start_daemon(home: &Home, tools: &Tools) -> Result<std::process::Child, Strin
     let me = uid().to_string();
     let dlog = home.logs().join("daemon.log");
     let mut d = Command::new(&tools.nexusd);
+    if let Some(c) = &tools.confine {
+        d.env("NEXUS_CONFINE_BIN", c);
+    }
     d.arg("--db")
         .arg(home.daemon_dir().join("k.db"))
         .arg("--socket")

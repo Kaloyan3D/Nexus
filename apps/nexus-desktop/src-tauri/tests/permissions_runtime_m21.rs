@@ -13,7 +13,7 @@ use std::path::PathBuf;
 #[test]
 fn the_desktop_runtime_has_a_private_approver_channel_and_manages_permissions_through_it() {
     let native = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../native/target/debug");
-    for n in ["nexusd", "nexus-broker", "nexus-approver"] {
+    for n in ["nexusd", "nexus-broker", "nexus-approver", "nexus-confine"] {
         assert!(
             native.join(n).is_file(),
             "build the native workspace first ({n})"
@@ -22,7 +22,7 @@ fn the_desktop_runtime_has_a_private_approver_channel_and_manages_permissions_th
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
-    for n in ["nexusd", "nexus-broker", "nexus-approver"] {
+    for n in ["nexusd", "nexus-broker", "nexus-approver", "nexus-confine"] {
         std::fs::copy(native.join(n), bin.join(n)).unwrap();
     }
     std::env::remove_var("NEXUS_BROKER_SOCKET");
