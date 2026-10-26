@@ -2387,7 +2387,7 @@ fn cmd_exec(args: &[String], cfg: &ClientConfig) -> ExitCode {
 /// path to either.
 fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig) -> ExitCode {
     use nexus_client::intent_client as ic;
-    const USAGE: &str = "usage: nexus project grant <id> show | set --fs scratch|workspace --net offline|install --approval auto|ask [--expires 7d] [--checkpoint off|best-effort|required] [--hard-links protect|allow] [--yes] | revoke [--yes] | clear [--yes]";
+    const USAGE: &str = "usage: nexus project grant <id> show | set --fs scratch|workspace --net offline|install|controlled --approval auto|ask [--expires 7d] [--checkpoint off|best-effort|required] [--hard-links protect|allow] [--allow-host H[:ports]]... [--allow-local-port N]... [--net-preset npm|cargo|pip|github|gitlab|go|pnpm|yarn]... [--yes] | revoke [--yes] | clear [--yes]";
     let sock = flag_value(args, "--broker-socket")
         .map(PathBuf::from)
         .unwrap_or_else(ic::default_broker_socket);
@@ -2407,7 +2407,7 @@ fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig
                             format!("{id}: no standing grant (defaults: scratch, offline, automatic approval)")
                         } else {
                             format!(
-                                "{id}: {} v{} fs={} net={} approval={} checkpoint={} hard-links={} expires={}",
+                                "{id}: {} v{} fs={} net={} approval={} checkpoint={} hard-links={} destinations={} expires={}",
                                 g["status"].as_str().unwrap_or("?"),
                                 g["version"],
                                 g["fs"].as_str().unwrap_or("?"),
@@ -2415,6 +2415,15 @@ fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig
                                 g["approval"].as_str().unwrap_or("?"),
                                 g["checkpoint"].as_str().unwrap_or("best-effort"),
                                 g["hardLinks"].as_str().unwrap_or("protect"),
+                                {
+                                    let n = &g["netPolicy"];
+                                    let empty = |k: &str| n[k].as_array().is_none_or(|a| a.is_empty());
+                                    if n.is_null() || (empty("hosts") && empty("localPorts")) {
+                                        "none".to_owned()
+                                    } else {
+                                        serde_json::to_string(n).unwrap_or_default()
+                                    }
+                                },
                                 g["expiresAtMs"]
                             )
                         };
@@ -2441,8 +2450,23 @@ fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig
                 flag_value(args, "--checkpoint").unwrap_or_else(|| "best-effort".into());
             let hard_links = flag_value(args, "--hard-links").unwrap_or_else(|| "protect".into());
             let exec = Some((checkpoint.as_str(), hard_links.as_str()));
-            let pv = match ic::project_grant_preview_with(
-                &sock, id, &fs, &net, &approval, expires, exec,
+            // Controlled Internet destinations (repeatable flags)
+            let mut dest = ic::NetChoice::default();
+            let mut it = args.iter();
+            while let Some(a) = it.next() {
+                let next = it.clone().next().cloned();
+                match (a.as_str(), next) {
+                    ("--allow-host", Some(v)) => dest.hosts.push(v),
+                    ("--net-preset", Some(v)) => dest.presets.push(v),
+                    ("--allow-local-port", Some(v)) => match v.parse::<u16>() {
+                        Ok(p) => dest.local_ports.push(p),
+                        Err(_) => return fail(cfg, "--allow-local-port needs a port number"),
+                    },
+                    _ => {}
+                }
+            }
+            let pv = match ic::project_grant_preview_net(
+                &sock, id, &fs, &net, &approval, expires, exec, &dest,
             ) {
                 Ok(v) => v,
                 Err(e) => return emit_err(cfg.json, &e),
@@ -2464,8 +2488,8 @@ fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig
                 );
             }
             let digest = pv["textSha256"].as_str().unwrap_or("");
-            match ic::project_grant_set_with(
-                &sock, id, &fs, &net, &approval, expires, digest, "cli", exec,
+            match ic::project_grant_set_net(
+                &sock, id, &fs, &net, &approval, expires, digest, "cli", exec, &dest,
             ) {
                 Ok(v) => {
                     emit(

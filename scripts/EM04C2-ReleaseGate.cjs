@@ -234,9 +234,9 @@ section('release-binaries', () => {
   // 2. build the real executables with default features
   const build = run('cargo', ['build', '--release', '--offline', '-p', 'nexus-broker', '-p', 'nexus-daemon', '-p', 'nexus-cli', '-p', 'nexus-tools', '--bins', '--message-format=json'], { cwd: native, env })
   if (build.status !== 0) return { status: 'FAIL', note: 'release build failed', failures: [String(build.stderr).split('\n').filter((l) => /^error/.test(l)).slice(0, 3).join(' | ')] }
-  const exes = artifactsOf(build.stdout, (m) => m.target.kind.includes('bin') && ['nexus-broker', 'nexusd', 'nexus', 'nexus-confine'].includes(m.target.name))
+  const exes = artifactsOf(build.stdout, (m) => m.target.kind.includes('bin') && ['nexus-broker', 'nexusd', 'nexus', 'nexus-confine', 'nexus-egress'].includes(m.target.name))
   const names = exes.map((e) => e.name).sort()
-  for (const need of ['nexus', 'nexus-broker', 'nexusd', 'nexus-confine']) if (!names.includes(need)) failures.push(`the executable ${need} was not produced`)
+  for (const need of ['nexus', 'nexus-broker', 'nexusd', 'nexus-confine', 'nexus-egress']) if (!names.includes(need)) failures.push(`the executable ${need} was not produced`)
   const artifacts = []
   const scans = []
   for (const e of exes) {

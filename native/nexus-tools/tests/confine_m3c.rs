@@ -100,6 +100,7 @@ fn launch_with(
         pinned_root: Some(mount.root_fd()),
         protect: mount.protect(),
         fd_ro_binds: mount.fd_ro_binds(),
+        egress: None,
         net,
         limits: SandboxLimits {
             wall_ms: 60_000,
@@ -303,6 +304,9 @@ fn plan_arguments_round_trip_and_unknown_arguments_are_refused() {
             confine::Expect::HiddenDir("b".into()),
             confine::Expect::ReadOnly("c/d".into(), 42),
         ],
+        egress_sock: Some("/nexus/egress.sock".into()),
+        bridge_http: Some(3128),
+        bridge_forward: vec![5173, 8080],
     };
     let mut a = p.to_args();
     a.push("/usr/bin/true".into());
@@ -451,6 +455,7 @@ fn a_directory_swapped_for_a_link_after_the_scan_is_caught_before_the_command_ru
         pinned_root: Some(mount.root_fd()),
         protect: mount.protect(),
         fd_ro_binds: mount.fd_ro_binds(),
+        egress: None,
         net: false,
         limits: SandboxLimits {
             wall_ms: 30_000,
@@ -505,6 +510,7 @@ fn an_entry_that_disappears_between_the_scan_and_the_launch_never_exposes_anythi
         pinned_root: Some(mount.root_fd()),
         protect: mount.protect(),
         fd_ro_binds: mount.fd_ro_binds(),
+        egress: None,
         net: false,
         limits: SandboxLimits {
             wall_ms: 30_000,
@@ -585,6 +591,7 @@ fn the_mounted_workspace_is_the_pinned_object_even_after_the_path_is_replaced() 
         pinned_root: Some(mount.root_fd()),
         protect: mount.protect(),
         fd_ro_binds: mount.fd_ro_binds(),
+        egress: None,
         net: false,
         limits: SandboxLimits {
             wall_ms: 30_000,

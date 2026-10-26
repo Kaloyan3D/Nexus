@@ -42,6 +42,9 @@ const REQUIRED_BOOL: &[&str] = &[
 const FORBIDDEN: &[&str] = &[
     "--allow-nonindependent-approver-test-only",
     "--approver-same-user",
+    // Controlled Internet test hooks (fixed name resolution / connect maps)
+    "--egress-test-resolve",
+    "--egress-test-connect",
     "--witness-adopt-legacy",
     // A5.1 development pilot: model inference is never part of the
     // production-v1 contract; it needs its own reviewed profile.

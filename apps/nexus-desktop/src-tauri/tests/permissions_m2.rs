@@ -71,7 +71,15 @@ fn the_native_backend_shows_the_brokers_text_and_only_a_yes_reaches_the_broker()
         answer: false,
         shown: Mutex::new(vec![]),
     };
-    let r = rt.project_set_grant(&no, "p", "workspace", "install", "ask", Some(3600));
+    let r = rt.project_set_grant(
+        &no,
+        "p",
+        "workspace",
+        "install",
+        "ask",
+        Some(3600),
+        &Default::default(),
+    );
     assert_eq!(r.unwrap_err(), "cancelled");
     assert_eq!(no.shown.lock().unwrap()[0].1, "EXACT TEXT FROM THE BROKER");
     assert!(
@@ -88,8 +96,16 @@ fn the_native_backend_shows_the_brokers_text_and_only_a_yes_reaches_the_broker()
         answer: true,
         shown: Mutex::new(vec![]),
     };
-    rt.project_set_grant(&yes, "p", "workspace", "install", "ask", Some(3600))
-        .unwrap();
+    rt.project_set_grant(
+        &yes,
+        "p",
+        "workspace",
+        "install",
+        "ask",
+        Some(3600),
+        &Default::default(),
+    )
+    .unwrap();
     let f = frames
         .lock()
         .unwrap()
@@ -152,7 +168,7 @@ fn a_choice_the_build_cannot_provide_is_refused_before_any_dialog_is_shown() {
         shown: Mutex::new(vec![]),
     };
     let e = rt
-        .project_set_grant(&d, "p", "full", "full", "auto", None)
+        .project_set_grant(&d, "p", "full", "full", "auto", None, &Default::default())
         .unwrap_err();
     assert!(e.contains("not available"), "{e}");
     assert!(

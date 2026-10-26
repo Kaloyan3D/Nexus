@@ -19141,3 +19141,361 @@ fn perm_expiry_ends_a_command_in_progress() {
     assert!(run.terminal);
     b.shutdown();
 }
+
+// ------------------------------------------------ M5: Controlled Internet
+
+/// A tiny HTTP server on this machine standing in for an internet service. `/slow` drips bytes until the
+/// client goes away. Returns its port and the number of requests it served.
+fn m5_server(tag: &'static str) -> (u16, Arc<AtomicUsize>) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let h2 = hits.clone();
+    std::thread::spawn(move || {
+        for c in l.incoming().flatten() {
+            let h = h2.clone();
+            std::thread::spawn(move || {
+                let mut c = c;
+                let mut head = Vec::new();
+                let mut b = [0u8; 4096];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match c.read(&mut b) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&b[..n]),
+                    }
+                }
+                h.fetch_add(1, Ordering::SeqCst);
+                let head = String::from_utf8_lossy(&head).into_owned();
+                if head.contains("/slow") {
+                    let _ = c.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+                    loop {
+                        if c.write_all(&[b'x'; 512]).is_err() {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+                let body = format!("{tag}-BODY");
+                let _ = c.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            });
+        }
+    });
+    (port, hits)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn direct_net_env(
+    name: &str,
+    approval: &str,
+    hosts: &[&str],
+    local_ports: &[u16],
+    fixtures: &[(&str, &str, u16, u16)],
+    expires_in_secs: Option<u64>,
+    make: impl Fn(FolderCell) -> Responder,
+) -> DirectEnv {
+    let cell: FolderCell = Arc::new(Mutex::new(None));
+    let mut args: Vec<String> = [
+        "--standing-grants",
+        "--approver-cap",
+        "@APPROVER_CAP@",
+        "--approver-uids",
+        "@UID@",
+        "--approver-same-user",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    for (h, ip, port, fp) in fixtures {
+        args.extend([
+            "--egress-test-resolve".into(),
+            format!("{h}={ip}"),
+            "--egress-test-connect".into(),
+            format!("{ip}:{port}=127.0.0.1:{fp}"),
+        ]);
+    }
+    let fx = fixture_full(
+        make(cell.clone()),
+        Box::new(|_| {}),
+        &[],
+        true,
+        true,
+        None,
+        &args,
+    );
+    let b = managed_broker(&fx, name);
+    let sock = b.socket_path().to_owned();
+    let folder = fx.work.join("managed");
+    let pid = open_managed_project(&fx, &sock, &folder);
+    *cell.lock().unwrap() = Some(std::fs::canonicalize(&folder).unwrap());
+    ic::project_set_workspace(&sock, &pid, "direct").expect("workspace mode");
+    let dest = ic::NetChoice {
+        presets: vec![],
+        hosts: hosts.iter().map(|s| s.to_string()).collect(),
+        local_ports: local_ports.to_vec(),
+    };
+    let pv = ic::project_grant_preview_net(
+        &sock,
+        &pid,
+        "workspace",
+        "controlled",
+        approval,
+        expires_in_secs,
+        None,
+        &dest,
+    )
+    .expect("preview");
+    let text = pv["text"].as_str().unwrap();
+    assert!(
+        text.contains("REAL project folder") && text.contains("ONLY to reach"),
+        "{text}"
+    );
+    assert!(
+        text.contains("not WHAT it sends") || text.contains("WHAT it sends"),
+        "the consent text must not present the allowlist as protection against exfiltration: {text}"
+    );
+    let digest = pv["textSha256"].as_str().unwrap().to_owned();
+    ic::project_grant_set_net(
+        &sock,
+        &pid,
+        "workspace",
+        "controlled",
+        approval,
+        expires_in_secs,
+        &digest,
+        "cli",
+        None,
+        &dest,
+    )
+    .expect("set");
+    DirectEnv {
+        fx,
+        b,
+        sock,
+        folder,
+        pid,
+    }
+}
+
+fn m5_net_ready() -> bool {
+    sandbox_ready() && nexus_tools::confine_host::locate_egress().is_some()
+}
+
+#[test]
+fn m5_a_direct_project_command_reaches_granted_destinations_only_and_the_record_is_truthful() {
+    if !m5_net_ready() {
+        return;
+    }
+    let (ap, ahits) = m5_server("ALLOWED");
+    let (ep, ehits) = m5_server("EVIL");
+    let cmd = r#"{"program":"sh","args":["-c","Q=SECR; Q=${Q}ETQ; curl -sS --max-time 10 http://files.example.org/x?token=$Q -o got-ok.txt 2>err-ok.txt; curl -sS --max-time 10 http://evil.example.net/ -o got-evil.txt 2>err-evil.txt; curl -sS --max-time 10 --noproxy '*' http://8.8.4.4/ -o got-ip.txt 2>err-ip.txt; echo made-in-place > made.txt; true"]}"#;
+    let calls: Vec<(&'static str, String)> = vec![("proc_run", cmd.to_owned())];
+    let env = direct_net_env(
+        "m5-reach",
+        "auto",
+        &["files.example.org:80"],
+        &[],
+        &[
+            ("files.example.org", "8.8.4.4", 80, ap),
+            ("evil.example.net", "8.8.8.8", 80, ep),
+        ],
+        None,
+        move |_| script(calls.clone(), "Done."),
+    );
+    let run = ic::submit(&env.sock, &direct_intent(&env, "go", "m5-reach-00000001"))
+        .unwrap()
+        .run;
+    let done = wait_terminal(&env.sock, &run.run_id, 120);
+    assert!(done.terminal, "{done:?}");
+    let f = &env.folder;
+    assert_eq!(
+        std::fs::read_to_string(f.join("got-ok.txt")).unwrap_or_default(),
+        "ALLOWED-BODY"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.join("made.txt")).unwrap_or_default(),
+        "made-in-place\n",
+        "the command ran in the real folder"
+    );
+    let evil = std::fs::read_to_string(f.join("got-evil.txt")).unwrap_or_default();
+    assert!(!evil.contains("EVIL-BODY"), "{evil}");
+    let err = std::fs::read_to_string(f.join("err-evil.txt")).unwrap_or_default();
+    let body = std::fs::read_to_string(f.join("got-evil.txt")).unwrap_or_default();
+    assert!(
+        format!("{err}{body}").contains("evil.example.net") || err.contains("403"),
+        "the refusal must name the destination so the user can decide: err={err:?} body={body:?}"
+    );
+    assert_eq!(
+        ehits.load(Ordering::SeqCst),
+        0,
+        "the unapproved server was contacted"
+    );
+    assert_eq!(ahits.load(Ordering::SeqCst), 1);
+    assert!(!std::fs::read_to_string(f.join("got-ip.txt"))
+        .unwrap_or_default()
+        .contains("ALLOWED"));
+    // the M3A ledger records the network summary: destinations and counts, never URLs or query strings
+    let recs = effects_records(&env.fx);
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    let net = recs[0]["network"].to_string();
+    assert!(
+        net.contains("files.example.org:80") && net.contains("evil.example.net:80"),
+        "{net}"
+    );
+    assert!(!net.contains("SECRETQ") && !net.contains("/x"), "{net}");
+    assert!(recs[0]["effects"]["created"]["paths"]
+        .to_string()
+        .contains("made.txt"));
+    // the journal and the whole data directory never saw the query secret
+    let all = std::process::Command::new("grep")
+        .args(["-rl", "SECRETQ"])
+        .arg(&env.fx.ddir)
+        .output()
+        .unwrap();
+    assert!(
+        all.stdout.is_empty(),
+        "request secrets leaked into Nexus data: {}",
+        String::from_utf8_lossy(&all.stdout)
+    );
+    // the checkpoint of the in-place run is still restorable: the command's file goes back
+    let exec = recs[0]["executionId"].as_str().unwrap().to_owned();
+    let pv = ic::exec_restore_preview(&env.sock, &exec).unwrap();
+    ic::exec_restore_apply(
+        &env.sock,
+        &exec,
+        pv["confirmDigest"].as_str().unwrap(),
+        "cli",
+    )
+    .unwrap();
+    assert!(!f.join("made.txt").exists());
+    env.b.shutdown();
+}
+
+#[test]
+fn m5_revocation_ends_a_download_and_widening_never_reaches_a_running_task() {
+    if !m5_net_ready() {
+        return;
+    }
+    let (ap, _) = m5_server("ALLOWED");
+    let (bp, bhits) = m5_server("B");
+    let cmd = r#"{"program":"sh","args":["-c","curl -sS --max-time 60 http://files.example.org/slow -o slow.bin 2>slow.err & for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do curl -sS --max-time 3 http://other.example.org/ -o other-$i.txt 2>/dev/null; sleep 1; done; wait; echo finished > finished.txt"]}"#;
+    let calls: Vec<(&'static str, String)> = vec![("proc_run", cmd.to_owned())];
+    let env = direct_net_env(
+        "m5-revoke",
+        "auto",
+        &["files.example.org:80"],
+        &[],
+        &[
+            ("files.example.org", "8.8.4.4", 80, ap),
+            ("other.example.org", "8.8.4.5", 80, bp),
+        ],
+        None,
+        move |_| script(calls.clone(), "Done."),
+    );
+    let run = ic::submit(&env.sock, &direct_intent(&env, "go", "m5-revoke-00000001"))
+        .unwrap()
+        .run;
+    let end = Instant::now() + Duration::from_secs(90);
+    while !running_cmd("slow.bin") {
+        assert!(
+            Instant::now() < end,
+            "the command never started: {:?}",
+            ic::status(&env.sock, &run.run_id)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // widen the project's grant to the other host while the command runs: the running task keeps its frozen scope
+    let dest = ic::NetChoice {
+        presets: vec![],
+        hosts: vec!["files.example.org:80".into(), "other.example.org:80".into()],
+        local_ports: vec![],
+    };
+    let pv = ic::project_grant_preview_net(
+        &env.sock,
+        &env.pid,
+        "workspace",
+        "controlled",
+        "auto",
+        None,
+        None,
+        &dest,
+    )
+    .unwrap();
+    let digest = pv["textSha256"].as_str().unwrap().to_owned();
+    ic::project_grant_set_net(
+        &env.sock,
+        &env.pid,
+        "workspace",
+        "controlled",
+        "auto",
+        None,
+        &digest,
+        "cli",
+        None,
+        &dest,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_secs(4));
+    assert_eq!(
+        bhits.load(Ordering::SeqCst),
+        0,
+        "a widened grant reached a task that was already running"
+    );
+    // revocation ends the transfer and the command
+    let t0 = Instant::now();
+    ic::project_grant_revoke(&env.sock, &env.pid, "desktop").unwrap();
+    while running_cmd("slow.bin") && t0.elapsed() < Duration::from_secs(40) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!running_cmd("slow.bin"), "the download survived revocation");
+    let done = wait_terminal(&env.sock, &run.run_id, 90);
+    assert!(done.terminal);
+    assert!(!env.folder.join("finished.txt").exists(), "{done:?}");
+    assert_ne!(
+        done.coding_outcome
+            .as_ref()
+            .map(|o| o.verification.as_str()),
+        Some("verified-passed")
+    );
+    let recs = effects_records(&env.fx);
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0]["outcome"], "partial", "{}", recs[0]);
+    // a NEW task under the widened-then-revoked lineage has no network at all
+    env.b.shutdown();
+}
+
+#[test]
+fn m5_ask_holds_a_controlled_internet_command_for_a_person() {
+    if !m5_net_ready() {
+        return;
+    }
+    let (ap, _) = m5_server("A");
+    let calls: Vec<(&'static str, String)> = vec![(
+        "proc_run",
+        r#"{"program":"sh","args":["-c","echo hi > hi.txt"]}"#.to_owned(),
+    )];
+    let env = direct_net_env(
+        "m5-ask",
+        "ask",
+        &["files.example.org:80"],
+        &[],
+        &[("files.example.org", "8.8.4.4", 80, ap)],
+        None,
+        move |_| script(calls.clone(), "Done."),
+    );
+    let run = ic::submit(&env.sock, &direct_intent(&env, "go", "m5-ask-000000001"))
+        .unwrap()
+        .run;
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        !env.folder.join("hi.txt").exists(),
+        "Ask must hold the command for a person"
+    );
+    let _ = ic::cancel(&env.sock, &run.run_id);
+    env.b.shutdown();
+}

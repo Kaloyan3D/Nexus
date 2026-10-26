@@ -23,6 +23,8 @@ pub mod contract;
 pub mod depcache;
 pub mod detect;
 pub mod direct;
+pub mod egress;
+pub mod egress_host;
 pub mod events;
 pub mod exec;
 pub mod exec_contract;
@@ -31,6 +33,7 @@ pub mod grant;
 pub mod inplace;
 pub mod list;
 pub mod mutate;
+pub mod netpolicy;
 pub mod observe;
 pub mod offline;
 pub mod process;
@@ -49,10 +52,10 @@ pub mod workspace;
 pub mod write;
 
 pub use authorization::{
-    authorize, begin, execute, execute_process, execute_process_in, execute_write, finish, prepare,
-    prepare_process, prepare_write, reconcile_processes, reconcile_writes, run_process_call,
-    run_started, run_write_call, AuthorizedToolCall, GrantRef, PreparedToolRequest,
-    StartedToolCall, ToolExecutionOutcome,
+    authorize, begin, execute, execute_process, execute_process_in, execute_process_net,
+    execute_write, finish, prepare, prepare_process, prepare_write, reconcile_processes,
+    reconcile_writes, run_process_call, run_started, run_write_call, AuthorizedToolCall, GrantRef,
+    PreparedToolRequest, StartedToolCall, ToolExecutionOutcome,
 };
 pub use contract::{
     descriptor_for, descriptors, ListArgs, ProcessArgs, ReadArgs, SearchArgs, ToolArgs,

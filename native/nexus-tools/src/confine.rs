@@ -113,6 +113,11 @@ pub struct Plan {
     /// `(dev, ino)` of the workspace directory that must be mounted at `WORK_SRC`.
     pub root: Option<(u64, u64)>,
     pub expect: Vec<Expect>,
+    /// Controlled Internet: the unix socket of the egress service (inside the sandbox), the loopback port of
+    /// the HTTP proxy bridge, and loopback ports forwarded to granted services on the user's machine.
+    pub egress_sock: Option<String>,
+    pub bridge_http: Option<u16>,
+    pub bridge_forward: Vec<u16>,
 }
 
 impl Plan {
@@ -130,6 +135,18 @@ impl Plan {
                 a.push(flag.into());
                 a.push(p.clone());
             }
+        }
+        if let Some(sock) = &self.egress_sock {
+            a.push("--egress-sock".into());
+            a.push(sock.clone());
+        }
+        if let Some(p) = self.bridge_http {
+            a.push("--bridge-http".into());
+            a.push(p.to_string());
+        }
+        for p in &self.bridge_forward {
+            a.push("--bridge-forward".into());
+            a.push(p.to_string());
         }
         for e in &self.expect {
             match e {
@@ -202,6 +219,22 @@ impl Plan {
                     } else {
                         Expect::HiddenDir(v)
                     });
+                    i += 2;
+                }
+                "--egress-sock" => {
+                    need(i, 1)?;
+                    p.egress_sock = Some(args[i + 1].clone());
+                    i += 2;
+                }
+                "--bridge-http" => {
+                    need(i, 1)?;
+                    p.bridge_http = Some(args[i + 1].parse().map_err(|_| "bad --bridge-http")?);
+                    i += 2;
+                }
+                "--bridge-forward" => {
+                    need(i, 1)?;
+                    p.bridge_forward
+                        .push(args[i + 1].parse().map_err(|_| "bad --bridge-forward")?);
                     i += 2;
                 }
                 "--readonly" => {
@@ -498,6 +531,98 @@ fn self_test() {
     }
 }
 
+// ---------------------------------------------------------------------------------------- the bridge
+
+/// Copy one connection both ways between a loopback client and the egress unix socket.
+fn bridge_conn(client: std::net::TcpStream, sock: &str, forward: Option<u16>) {
+    use std::io::Write;
+    let Ok(mut up) = std::os::unix::net::UnixStream::connect(sock) else {
+        return; // the egress service is gone: the connection fails, nothing else is tried
+    };
+    if let Some(p) = forward {
+        if up
+            .write_all(format!("NEXUS-FORWARD {p}\n").as_bytes())
+            .is_err()
+        {
+            return;
+        }
+    }
+    let (Ok(mut c2), Ok(mut u2)) = (client.try_clone(), up.try_clone()) else {
+        return;
+    };
+    let mut c1 = client;
+    let t = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut c1, &mut up);
+        let _ = up.shutdown(std::net::Shutdown::Write);
+    });
+    let _ = std::io::copy(&mut u2, &mut c2);
+    let _ = c2.shutdown(std::net::Shutdown::Write);
+    let _ = t.join();
+}
+
+/// Start the bridge in a child process of the gate (inside the sandbox, after Landlock). The command is
+/// `exec`ed by the parent; the child lives as long as the sandbox and dies with it. Loopback only: the
+/// sandbox has no other interface, so this is the ONLY way out.
+fn start_bridge(plan: &Plan) {
+    let Some(sock) = plan.egress_sock.clone() else {
+        if plan.bridge_http.is_some() || !plan.bridge_forward.is_empty() {
+            refuse("a bridge was requested without an egress socket");
+        }
+        return;
+    };
+    // the egress service must be there before the command starts
+    if std::os::unix::net::UnixStream::connect(&sock).is_err() {
+        refuse("the egress service is not reachable; Controlled Internet is unavailable and nothing was run");
+    }
+    let mut ls: Vec<(std::net::TcpListener, Option<u16>)> = Vec::new();
+    let mut want: Vec<(u16, Option<u16>)> = Vec::new();
+    if let Some(p) = plan.bridge_http {
+        want.push((p, None));
+    }
+    for p in &plan.bridge_forward {
+        want.push((*p, Some(*p)));
+    }
+    for (port, fwd) in want {
+        match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            Ok(l) => ls.push((l, fwd)),
+            Err(e) => refuse(&format!(
+                "cannot listen on 127.0.0.1:{port} for the network bridge: {e}"
+            )),
+        }
+    }
+    match unsafe { libc::fork() } {
+        -1 => refuse("cannot start the network bridge"),
+        0 => {
+            // child: the bridge
+            unsafe {
+                libc::setsid();
+                libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+                let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+                if null >= 0 {
+                    libc::dup2(null, 0);
+                    libc::dup2(null, 1);
+                    libc::dup2(null, 2);
+                }
+            }
+            let mut hs = Vec::new();
+            for (l, fwd) in ls {
+                let sock = sock.clone();
+                hs.push(std::thread::spawn(move || {
+                    for c in l.incoming().flatten() {
+                        let sock = sock.clone();
+                        std::thread::spawn(move || bridge_conn(c, &sock, fwd));
+                    }
+                }));
+            }
+            for h in hs {
+                let _ = h.join();
+            }
+            unsafe { libc::_exit(0) };
+        }
+        _ => {} // parent: drop its copies of the listeners (close_range below) and run the command
+    }
+}
+
 /// Entry point of `nexus-confine`.
 pub fn shim_main(args: Vec<String>) -> ! {
     if args.first().map(String::as_str) == Some("--version") {
@@ -534,6 +659,7 @@ pub fn shim_main(args: Vec<String>) -> ! {
     }
     apply_landlock(&plan, abi);
     self_test();
+    start_bridge(&plan);
     // nothing but 0-2 may survive into the command
     unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) };
     let cargs: Vec<CString> = cmd.iter().map(|a| cstr(a)).collect();

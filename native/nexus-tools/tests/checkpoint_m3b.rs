@@ -70,6 +70,7 @@ fn run_sim(s: &Sim, id: &str, p: &CheckpointPolicy, cmd: impl FnOnce(&Path)) -> 
     };
     let (outcome, reasons) = observe::judge(&pre, Some(&post), &state, true);
     let mut r = EffectsRecord {
+        network: None,
         schema: observe::RECORD_SCHEMA.into(),
         execution_id: id.into(),
         task_instance_id: "task".into(),
@@ -1062,6 +1063,7 @@ fn bench_checkpoint() {
                 };
                 let (outcome, reasons) = observe::judge(&pre, Some(&post), &state, true);
                 let mut r = EffectsRecord {
+                    network: None,
                     schema: observe::RECORD_SCHEMA.into(),
                     execution_id: "bench".into(),
                     task_instance_id: "t".into(),

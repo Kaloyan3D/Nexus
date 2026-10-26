@@ -554,6 +554,7 @@ impl Runtime {
     /// only a "yes" returns its digest to the broker. The renderer supplies the choices and nothing else:
     /// it cannot confirm, cannot name a digest, and a refusal (a capability this build lacks) is raised
     /// before any dialog.
+    #[allow(clippy::too_many_arguments)]
     pub fn project_set_grant(
         &self,
         d: &dyn Dialogs,
@@ -562,10 +563,20 @@ impl Runtime {
         net: &str,
         approval: &str,
         expires_in_secs: Option<u64>,
+        dest: &ic::NetChoice,
     ) -> Result<serde_json::Value, String> {
         let sock = self.sock();
-        let pv = ic::project_grant_preview(&sock, id, fs, net, approval, expires_in_secs)
-            .map_err(|e| e.message)?;
+        let pv = ic::project_grant_preview_net(
+            &sock,
+            id,
+            fs,
+            net,
+            approval,
+            expires_in_secs,
+            None,
+            dest,
+        )
+        .map_err(|e| e.message)?;
         let text = pv["text"]
             .as_str()
             .ok_or("the broker returned no text")?
@@ -577,7 +588,7 @@ impl Runtime {
         if !d.confirm("Change this project's permissions", &text)? {
             return Err("cancelled".into());
         }
-        ic::project_grant_set(
+        ic::project_grant_set_net(
             &sock,
             id,
             fs,
@@ -586,6 +597,8 @@ impl Runtime {
             expires_in_secs,
             &digest,
             "desktop",
+            None,
+            dest,
         )
         .map_err(|e| e.message)
     }

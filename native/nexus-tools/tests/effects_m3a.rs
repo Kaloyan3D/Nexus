@@ -464,6 +464,7 @@ fn synthetic(start: u64, end: u64) -> observe::EffectsRecord {
         bulk_truncated: 0,
     };
     let mut r = observe::EffectsRecord {
+        network: None,
         schema: observe::RECORD_SCHEMA.into(),
         execution_id: "exec-synthetic".into(),
         task_instance_id: "task".into(),

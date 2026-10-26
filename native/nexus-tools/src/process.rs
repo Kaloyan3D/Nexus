@@ -50,6 +50,15 @@ pub trait ProcessHooks {
     fn exec_policy(&mut self) -> Option<crate::grant::ExecPolicy> {
         None
     }
+    /// Controlled Internet: the destination policy this execution holds (frozen grant, narrowed by the grant as
+    /// it stands now). `None` = the task is not under Controlled Internet.
+    fn net_policy(&mut self) -> Option<crate::netpolicy::NetPolicy> {
+        None
+    }
+    /// Has the task's destination policy been narrowed (or withdrawn) since `started`? Widening never counts.
+    fn net_narrowed(&mut self, _started: &crate::netpolicy::NetPolicy) -> bool {
+        false
+    }
 }
 
 // ------------------------------------------------------------ policy
@@ -153,6 +162,8 @@ pub struct CommandPolicy {
     confine_shim: Option<PathBuf>,
     /// Nexus's own directories (never exposed through a linked worktree's git pointer).
     forbidden: Vec<PathBuf>,
+    /// The egress service of Controlled Internet (daemon configuration).
+    egress: crate::egress_host::EgressSettings,
 }
 
 fn arg_ok(a: &str) -> bool {
@@ -179,6 +190,7 @@ impl CommandPolicy {
             hard_links: Default::default(),
             confine_shim: None,
             forbidden: Vec::new(),
+            egress: Default::default(),
         }
     }
 
@@ -217,6 +229,15 @@ impl CommandPolicy {
 
     pub fn hard_links(&self) -> crate::inplace::HardLinks {
         self.hard_links
+    }
+
+    pub fn with_egress_settings(mut self, e: crate::egress_host::EgressSettings) -> Self {
+        self.egress = e;
+        self
+    }
+
+    pub fn egress_settings(&self) -> &crate::egress_host::EgressSettings {
+        &self.egress
     }
 
     pub fn with_forbidden_paths(mut self, v: Vec<PathBuf>) -> Self {
@@ -270,6 +291,7 @@ impl CommandPolicy {
             hard_links: Default::default(),
             confine_shim: None,
             forbidden: Vec::new(),
+            egress: Default::default(),
         }
     }
 
@@ -797,6 +819,9 @@ fn tail(s: &str, max: usize) -> String {
 struct Control<'a, 'h> {
     cancel: &'a CancellationToken,
     hooks: &'h mut dyn ProcessHooks,
+    /// Controlled Internet: the egress service and the policy it was started with.
+    egress: Option<&'a mut crate::egress_host::EgressRun>,
+    net: Option<&'a crate::netpolicy::NetPolicy>,
 }
 
 impl SandboxControl for Control<'_, '_> {
@@ -804,7 +829,18 @@ impl SandboxControl for Control<'_, '_> {
         if self.cancel.is_cancelled() {
             return Some(StopReason::Cancelled);
         }
-        match self.hooks.fence() {
+        let fence = self.hooks.fence();
+        if let (Some(e), Some(np)) = (self.egress.as_mut(), self.net) {
+            if e.ended_early.is_none() {
+                if fence.is_err() {
+                    e.kill_now("permissions revoked");
+                } else if self.hooks.net_narrowed(np) {
+                    // narrowing never kills the command, but the connections it was authorized for end now
+                    e.kill_now("network permissions narrowed");
+                }
+            }
+        }
+        match fence {
             Ok(()) => None,
             Err(e) => Some(StopReason::Revoked(e.message)),
         }
@@ -1180,6 +1216,18 @@ pub fn run_process(
     // In place: nothing is staged. The task's own working copy is bound by the descriptor the Workspace
     // pinned; what the command writes is the working copy (reviewed through the task's git diff).
     let exec_override = if in_place { hooks.exec_policy() } else { None };
+    let net_policy: Option<crate::netpolicy::NetPolicy> = hooks.net_policy();
+    if net_policy.is_some() && !in_place {
+        return failed(
+            hooks,
+            &run_dir,
+            ToolErrorCode::SandboxUnavailable,
+            "Controlled Internet is available only to commands that run in place; nothing was run"
+                .into(),
+        );
+    }
+    // legacy install-class network (host network namespace) is used only when Controlled Internet is not
+    let host_net = cmd.install && net_policy.is_none();
     // where the time goes (milliseconds), recorded with the effects of every in-place command
     let mut timing: std::collections::BTreeMap<String, u64> = Default::default();
     let t_scan = std::time::Instant::now();
@@ -1263,7 +1311,7 @@ pub fn run_process(
             );
         }
         rw_binds.push((env_dir, "/work/env".to_owned()));
-        if cmd.install {
+        if host_net {
             match ctx.env {
                 Some(e) if e.installs => {}
                 _ => {
@@ -1300,7 +1348,7 @@ pub fn run_process(
     // The network is off, but programs still resolve `localhost` (test runners bind a loopback
     // server): give the sandbox a minimal hosts file of its own - never the host's.
     let mut ro_binds = cmd.ro_binds.clone();
-    if !cmd.install {
+    if !host_net {
         let hosts = run_dir.join("sandbox-hosts");
         if std::fs::write(&hosts, "127.0.0.1 localhost\n::1 localhost ip6-localhost\n").is_ok() {
             ro_binds.push((hosts, "/etc/hosts".to_owned()));
@@ -1308,7 +1356,7 @@ pub fn run_process(
     }
     // M3C: an in-place command runs behind the launch gate (namespace verification + Landlock), or not at all.
     let confine = if in_place {
-        match build_confine(ctx, cmd.install) {
+        match build_confine(ctx, host_net) {
             Ok(c) => Some(c),
             Err(m) => {
                 return failed(hooks, &run_dir, ToolErrorCode::SandboxUnavailable, m);
@@ -1316,6 +1364,25 @@ pub fn run_process(
         }
     } else {
         None
+    };
+    // Controlled Internet: the egress service first; without it the command does not start.
+    let mut egress: Option<crate::egress_host::EgressRun> = None;
+    if let Some(np) = &net_policy {
+        match crate::egress_host::start(ctx.policy.egress_settings(), &run_dir, np) {
+            Ok(e) => egress = Some(e),
+            Err(m) => return failed(hooks, &run_dir, ToolErrorCode::SandboxUnavailable, m),
+        }
+    }
+    let mut cmd_env = cmd.env.clone();
+    if net_policy.is_some() {
+        controlled_env(&mut cmd_env);
+    }
+    let net_label = if net_policy.is_some() {
+        "controlled"
+    } else if cmd.install {
+        "install"
+    } else {
+        "none"
     };
     let spec = SandboxSpec {
         id: ctx.execution_id.to_owned(),
@@ -1327,14 +1394,23 @@ pub fn run_process(
             src.clone()
         },
         cwd: cmd.cwd.clone(),
-        env: cmd.env.clone(),
+        env: cmd_env,
         ro_binds,
         rw_binds,
         src_writable: ctx.policy.is_workbench(),
         pinned_root: mount.as_ref().map(|m| m.root_fd()),
         protect: mount.as_ref().map(|m| m.protect()).unwrap_or_default(),
         fd_ro_binds: mount.as_ref().map(|m| m.fd_ro_binds()).unwrap_or_default(),
-        net: cmd.install,
+        egress: egress.as_ref().map(|e| crate::sandbox::EgressSpec {
+            socket: e.socket(),
+            http_port: crate::egress::PROXY_PORT,
+            forward_ports: net_policy
+                .as_ref()
+                .map(|n| n.local_ports.clone())
+                .unwrap_or_default(),
+            policy_digest: e.policy_digest.clone(),
+        }),
+        net: host_net,
         limits: limits.clone(),
         cgroup_base: base.clone(),
         confine,
@@ -1415,7 +1491,7 @@ pub fn run_process(
         "sandboxDigest": sbx_digest,
         "dependencies": dep_note,
         "sandbox": {
-            "backend": "bubblewrap+seccomp+cgroup-v2", "network": if cmd.install { "install" } else { "none" },
+            "backend": "bubblewrap+seccomp+cgroup-v2", "network": net_label,
             "rootfs": "synthetic (usr ro, tmpfs scratch)", "workspace": if ctx.policy.is_workbench() { "snapshot-scratch" } else { "snapshot-ro" },
             "writeBack": "none", "env": "allowlist",
         },
@@ -1508,9 +1584,16 @@ pub fn run_process(
     }
     let t_run = std::time::Instant::now();
     let outcome = {
-        let mut control = Control { cancel, hooks };
+        let mut control = Control {
+            cancel,
+            hooks,
+            egress: egress.as_mut(),
+            net: net_policy.as_ref(),
+        };
         run_sandboxed(&spec, &mut control)
     };
+    // the egress service ends with the command; what it saw is summarised (destinations, ports, bytes)
+    let net_summary = egress.as_mut().map(|e| e.finish());
     timing.insert("launchAndRunMs".into(), t_run.elapsed().as_millis() as u64);
     // A successful install keeps its node_modules for the commands that follow.
     let mut env_note = serde_json::Value::Null;
@@ -1565,6 +1648,7 @@ pub fn run_process(
             &ck_store,
             &ck_pol,
             std::mem::take(&mut timing),
+            net_summary.clone(),
         ));
     }
     let out = match outcome {
@@ -1655,6 +1739,9 @@ pub fn run_process(
     if let (Some(l), Some(o)) = (&ledger, record.as_object_mut()) {
         o.insert("effects".into(), crate::observe::summary(l, 20));
     }
+    if let (Some(n), Some(o)) = (&net_summary, record.as_object_mut()) {
+        o.insert("network".into(), n.clone());
+    }
     hooks.journal(phase, record)?;
     let output = serde_json::json!({
         "reason": reason, "exitCode": code, "signal": signal,
@@ -1666,10 +1753,13 @@ pub fn run_process(
         "resourceEnforcement": out.resource_enforcement,
         "oomKilled": out.oom_killed, "pidsLimitHit": out.pids_limit_hit,
         "snapshotDigest": report.digest, "sandboxDigest": sbx_digest,
-        "network": if cmd.install { "install" } else { "none" }, "writeBack": "none",
+        "network": net_label, "writeBack": "none",
         "environment": env_note,
     });
     let mut output = output;
+    if let (Some(n), Some(o)) = (&net_summary, output.as_object_mut()) {
+        o.insert("networkSummary".into(), n.clone());
+    }
     if let (true, Some(o)) = (in_place, output.as_object_mut()) {
         o.insert("snapshotDigest".into(), serde_json::Value::Null);
         o.insert("fsScope".into(), "workspace".into());
@@ -1717,6 +1807,7 @@ fn finish_observation(
     ck_store: &Path,
     ck_pol: &crate::checkpoint::CheckpointPolicy,
     mut timing: std::collections::BTreeMap<String, u64>,
+    network: Option<serde_json::Value>,
 ) -> crate::observe::EffectsRecord {
     use crate::observe as ob;
     let t_post = std::time::Instant::now();
@@ -1754,6 +1845,7 @@ fn finish_observation(
         recoverability: recov,
         post_state,
         timing_ms: Default::default(),
+        network,
         attribution: "temporal".into(),
         note: ob::ATTRIBUTION_NOTE.into(),
         digest: String::new(),
@@ -1777,6 +1869,39 @@ fn finish_observation(
         crate::checkpoint::finish(ck_store, ctx.execution_id);
     }
     rec
+}
+
+/// The environment of a command under Controlled Internet: every common client is pointed at the bridge, and
+/// the "offline" switches of the offline profile are removed (the network is only reachable through the
+/// policy, so they would only break builds). Whatever the command sets itself changes nothing: the sandbox has
+/// no other route.
+fn controlled_env(env: &mut BTreeMap<String, String>) {
+    for k in ["CARGO_NET_OFFLINE", "npm_config_offline", "PIP_NO_INDEX"] {
+        env.remove(k);
+    }
+    if env.get("GOPROXY").map(String::as_str) == Some("off") {
+        env.remove("GOPROXY");
+    }
+    let proxy = format!("http://127.0.0.1:{}", crate::egress::PROXY_PORT);
+    for k in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        env.insert(k.into(), proxy.clone());
+    }
+    // traffic to the sandbox's OWN loopback (the bridge forwards of granted local ports) never goes via the proxy;
+    // nothing else is exempt
+    for k in ["NO_PROXY", "no_proxy"] {
+        env.insert(k.into(), "127.0.0.1,localhost,::1".into());
+    }
+    // Node's built-in fetch ignores proxy variables unless asked
+    env.insert("NODE_USE_ENV_PROXY".into(), "1".into());
+    env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+    env.insert("PIP_DISABLE_PIP_VERSION_CHECK".into(), "1".into());
 }
 
 /// The launch-gate configuration of an in-place command, or the reason there cannot be one (fail closed).
@@ -1985,6 +2110,7 @@ fn recover_effects(
         process: state,
         post_state: ob::post_state_of(&post, &fx),
         timing_ms: Default::default(),
+        network: None,
         checkpoint: ck_value,
         recoverability: recov,
         effects: fx,

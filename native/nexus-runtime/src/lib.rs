@@ -121,6 +121,9 @@ pub struct Tools {
     /// the daemon checks that it speaks the protocol it needs). Absent = in-place commands are refused by the
     /// daemon with a message that names it.
     pub confine: Option<PathBuf>,
+    /// The network gatekeeper for Controlled Internet, from the same directory. Absent = Controlled Internet is
+    /// reported unavailable by the daemon (never replaced by direct networking).
+    pub egress: Option<PathBuf>,
 }
 
 impl Tools {
@@ -176,6 +179,7 @@ impl Tools {
             repo_root,
             approver: find("nexus-approver").ok(),
             confine: find("nexus-confine").ok(),
+            egress: find("nexus-egress").ok(),
         })
     }
 }
@@ -396,6 +400,9 @@ fn start_daemon(home: &Home, tools: &Tools) -> Result<std::process::Child, Strin
     let mut d = Command::new(&tools.nexusd);
     if let Some(c) = &tools.confine {
         d.env("NEXUS_CONFINE_BIN", c);
+    }
+    if let Some(e) = &tools.egress {
+        d.env("NEXUS_EGRESS_BIN", e);
     }
     d.arg("--db")
         .arg(home.daemon_dir().join("k.db"))
