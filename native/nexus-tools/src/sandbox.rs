@@ -128,6 +128,9 @@ pub struct SandboxSpec {
     /// absent name would create it in the project). Read-only entries carry a descriptor opened
     /// descriptor-relatively with `O_NOFOLLOW`.
     pub protect: Vec<Protect>,
+    /// Read-only binds of directories OUTSIDE the workspace, by verified descriptor (`(fd, sandbox path)`):
+    /// the external git directory of a linked worktree. Only valid together with `pinned_root`.
+    pub fd_ro_binds: Vec<(std::os::fd::RawFd, String)>,
     /// Share the host network namespace (dependency installation only). Everything else
     /// runs in a fresh, empty network namespace.
     pub net: bool,
@@ -166,6 +169,7 @@ impl ConfineSpec {
             );
         }
         ro.extend(spec.ro_binds.iter().map(|(_, s)| s.clone()));
+        ro.extend(spec.fd_ro_binds.iter().map(|(_, s)| s.clone()));
         let mut rw: Vec<String> = vec!["/work/src".into(), "/work/out".into(), "/tmp".into()];
         rw.extend(spec.rw_binds.iter().map(|(_, s)| s.clone()));
         let expect = spec
@@ -530,6 +534,12 @@ pub fn bwrap_argv(spec: &SandboxSpec) -> Vec<String> {
                 }
             }
         }
+        for (_, dest) in &spec.fd_ro_binds {
+            a.push("--ro-bind-fd".to_owned());
+            a.push(slot.to_string());
+            a.push(dest.clone());
+            slot += 1;
+        }
     } else {
         a.push(
             if spec.src_writable {
@@ -769,6 +779,7 @@ pub fn preflight() -> SandboxCapabilities {
                 ..Default::default()
             },
             cgroup_base: cgroup_base().unwrap_or_default(),
+            fd_ro_binds: Vec::new(),
             confine: None,
         };
         struct Never;
@@ -989,7 +1000,10 @@ pub fn run_sandboxed(
                 }
             }
         }
-    } else if !spec.protect.is_empty() {
+        for (fd, _) in &spec.fd_ro_binds {
+            mount_srcs.push(*fd);
+        }
+    } else if !spec.protect.is_empty() || !spec.fd_ro_binds.is_empty() {
         return Err(refuse("protected entries need a pinned root"));
     }
     let mut mount_dups: Vec<std::os::fd::OwnedFd> = Vec::new();

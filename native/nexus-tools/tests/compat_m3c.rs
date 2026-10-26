@@ -240,3 +240,66 @@ fn an_in_place_command_is_refused_when_the_launch_gate_is_missing_and_scratch_st
     let o = execute_process_in(&mut fx.kernel, &call, &cancel, &pol, &dir, 60_000, None).unwrap();
     assert_eq!(o.result.output.unwrap()["verification"], "pass");
 }
+
+// ------------------------------------------------------------------------------------ M4 latency
+
+fn build_tree(root: &std::path::Path, src: usize, dep: usize) {
+    for i in 0..src {
+        let d = root.join(format!("src/mod{}/sub{}", i % 40, i % 7));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join(format!("f{i}.rs")),
+            format!("fn f{i}() {{ /* {} */ }}\n", "x".repeat(200)),
+        )
+        .unwrap();
+    }
+    for i in 0..dep {
+        let d = root.join(format!("node_modules/pkg{}/lib{}", i % 500, i % 11));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(format!("i{i}.js")), "x\n").unwrap();
+    }
+}
+
+/// End-to-end latency of consecutive in-place commands, with the stages separated:
+/// `cargo test -p nexus-tools --release --test compat_m3c -- --ignored --nocapture bench_end_to_end`
+#[test]
+#[ignore]
+fn bench_end_to_end() {
+    assert!(ready("bench"));
+    for (name, src, dep) in [
+        ("small 1k", 1_000usize, 0usize),
+        ("medium 20k", 20_000, 0),
+        ("large 20k+130k deps", 20_000, 130_000),
+    ] {
+        for mode in ["off", "best-effort"] {
+            let mut fx = fixture("m4-bench");
+            build_tree(&fx.ws, src, dep);
+            let pol = CommandPolicy::standard(Toolchain::discover())
+                .with_workbench()
+                .with_checkpoint(nexus_tools::checkpoint::CheckpointPolicy {
+                    mode: nexus_tools::checkpoint::Mode::parse(mode).unwrap(),
+                    ..Default::default()
+                });
+            let mut rows: Vec<(u128, serde_json::Value)> = vec![];
+            for i in 0..4 {
+                fx.approve_process_fs(600_000, "workspace");
+                let r = fx.request("proc.run", json!({"program": "sh", "args": ["-c", format!("echo edit{i} >> src/mod0/sub0/f0.rs")], "cwd": "."}));
+                let cancel = CancellationToken::new(&r.cancellation_id);
+                let p = fx.prepare_p(r, &pol).unwrap();
+                let call = authorize(&mut fx.kernel, p).unwrap();
+                let dir = fx.dir.path().join("exec");
+                let t = std::time::Instant::now();
+                let o =
+                    execute_process_in(&mut fx.kernel, &call, &cancel, &pol, &dir, 600_000, None)
+                        .unwrap();
+                let wall = t.elapsed().as_millis();
+                let v = out(&o);
+                assert_eq!(v["verification"], "pass", "{v}");
+                rows.push((wall, v["effects"]["timingMs"].clone()));
+            }
+            // the first command of a project is the coldest; report commands 2-4
+            let w: Vec<u128> = rows.iter().skip(1).map(|r| r.0).collect();
+            println!("BENCH {name} checkpoint={mode}: total per command {w:?} ms; stages of command 4: {}", rows[3].1);
+        }
+    }
+}

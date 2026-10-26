@@ -17170,13 +17170,19 @@ fn checkpoint_dirs(fx: &Fx) -> Vec<String> {
 
 fn exec_restore(fx: &Fx, exec: &str, dry: bool) -> Value {
     let icap = std::fs::read_to_string(&fx.cap).unwrap().trim().to_owned();
-    nexus_client::issuer::issuer_call(
-        &fx.daemon_socket,
-        &icap,
-        "exec-restore",
-        json!({"executionId": exec, "dryRun": dry}),
-    )
-    .expect("exec-restore")
+    let call = |p: Value| {
+        nexus_client::issuer::issuer_call(&fx.daemon_socket, &icap, "exec-restore", p)
+            .expect("exec-restore")
+    };
+    let preview = call(json!({"executionId": exec, "dryRun": true}));
+    if dry {
+        return preview;
+    }
+    // applying needs the digest of a preview taken against the current state (M4)
+    match preview["confirmDigest"].as_str() {
+        Some(d) => call(json!({"executionId": exec, "dryRun": false, "confirm": d})),
+        None => preview,
+    }
 }
 
 const M3B_CMD: &str = r#"{"program":"sh","args":["-c","echo a > c1.txt && echo b > c2.txt && sed -i 's/calc/CALC/' Cargo.toml; rm -f README.md"]}"#;
@@ -17438,6 +17444,616 @@ fn m3b_restore_is_an_operator_verb_the_model_and_an_unauthenticated_caller_canno
         "{again}"
     );
     b.shutdown();
+}
+
+// ------------------------------------------------ M4: true Direct Workspace execution
+
+/// A Direct project whose commands run IN PLACE under an explicit standing grant (the user's path: switch
+/// the workspace to direct, preview the consent text, confirm it).
+fn direct_in_place_env(
+    name: &str,
+    approval: &str,
+    exec: Option<(&str, &str)>,
+    expires_in_secs: Option<u64>,
+    daemon_extra: &[&str],
+    make: impl Fn(FolderCell) -> Responder,
+) -> DirectEnv {
+    let cell: FolderCell = Arc::new(Mutex::new(None));
+    let mut args = vec![
+        "--standing-grants".to_owned(),
+        "--approver-cap".to_owned(),
+        "@APPROVER_CAP@".to_owned(),
+        "--approver-uids".to_owned(),
+        "@UID@".to_owned(),
+        "--approver-same-user".to_owned(),
+    ];
+    args.extend(daemon_extra.iter().map(|s| s.to_string()));
+    let fx = fixture_full(
+        make(cell.clone()),
+        Box::new(|_| {}),
+        &[],
+        true,
+        true,
+        None,
+        &args,
+    );
+    let b = managed_broker(&fx, name);
+    let sock = b.socket_path().to_owned();
+    let folder = fx.work.join("managed");
+    let pid = open_managed_project(&fx, &sock, &folder);
+    *cell.lock().unwrap() = Some(std::fs::canonicalize(&folder).unwrap());
+    let v = ic::project_set_workspace(&sock, &pid, "direct").expect("workspace mode");
+    assert_eq!(v["project"]["workspaceMode"], "direct", "{v}");
+    let pv = ic::project_grant_preview_with(
+        &sock,
+        &pid,
+        "workspace",
+        "offline",
+        approval,
+        expires_in_secs,
+        exec,
+    )
+    .expect("preview");
+    assert!(
+        pv["text"].as_str().unwrap().contains("REAL project folder"),
+        "the consent text must say the real folder is changed: {}",
+        pv["text"]
+    );
+    let digest = pv["textSha256"].as_str().unwrap().to_owned();
+    ic::project_grant_set_with(
+        &sock,
+        &pid,
+        "workspace",
+        "offline",
+        approval,
+        expires_in_secs,
+        &digest,
+        "cli",
+        exec,
+    )
+    .expect("set");
+    DirectEnv {
+        fx,
+        b,
+        sock,
+        folder,
+        pid,
+    }
+}
+
+fn worktree_diff(env: &DirectEnv, run: &ic::IntentRun) -> Value {
+    let icap = std::fs::read_to_string(&env.fx.cap)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let r = nexus_client::issuer::issuer_call(
+        &env.fx.daemon_socket,
+        &icap,
+        "worktree-diff",
+        json!({ "taskInstanceId": run.task_instance_id.clone().unwrap() }),
+    )
+    .expect("worktree-diff");
+    r.get("diff")
+        .or_else(|| r["result"].get("diff"))
+        .cloned()
+        .unwrap_or_else(|| panic!("no diff in {r}"))
+}
+
+fn diff_file<'a>(d: &'a Value, path: &str) -> Option<&'a Value> {
+    d["files"].as_array()?.iter().find(|f| f["path"] == path)
+}
+
+#[test]
+fn m4_a_real_project_is_developed_in_place_with_shell_commands_and_every_boundary_holds() {
+    if !sandbox_ready() {
+        return;
+    }
+    let calls: Vec<(&'static str, String)> = vec![
+        ("fs_write", json!({"path": "src/gen/spec.json", "mode": "create", "content": "{\"names\": [\"alpha\", \"beta\"]}\n"}).to_string()),
+        ("fs_write", json!({"path": "fmt/ugly.txt", "mode": "create", "content": "a    b     c\n"}).to_string()),
+        // a command reads what fs_write just wrote, and the formatter's edit is visible to the next step
+        ("proc_run", r#"{"program":"sh","args":["-c","test -f src/gen/spec.json && grep -q alpha src/gen/spec.json && sed -i 's/  */ /g' fmt/ugly.txt && grep -qx 'a b c' fmt/ugly.txt"]}"#.to_owned()),
+        ("proc_run", r#"{"program":"sh","args":["-c","python3 -c \"import json,os; os.makedirs('generated',exist_ok=True); [open('generated/%s.txt'%n,'w').write('generated '+n+'\\n') for n in json.load(open('src/gen/spec.json'))['names']]\""]}"#.to_owned()),
+        ("proc_run", r#"{"program":"sh","args":["-c","cat generated/alpha.txt generated/beta.txt | grep -c generated | grep -qx 2"]}"#.to_owned()),
+        ("fs_read", r#"{"path":"src/lib.rs"}"#.to_owned()),
+        ("fs_edit", lib_edit()),
+        ("proc_run", r#"{"program":"cargo","args":["test","--offline"]}"#.to_owned()),
+        ("fs_write", json!({"path": "build.js", "mode": "create", "content": "const fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/out.js','console.log(\"built\")\\n');\n"}).to_string()),
+        ("proc_run", r#"{"program":"sh","args":["-c","node build.js && node dist/out.js | grep -q built"]}"#.to_owned()),
+    ];
+    let env = direct_in_place_env("m4-flow", "auto", None, None, &[], move |_| {
+        script(calls.clone(), "Built, generated and tested.")
+    });
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(&env, "Develop the feature.", "m4-flow-00000001"),
+        240,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.workspace_kind.as_deref(), Some("direct"));
+    // the REAL directory has everything, immediately (no copy, no apply step)
+    let rd = |p: &str| std::fs::read_to_string(env.folder.join(p)).unwrap_or_default();
+    assert_eq!(
+        rd("src/gen/spec.json"),
+        "{\"names\": [\"alpha\", \"beta\"]}\n"
+    );
+    assert_eq!(rd("fmt/ugly.txt"), "a b c\n");
+    assert_eq!(rd("generated/alpha.txt"), "generated alpha\n");
+    assert_eq!(rd("generated/beta.txt"), "generated beta\n");
+    assert!(rd("src/lib.rs").contains("a + b"));
+    assert!(env.folder.join("dist/out.js").exists());
+    assert!(
+        !run.exec_scope.as_deref().is_some_and(|s| s != "workspace"),
+        "{run:?}"
+    );
+    // every command left a ledger record with a complete checkpoint; one per proc_run
+    let recs = effects_records(&env.fx);
+    assert_eq!(recs.len(), 5, "{}", recs.len());
+    for r in &recs {
+        assert_eq!(r["outcome"], "observed", "{r}");
+        assert_eq!(r["checkpoint"]["status"], "complete", "{r}");
+        // honest recoverability: a command that wrote into a dependency/build folder (`dist/`) cannot claim
+        // a complete restore; every other command can
+        let bulk = !r["effects"]["bulkChanged"].as_array().unwrap().is_empty();
+        assert_eq!(
+            r["recoverability"]["complete"], !bulk,
+            "{} {}",
+            r["recoverability"], r["effects"]["bulkChanged"]
+        );
+    }
+    // the project diff shows the user all of it; command-made files are marked as such, not as the user's
+    let d = worktree_diff(&env, &run);
+    for p in [
+        "src/gen/spec.json",
+        "fmt/ugly.txt",
+        "generated/alpha.txt",
+        "generated/beta.txt",
+        "src/lib.rs",
+        "build.js",
+    ] {
+        assert!(
+            diff_file(&d, p).is_some(),
+            "{p} missing from the project diff: {d}"
+        );
+    }
+    // build output in a dependency/build folder is summarised, not listed: the diff says so
+    assert!(diff_file(&d, "dist/out.js").is_none());
+    assert_eq!(d["commandEvidence"]["incomplete"], true, "{d}");
+    let gen = diff_file(&d, "generated/alpha.txt").unwrap();
+    assert_eq!(
+        (
+            gen["origin"].as_str(),
+            gen["attribution"].as_str(),
+            gen["externalChange"].as_bool()
+        ),
+        (Some("command"), Some("temporal"), Some(false)),
+        "{gen}"
+    );
+    assert_eq!(diff_file(&d, "src/lib.rs").unwrap()["origin"], "tool");
+    assert_eq!(
+        diff_file(&d, "src/lib.rs").unwrap()["externalChange"],
+        false
+    );
+    // a later GENUINE user edit is recognised - and only that
+    std::fs::write(
+        env.folder.join("generated/alpha.txt"),
+        "edited by the user\n",
+    )
+    .unwrap();
+    std::fs::write(
+        env.folder.join("src/lib.rs"),
+        rd("src/lib.rs") + "// user comment\n",
+    )
+    .unwrap();
+    let d2 = worktree_diff(&env, &run);
+    assert_eq!(
+        diff_file(&d2, "generated/alpha.txt").unwrap()["externalChange"],
+        true,
+        "{d2}"
+    );
+    assert_eq!(
+        diff_file(&d2, "src/lib.rs").unwrap()["externalChange"],
+        true
+    );
+    assert_eq!(
+        diff_file(&d2, "generated/beta.txt").unwrap()["externalChange"],
+        false
+    );
+    assert_eq!(
+        diff_file(&d2, "fmt/ugly.txt").unwrap()["externalChange"],
+        false
+    );
+    // guarded restore of the generator's execution: the user's edit is a conflict and is kept
+    let gen_exec = recs
+        .iter()
+        .find(|r| {
+            r["effects"]["created"]["paths"]
+                .to_string()
+                .contains("generated/alpha.txt")
+        })
+        .expect("the generator's record")["executionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pv = ic::exec_restore_preview(&env.sock, &gen_exec).unwrap();
+    assert_eq!(pv["restore"]["outcome"], "partial", "{pv}");
+    let conflicts = pv["restore"]["conflicted"].to_string();
+    assert!(
+        conflicts.contains("generated/alpha.txt") && !conflicts.contains("beta"),
+        "{pv}"
+    );
+    assert_eq!(
+        rd("generated/beta.txt"),
+        "generated beta\n",
+        "a preview changed the folder"
+    );
+    let bad = ic::exec_restore_apply(&env.sock, &gen_exec, &"0".repeat(64), "cli");
+    assert!(
+        bad.is_err(),
+        "a wrong confirmation must not restore: {bad:?}"
+    );
+    let applied = ic::exec_restore_apply(
+        &env.sock,
+        &gen_exec,
+        pv["confirmDigest"].as_str().unwrap(),
+        "cli",
+    )
+    .unwrap();
+    assert_eq!(applied["restore"]["outcome"], "partial", "{applied}");
+    assert_eq!(
+        rd("generated/alpha.txt"),
+        "edited by the user\n",
+        "the user's edit was overwritten"
+    );
+    assert!(
+        !env.folder.join("generated/beta.txt").exists(),
+        "the command's untouched file should be gone"
+    );
+    // the formatter's restore returns the original text
+    let fmt_exec = recs
+        .iter()
+        .find(|r| {
+            r["effects"]["modified"]["paths"]
+                .to_string()
+                .contains("fmt/ugly.txt")
+        })
+        .expect("the formatter's record")["executionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pv = ic::exec_restore_preview(&env.sock, &fmt_exec).unwrap();
+    ic::exec_restore_apply(
+        &env.sock,
+        &fmt_exec,
+        pv["confirmDigest"].as_str().unwrap(),
+        "cli",
+    )
+    .unwrap();
+    assert_eq!(rd("fmt/ugly.txt"), "a    b     c\n");
+    // the audit log names who asked
+    let audit = std::fs::read_to_string(env.fx.ddir.join("exec/restore.audit.jsonl")).unwrap();
+    assert!(
+        audit.contains("\"dryRun\":false") && audit.contains("cli:"),
+        "{audit}"
+    );
+    // Git inspection stays read-only and the folder was never turned into a copy
+    assert!(std::fs::read_dir(env.fx.worktrees.join(".direct")).is_ok());
+    env.b.shutdown();
+}
+
+#[test]
+fn m4_revocation_expiry_and_cancellation_end_a_direct_command_and_never_invent_success() {
+    if !sandbox_ready() {
+        return;
+    }
+    for (case, sleep) in [
+        ("revoke", "sleep\x0041"),
+        ("expire", "sleep\x0042"),
+        ("cancel", "sleep\x0043"),
+    ] {
+        let secs = sleep.rsplit('\x00').next().unwrap();
+        let cmd =
+            format!(r#"{{"program":"sh","args":["-c","echo first > first.txt; sleep {secs}"]}}"#);
+        let calls: Vec<(&'static str, String)> = vec![
+            ("proc_run", cmd),
+            (
+                "proc_run",
+                r#"{"program":"sh","args":["-c","echo second > second.txt"]}"#.to_owned(),
+            ),
+        ];
+        let expiry = (case == "expire").then_some(6u64);
+        let env = direct_in_place_env(
+            &format!("m4-{case}"),
+            "auto",
+            None,
+            expiry,
+            &[],
+            move |_| script(calls.clone(), "Done."),
+        );
+        let run = ic::submit(
+            &env.sock,
+            &direct_intent(&env, "go", &format!("m4-{case}-00000001")),
+        )
+        .unwrap()
+        .run;
+        let end = Instant::now() + Duration::from_secs(90);
+        while !running_cmd(sleep) {
+            assert!(
+                Instant::now() < end,
+                "{case}: the command never started: {:?}",
+                ic::status(&env.sock, &run.run_id)
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let t0 = Instant::now();
+        match case {
+            "revoke" => {
+                ic::project_grant_revoke(&env.sock, &env.pid, "desktop").unwrap();
+            }
+            "cancel" => {
+                ic::cancel(&env.sock, &run.run_id).unwrap();
+            }
+            _ => {}
+        }
+        while running_cmd(sleep) && t0.elapsed() < Duration::from_secs(40) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            !running_cmd(sleep),
+            "{case}: the in-flight command survived"
+        );
+        let done = wait_terminal(&env.sock, &run.run_id, 90);
+        assert!(done.terminal, "{case}: {done:?}");
+        // the run may still end with the model's words, but never with a verified-success outcome
+        assert_ne!(
+            done.coding_outcome
+                .as_ref()
+                .map(|o| o.verification.as_str()),
+            Some("verified-passed"),
+            "{case}: a stopped command must not look like success: {done:?}"
+        );
+        assert!(
+            !env.folder.join("second.txt").exists(),
+            "{case}: an operation after the stop ran"
+        );
+        // no rollback: what the command wrote before it was stopped stays, and the record says so
+        assert_eq!(
+            std::fs::read_to_string(env.folder.join("first.txt")).unwrap_or_default(),
+            "first\n",
+            "{case}"
+        );
+        let recs = effects_records(&env.fx);
+        assert_eq!(recs.len(), 1, "{case}");
+        assert_eq!(recs[0]["outcome"], "partial", "{case}: {}", recs[0]);
+        assert!(recs[0]["effects"]["created"]["paths"]
+            .to_string()
+            .contains("first.txt"));
+        // the operator can then take it back, explicitly
+        let exec = recs[0]["executionId"].as_str().unwrap().to_owned();
+        let pv = ic::exec_restore_preview(&env.sock, &exec).unwrap();
+        assert_eq!(pv["restore"]["outcome"], "completed", "{case}: {pv}");
+        ic::exec_restore_apply(
+            &env.sock,
+            &exec,
+            pv["confirmDigest"].as_str().unwrap(),
+            "cli",
+        )
+        .unwrap();
+        assert!(!env.folder.join("first.txt").exists(), "{case}");
+        env.b.shutdown();
+    }
+}
+
+#[test]
+fn m4_ask_holds_every_command_for_a_person_and_a_second_writer_is_refused_while_a_command_runs() {
+    if !sandbox_ready() {
+        return;
+    }
+    // Ask: nothing runs and nothing in the real folder changes until a person decides
+    let calls: Vec<(&'static str, String)> = vec![(
+        "proc_run",
+        r#"{"program":"sh","args":["-c","echo ran > ran.txt"]}"#.to_owned(),
+    )];
+    let env = direct_in_place_env("m4-ask", "ask", None, None, &[], move |_| {
+        script(calls.clone(), "Done.")
+    });
+    let run = ic::submit(&env.sock, &direct_intent(&env, "go", "m4-ask-000000001"))
+        .unwrap()
+        .run;
+    wait_until(90, "the approval to be pending", || {
+        pending_or_any_approval_states(&env.fx)
+            .iter()
+            .any(|s| s == "pending")
+    });
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        !env.folder.join("ran.txt").exists(),
+        "an Ask command ran without a person"
+    );
+    assert!(effects_records(&env.fx).is_empty());
+    ic::cancel(&env.sock, &run.run_id).unwrap();
+    let _ = wait_terminal(&env.sock, &run.run_id, 90);
+    env.b.shutdown();
+    // a second writer on the same folder is refused while a command of the first is running
+    let calls: Vec<(&'static str, String)> = vec![(
+        "proc_run",
+        r#"{"program":"sh","args":["-c","echo busy > busy.txt; sleep 44"]}"#.to_owned(),
+    )];
+    let env = direct_in_place_env("m4-lease", "auto", None, None, &[], move |_| {
+        script(calls.clone(), "Done.")
+    });
+    let first = ic::submit(&env.sock, &direct_intent(&env, "go", "m4-lease-00000001"))
+        .unwrap()
+        .run;
+    wait_until(90, "the command", || running_cmd("sleep\x0044"));
+    let busy = ic::submit(&env.sock, &direct_intent(&env, "also", "m4-lease-00000002"))
+        .expect_err("a second writer");
+    assert!(
+        format!("{busy:?}").contains("editing this project's folder"),
+        "{busy:?}"
+    );
+    ic::cancel(&env.sock, &first.run_id).unwrap();
+    let _ = wait_terminal(&env.sock, &first.run_id, 90);
+    env.b.shutdown();
+}
+
+#[test]
+fn m4_a_daemon_crash_in_a_direct_command_ends_the_tree_keeps_the_effects_and_restore_is_explicit() {
+    if !sandbox_ready() {
+        return;
+    }
+    let calls: Vec<(&'static str, String)> = vec![(
+        "proc_run",
+        r#"{"program":"sh","args":["-c","mkdir -p half && echo partial > half/p.txt; sleep 45"]}"#
+            .to_owned(),
+    )];
+    let mut env = direct_in_place_env("m4-crash", "auto", None, None, &[], move |_| {
+        script(calls.clone(), "never")
+    });
+    let run = ic::submit(&env.sock, &direct_intent(&env, "go", "m4-crash-00000001"))
+        .unwrap()
+        .run;
+    wait_until(90, "the command", || {
+        running_cmd("sleep\x0045") && env.folder.join("half/p.txt").exists()
+    });
+    kill(&mut env.fx.daemon);
+    let gone = Instant::now();
+    while running_cmd("sleep\x0045") && gone.elapsed() < Duration::from_secs(30) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !running_cmd("sleep\x0045"),
+        "the sandbox survived the death of its supervisor"
+    );
+    env.b.shutdown();
+    env.fx.restart_daemon();
+    let b = managed_broker(&env.fx, "m4-crash");
+    let st = wait_terminal(b.socket_path(), &run.run_id, 90);
+    assert!(st.terminal && st.state != "completed", "{st:?}");
+    // never rolled back, never reported as a success
+    assert!(
+        env.folder.join("half/p.txt").exists(),
+        "recovery rolled the folder back by itself"
+    );
+    let recs = effects_records(&env.fx);
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0]["outcome"], "uncertain");
+    assert_eq!(recs[0]["checkpoint"]["status"], "complete");
+    let exec = recs[0]["executionId"].as_str().unwrap().to_owned();
+    // through the operator's CLI: a preview first (nothing changes), then the applied restore
+    let (code, outp) = cli(b.socket_path(), &["exec", "restore", &exec], None);
+    assert_eq!(code, 0, "{outp}");
+    assert!(
+        outp.replace([' ', '\n'], "")
+            .contains("\"outcome\":\"completed\""),
+        "{outp}"
+    );
+    assert!(
+        env.folder.join("half/p.txt").exists(),
+        "a preview changed the folder"
+    );
+    let (code, outp) = cli(
+        b.socket_path(),
+        &["exec", "restore", &exec, "--apply", "--yes"],
+        None,
+    );
+    assert_eq!(code, 0, "{outp}");
+    assert!(!env.folder.join("half/p.txt").exists());
+    let (code, eff) = cli(b.socket_path(), &["exec", "effects", &exec], None);
+    assert_eq!(code, 0, "{eff}");
+    assert!(eff.contains("half/p.txt"), "{eff}");
+    b.shutdown();
+}
+
+#[test]
+fn m4_the_owners_policies_are_consented_bound_to_the_grant_and_out_of_the_models_reach() {
+    if !sandbox_ready() {
+        return;
+    }
+    // required checkpoints: a project whose files exceed the checkpoint budget never gets a command
+    let calls: Vec<(&'static str, String)> = vec![(
+        "proc_run",
+        r#"{"program":"sh","args":["-c","echo ran > ran.txt"]}"#.to_owned(),
+    )];
+    let env = direct_in_place_env(
+        "m4-required",
+        "auto",
+        Some(("required", "protect")),
+        None,
+        &["--checkpoint-max-bytes", "10"],
+        move |_| script(calls.clone(), "Done."),
+    );
+    let g = grant_of(&env.fx, &env.pid);
+    assert_eq!(
+        (g["checkpoint"].as_str(), g["hardLinks"].as_str()),
+        (Some("required"), Some("protect")),
+        "{g}"
+    );
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(&env, "go", "m4-req-000000001"),
+        120,
+    );
+    assert!(
+        !env.folder.join("ran.txt").exists(),
+        "a command ran without the required checkpoint: {run:?}"
+    );
+    assert!(serde_json::to_string(&proc_events_of(&env.fx, &run))
+        .unwrap()
+        .contains("checkpoint-required"));
+    // the hard-link override is a distinct, plainly worded choice in the consent text
+    let pv = ic::project_grant_preview_with(
+        &env.sock,
+        &env.pid,
+        "workspace",
+        "offline",
+        "auto",
+        None,
+        Some(("best-effort", "allow")),
+    )
+    .unwrap();
+    assert!(
+        pv["text"]
+            .as_str()
+            .unwrap()
+            .contains("ALLOW commands to write files that have several hard links"),
+        "{}",
+        pv["text"]
+    );
+    // allowing hard-link writes needs a person at a terminal: `--yes` and pipes cannot give it
+    let (code, outp) = cli(
+        &env.sock,
+        &[
+            "project",
+            "grant",
+            &env.pid,
+            "set",
+            "--fs",
+            "workspace",
+            "--hard-links",
+            "allow",
+            "--yes",
+        ],
+        None,
+    );
+    assert_ne!(code, 0, "{outp}");
+    assert_eq!(
+        grant_of(&env.fx, &env.pid)["hardLinks"],
+        "protect",
+        "the override was stored without a person's confirmation"
+    );
+    // a policy on a scratch grant is meaningless and refused
+    let e = ic::project_grant_preview_with(
+        &env.sock,
+        &env.pid,
+        "scratch",
+        "offline",
+        "auto",
+        None,
+        Some(("required", "protect")),
+    );
+    assert!(e.is_err(), "{e:?}");
+    env.b.shutdown();
 }
 
 // ------------------------------------------------ Standing grants (permissions milestone)
@@ -17938,6 +18554,7 @@ fn perm_a_daemon_that_does_not_honour_grants_refuses_projects_that_have_them() {
         net: "offline".into(),
         approval: "ask".into(),
         expires_at_ms: None,
+        exec: Default::default(),
     };
     nexus_tools::registry::set_grant(
         &reg,

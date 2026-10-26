@@ -1142,6 +1142,9 @@ pub struct EffectsRecord {
     /// the current filesystem with it to find later edits).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub post_state: BTreeMap<String, Rec>,
+    /// Where the time of an in-place execution went (protection scan, observation, checkpoint, launch+run).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub timing_ms: BTreeMap<String, u64>,
     /// Always `temporal`.
     pub attribution: String,
     pub note: String,
@@ -1222,6 +1225,7 @@ pub fn summary(rec: &EffectsRecord, list_max: usize) -> serde_json::Value {
         "outcome": rec.outcome, "outcomeReasons": rec.outcome_reasons,
         "complete": rec.pre.complete && rec.post.as_ref().is_some_and(|p| p.complete),
         "settled": rec.process.settled, "attribution": rec.attribution, "note": rec.note,
+        "timingMs": rec.timing_ms,
         "preDigest": rec.pre.digest, "postDigest": rec.post.as_ref().map(|p| p.digest.clone()),
         "created": l(&e.created), "modified": l(&e.modified), "deleted": l(&e.deleted),
         "createdDirs": l(&e.created_dirs), "deletedDirs": l(&e.deleted_dirs),
@@ -1788,6 +1792,7 @@ mod tests {
             checkpoint: None,
             recoverability: None,
             post_state: Default::default(),
+            timing_ms: Default::default(),
             outcome: "observed".into(),
             outcome_reasons: vec![],
             attribution: "temporal".into(),

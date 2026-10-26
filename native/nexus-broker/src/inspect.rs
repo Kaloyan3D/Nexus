@@ -979,9 +979,17 @@ pub(crate) fn run(
                 external.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
             )
         };
+        // The daemon says whether this task's commands write the real folder in place (an explicit grant);
+        // the harness text is chosen from that fact (it grants nothing).
+        let exec_scope = d
+            .pointer("/direct/execFsScope")
+            .and_then(|v| v.as_str())
+            .filter(|s| *s == "workspace")
+            .map(str::to_owned);
         b.update(run_id, |r| {
             r.workspace_relation = Some("direct".into());
             r.workspace_note = Some(note);
+            r.exec_scope = exec_scope;
         });
     } else if mode == Mode::Code {
         let registry_managed = b.cfg.project_registry.is_some();
@@ -2145,10 +2153,10 @@ fn turn_loop(
             .store
             .load(ctx.run_id)
             .is_some_and(|r| r.run.workspace_kind.as_deref() == Some("direct"));
-        let in_place_cmds = !direct_run
-            && b.store
-                .load(ctx.run_id)
-                .is_some_and(|r| r.run.exec_scope.as_deref() == Some("workspace"));
+        let in_place_cmds = b
+            .store
+            .load(ctx.run_id)
+            .is_some_and(|r| r.run.exec_scope.as_deref() == Some("workspace"));
         let pre = crate::guidance::code_preamble_body_with(&kinds, true, direct_run, in_place_cmds);
         let ro_note = if ro {
             "[READ-ONLY REQUEST] The user asked for no changes. fs_edit and fs_write are refused by the runtime for this request; use fs_list, fs_search and fs_read (and proc_run only to inspect or verify) and answer in text.\n\n"

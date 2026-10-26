@@ -1240,8 +1240,11 @@ impl Broker {
             Some(r) => {
                 let g = |k: &str| r.get(k).and_then(|v| v.as_bool()) == Some(true);
                 let (standing, ask) = (g("standingGrants"), g("approverChannel"));
+                let ip = r.get("inPlaceExecution").cloned().unwrap_or(Value::Null);
                 json!({
                     "known": true, "standingGrants": standing, "askAvailable": standing && ask,
+                    "inPlaceAvailable": ip.get("available").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "inPlaceReason": ip.get("reason").cloned().unwrap_or(Value::Null),
                     "askReason": if !standing { json!("this installation's daemon does not apply per-project permissions") }
                         else if !ask { json!("this installation has no approver channel to answer a request") } else { Value::Null },
                 })
@@ -1282,6 +1285,17 @@ impl Broker {
                         .into(),
                 ));
             }
+            if params.get("fs").and_then(|v| v.as_str()) == Some("workspace")
+                && sup["inPlaceAvailable"] != true
+            {
+                return Err((
+                    "not-available",
+                    format!(
+                        "commands that change the project in place are not available on this machine: {}; nothing was changed",
+                        sup["inPlaceReason"].as_str().unwrap_or("the confinement they need is missing")
+                    ),
+                ));
+            }
             if params.get("approval").and_then(|v| v.as_str()) == Some("ask")
                 && sup["askAvailable"] != true
             {
@@ -1300,6 +1314,53 @@ impl Broker {
             "project-grant-revoke" => crate::projects::grant_revoke(&env, client, id, params),
             _ => crate::projects::grant_clear(&env, client, id, params),
         }
+    }
+
+    /// Evidence and guarded restoration of in-place commands. User clients only (the broker socket is
+    /// uid-gated; the model has no path to it). The broker adds nothing: the daemon decides and audits.
+    fn exec_evidence_verb(&self, client: &str, cmd: &str, params: &Value) -> CmdResult {
+        let id = params
+            .get("executionId")
+            .and_then(|v| v.as_str())
+            .filter(|s| {
+                !s.is_empty()
+                    && s.len() <= 96
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            })
+            .ok_or((
+                "bad-request",
+                "executionId must be an execution id".to_owned(),
+            ))?;
+        let surface: String = params
+            .get("surface")
+            .and_then(|v| v.as_str())
+            .unwrap_or("client")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(12)
+            .collect();
+        let actor = format!("{surface}:{client}");
+        let (dcmd, dparams) = match cmd {
+            "exec-effects" => ("exec-effects", json!({ "executionId": id })),
+            "exec-restore-preview" => (
+                "exec-restore",
+                json!({ "executionId": id, "dryRun": true, "actor": actor }),
+            ),
+            _ => {
+                let confirm = params.get("confirm").and_then(|v| v.as_str()).ok_or((
+                    "bad-request",
+                    "a restore needs the confirmation digest of its preview".to_owned(),
+                ))?;
+                (
+                    "exec-restore",
+                    json!({ "executionId": id, "dryRun": false, "confirm": confirm, "actor": actor }),
+                )
+            }
+        };
+        let r = crate::pipeline::daemon_timeout(self, dcmd, dparams, 600_000)
+            .map_err(|e| ("daemon", format!("{}: {}", e.code, e.message)))?;
+        Ok(r)
     }
 
     /// The consent the user has given (if any) plus the exact text a new consent
@@ -1517,6 +1578,9 @@ impl Broker {
             | "project-grant"
             | "project-grant-revoke"
             | "project-grant-clear" => self.project_grant_verb(client, cmd, params),
+            "exec-effects" | "exec-restore-preview" | "exec-restore" => {
+                self.exec_evidence_verb(client, cmd, params)
+            }
             "project-adopt" => self.project_adopt(client, run_id),
             "provider-consent-status" => self.consent_status(),
             "provider-consent-grant" => self.consent_grant(client, params),

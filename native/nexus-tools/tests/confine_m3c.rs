@@ -99,6 +99,7 @@ fn launch_with(
         src_writable: true,
         pinned_root: Some(mount.root_fd()),
         protect: mount.protect(),
+        fd_ro_binds: mount.fd_ro_binds(),
         net,
         limits: SandboxLimits {
             wall_ms: 60_000,
@@ -449,6 +450,7 @@ fn a_directory_swapped_for_a_link_after_the_scan_is_caught_before_the_command_ru
         src_writable: true,
         pinned_root: Some(mount.root_fd()),
         protect: mount.protect(),
+        fd_ro_binds: mount.fd_ro_binds(),
         net: false,
         limits: SandboxLimits {
             wall_ms: 30_000,
@@ -502,6 +504,7 @@ fn an_entry_that_disappears_between_the_scan_and_the_launch_never_exposes_anythi
         src_writable: true,
         pinned_root: Some(mount.root_fd()),
         protect: mount.protect(),
+        fd_ro_binds: mount.fd_ro_binds(),
         net: false,
         limits: SandboxLimits {
             wall_ms: 30_000,
@@ -581,6 +584,7 @@ fn the_mounted_workspace_is_the_pinned_object_even_after_the_path_is_replaced() 
         src_writable: true,
         pinned_root: Some(mount.root_fd()),
         protect: mount.protect(),
+        fd_ro_binds: mount.fd_ro_binds(),
         net: false,
         limits: SandboxLimits {
             wall_ms: 30_000,
@@ -924,4 +928,335 @@ fn bench_confinement() {
         };
         println!("BENCH mount-prepare {name}: entries examined {ex}, scan median {} ms; whole launch of `true` (scan + mounts + gate + run) {} ms", median(&mut ts) / 1000, full);
     }
+}
+
+// ------------------------------------------------------------------------------------ M4A layouts
+
+fn git_ok(dir: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .current_dir(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "init.defaultBranch=main",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "protocol.file.allow=always",
+        ])
+        .args(args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn wt_opts() -> PrepareOptions {
+    PrepareOptions {
+        git_worktree: true,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn submodules_and_nested_repositories_are_read_only_and_git_still_reads_them() {
+    if !ready("submodule") || !Path::new("/usr/bin/git").exists() {
+        return;
+    }
+    let lib = world(&[("lib.txt", "library\n")]);
+    assert!(
+        git_ok(&lib.root, &["init", "-q"])
+            && git_ok(&lib.root, &["add", "-A"])
+            && git_ok(&lib.root, &["commit", "-q", "-m", "lib"])
+    );
+    let w = world(&[("main.txt", "main\n")]);
+    assert!(git_ok(&w.root, &["init", "-q"]));
+    assert!(
+        git_ok(
+            &w.root,
+            &[
+                "submodule",
+                "add",
+                "-q",
+                lib.root.to_str().unwrap(),
+                "vendor/lib"
+            ]
+        ),
+        "submodule add failed"
+    );
+    assert!(git_ok(&w.root, &["add", "-A"]) && git_ok(&w.root, &["commit", "-q", "-m", "main"]));
+    let m = inplace::prepare(&w.ws).unwrap();
+    let ro = m.summary["readOnly"].to_string();
+    assert!(
+        ro.contains("vendor/lib/.git"),
+        "the submodule's .git file must be read-only: {ro}"
+    );
+    let o = launch(
+        &w,
+        "git -c safe.directory='*' submodule status | head -2; git -c safe.directory='*' log --oneline | head -1; \
+         cat vendor/lib/lib.txt; echo tamper > vendor/lib/.git; echo subgit-rc=$?; echo ok >> vendor/lib/lib.txt; echo sublib-rc=$?; \
+         echo '[core]' >> .git/modules/vendor/lib/config; echo modcfg-rc=$?",
+    )
+    .expect("run");
+    let t = text(&o);
+    assert!(t.contains("library") && t.contains("main"), "{t}");
+    assert!(
+        t.contains("subgit-rc=1") && t.contains("modcfg-rc=1"),
+        "{t}"
+    );
+    assert!(
+        t.contains("sublib-rc=0"),
+        "ordinary submodule files stay writable: {t}"
+    );
+}
+
+#[test]
+fn a_linked_worktree_gets_its_git_metadata_read_only_only_when_the_owner_allows_it() {
+    if !ready("worktree-meta") || !Path::new("/usr/bin/git").exists() {
+        return;
+    }
+    let main = world(&[("a.txt", "a\n")]);
+    assert!(
+        git_ok(&main.root, &["init", "-q"])
+            && git_ok(&main.root, &["add", "-A"])
+            && git_ok(&main.root, &["commit", "-q", "-m", "first"])
+    );
+    let wt = main.root.with_file_name("wt");
+    assert!(git_ok(
+        &main.root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            wt.to_str().unwrap(),
+            "-b",
+            "feature"
+        ]
+    ));
+    let ws = Workspace::open_root(wt.to_str().unwrap(), WorkspacePolicy::default()).unwrap();
+    let w = W {
+        _t: tempfile::tempdir().unwrap(),
+        root: wt.clone(),
+        ws,
+    };
+    let probe = "git -c safe.directory='*' log --oneline 2>&1 | head -2; git -c safe.directory='*' status --short 2>&1 | head -2; \
+                 echo x >> .git/../x.txt; echo hooks > \"$(sed 's/gitdir: //' .git)/hooks-test\" 2>/dev/null; echo write-rc=$?";
+    // default (off): the main repository's .git is NOT mounted, git fails closed
+    let off = launch(&w, probe).expect("run");
+    assert!(
+        text(&off).contains("not a git repository") || text(&off).contains("fatal"),
+        "{}",
+        text(&off)
+    );
+    // allowed: verified and mounted read-only
+    let on = launch_with(&w, &wt_opts(), false, probe, |_| {}).expect("run");
+    let t = text(&on);
+    assert!(
+        t.contains("first"),
+        "git log must work with the verified metadata: {t}"
+    );
+    assert!(
+        t.contains("write-rc=1") || t.contains("write-rc=2"),
+        "the metadata must be read-only: {t}"
+    );
+    let m = inplace::prepare_with(&w.ws, &wt_opts()).unwrap();
+    assert_eq!(m.summary["git"]["kind"], "linked-worktree-file");
+    assert_eq!(
+        m.summary["git"]["externalGitDir"],
+        main.root.join(".git").to_string_lossy().as_ref()
+    );
+    assert!(!main
+        .root
+        .join(".git/worktrees")
+        .join("wt")
+        .join("hooks-test")
+        .exists());
+}
+
+#[test]
+fn forged_or_unsafe_git_pointers_are_never_mounted_even_when_the_owner_allows_worktrees() {
+    if !ready("forged") {
+        return;
+    }
+    let secret_repo = tempfile::tempdir().unwrap();
+    let sr = std::fs::canonicalize(secret_repo.path()).unwrap();
+    // a real-looking layout that does NOT point back at the victim worktree
+    std::fs::create_dir_all(sr.join(".git/worktrees/x")).unwrap();
+    std::fs::write(sr.join(".git/worktrees/x/gitdir"), "/somewhere/else/.git\n").unwrap();
+    std::fs::write(sr.join(".git/SECRET"), "REPOSECRET\n").unwrap();
+    let cases: Vec<(&str, String)> = vec![
+        (
+            "back-pointer mismatch",
+            format!("gitdir: {}/.git/worktrees/x\n", sr.display()),
+        ),
+        ("the home of the user", "gitdir: /home\n".into()),
+        ("not absolute", "gitdir: ../elsewhere\n".into()),
+        (
+            "a path with a link in it",
+            format!("gitdir: {}/.git/../.git/worktrees/x\n", sr.display()),
+        ),
+        ("wrong layout", format!("gitdir: {}/.git\n", sr.display())),
+        ("nonsense", "gitdir:\n".into()),
+    ];
+    for (name, content) in cases {
+        let w = world(&[("a.txt", "a\n")]);
+        std::fs::write(w.root.join(".git"), content).unwrap();
+        let m = inplace::prepare_with(&w.ws, &wt_opts()).unwrap();
+        let note = m.summary["git"]["externalGitDir"].to_string();
+        assert!(note.contains("not mounted"), "{name}: {note}");
+        let o = launch_with(
+            &w,
+            &wt_opts(),
+            false,
+            &format!(
+                "cat {}/.git/SECRET 2>&1; ls /home 2>&1 | head -1",
+                sr.display()
+            ),
+            |_| {},
+        )
+        .expect("run");
+        assert!(
+            !text(&o).contains("REPOSECRET"),
+            "{name}: the forged pointer exposed a repository: {}",
+            text(&o)
+        );
+    }
+    // a symlink in place of the .git file is never followed
+    let w = world(&[("a.txt", "a\n")]);
+    std::os::unix::fs::symlink(sr.join(".git"), w.root.join(".git")).unwrap();
+    let o = launch_with(
+        &w,
+        &wt_opts(),
+        false,
+        &format!(
+            "cat {}/.git/SECRET 2>&1; cat .git/SECRET 2>&1",
+            sr.display()
+        ),
+        |_| {},
+    )
+    .expect("run");
+    assert!(!text(&o).contains("REPOSECRET"), "{}", text(&o));
+}
+
+#[test]
+fn symlinks_in_the_project_never_lead_out_of_it() {
+    if !ready("symlinks") {
+        return;
+    }
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("host.txt"), "HOSTONLY\n").unwrap();
+    let w = world(&[("real/inner.txt", "inner\n")]);
+    use std::os::unix::fs::symlink;
+    symlink(outside.path(), w.root.join("to-outside-dir")).unwrap();
+    symlink(
+        outside.path().join("host.txt"),
+        w.root.join("to-outside-file"),
+    )
+    .unwrap();
+    symlink("/etc/passwd", w.root.join("to-etc")).unwrap();
+    symlink("real", w.root.join("inside-link")).unwrap();
+    symlink("loop-b", w.root.join("loop-a")).unwrap();
+    symlink("loop-a", w.root.join("loop-b")).unwrap();
+    symlink("does-not-exist", w.root.join("dangling")).unwrap();
+    let o = launch(
+        &w,
+        "cat to-outside-file 2>&1 | head -1; cat to-outside-dir/host.txt 2>&1 | head -1; cat to-etc 2>&1 | head -1; cat inside-link/inner.txt; \
+         cat loop-a 2>&1 | head -1; cat dangling 2>&1 | head -1; ln -s /etc/shadow made-link; ls -l made-link | wc -l; echo done",
+    )
+    .expect("run");
+    let t = text(&o);
+    assert!(
+        !t.contains("HOSTONLY") && !t.contains("root:x:0"),
+        "a link led out of the project: {t}"
+    );
+    assert!(t.contains("inner") && t.contains("done"), "{t}");
+}
+
+#[test]
+fn the_launch_works_on_each_filesystem_available_here() {
+    if !ready("filesystems") {
+        return;
+    }
+    // tmpfs (the system temp dir here) and the user's home filesystem (btrfs on this machine)
+    let mut bases: Vec<PathBuf> = vec![std::env::temp_dir()];
+    if let Some(h) = std::env::var_os("HOME") {
+        let p = PathBuf::from(h).join(".cache");
+        if p.is_dir() {
+            bases.push(p);
+        }
+    }
+    for base in bases {
+        let t = tempfile::tempdir_in(&base).unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap().join("proj");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.txt"), "a\n").unwrap();
+        std::fs::write(root.join(".env"), "S=1\n").unwrap();
+        let ws = Workspace::open_root(root.to_str().unwrap(), WorkspacePolicy::default()).unwrap();
+        let w = W {
+            _t: t,
+            root: root.clone(),
+            ws,
+        };
+        let o = launch(&w, "cat .env 2>&1 | head -1; echo new > src/b.txt && cat src/b.txt && mkdir -p out/deep && echo z > out/deep/z.txt").expect("run");
+        let tx = text(&o);
+        assert!(
+            !tx.contains("S=1") && tx.contains("new"),
+            "{}: {tx}",
+            base.display()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("out/deep/z.txt")).unwrap(),
+            "z\n"
+        );
+    }
+}
+
+/// A bind mount below the project root, made in a real (unprivileged) mount namespace: refused with a reason.
+#[test]
+fn a_bind_mount_inside_the_project_is_refused_with_an_actionable_reason() {
+    if std::env::var("NEXUS_M4_INNER").is_ok() {
+        let root = PathBuf::from(std::env::var("NEXUS_M4_ROOT").unwrap());
+        let ws = Workspace::open_root(root.to_str().unwrap(), WorkspacePolicy::default()).unwrap();
+        let e = inplace::prepare(&ws).unwrap_err();
+        assert!(
+            e.message
+                .contains("a mount exists below the workspace root"),
+            "{}",
+            e.message
+        );
+        return;
+    }
+    if !ready("bindmount")
+        || std::process::Command::new("unshare")
+            .arg("-rm")
+            .arg("true")
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(true)
+    {
+        println!("NOT RUN (bindmount): unprivileged mount namespaces are unavailable");
+        return;
+    }
+    let w = world(&[("a.txt", "a\n"), ("sub/keep.txt", "k\n")]);
+    let other = tempfile::tempdir().unwrap();
+    std::fs::write(other.path().join("exposed.txt"), "EXPOSED\n").unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let st = std::process::Command::new("unshare")
+        .args(["-rm", "sh", "-c"])
+        .arg(format!(
+            "mount --bind '{}' '{}/sub' && exec '{}' --exact a_bind_mount_inside_the_project_is_refused_with_an_actionable_reason --nocapture",
+            other.path().display(),
+            w.root.display(),
+            exe.display()
+        ))
+        .env("NEXUS_M4_INNER", "1")
+        .env("NEXUS_M4_ROOT", &w.root)
+        .status()
+        .unwrap();
+    assert!(
+        st.success(),
+        "the refusal was not produced inside the mount namespace"
+    );
 }

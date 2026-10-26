@@ -44,6 +44,69 @@ pub fn gerr(code: &'static str, m: impl Into<String>) -> GrantError {
     }
 }
 
+/// How an in-place command is protected beyond confinement (M4). Chosen by the user together with the
+/// grant; part of the grant digest only when it differs from the defaults, so existing grants keep theirs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecPolicy {
+    /// `off` | `best-effort` (default, owner decision D4) | `required` (refuse a command without a complete checkpoint).
+    pub checkpoint: String,
+    /// `protect` (default: hard-linked files are read-only for the command) | `allow` (owner-only override).
+    pub hard_links: String,
+    /// `off` (default) | `read-only`: bind the verified main git directory of a linked worktree read-only.
+    #[serde(default = "off_str")]
+    pub git_worktree: String,
+}
+
+fn off_str() -> String {
+    "off".into()
+}
+
+impl Default for ExecPolicy {
+    fn default() -> Self {
+        Self {
+            checkpoint: "best-effort".into(),
+            hard_links: "protect".into(),
+            git_worktree: "off".into(),
+        }
+    }
+}
+
+impl ExecPolicy {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn validate(&self) -> Result<(), GrantError> {
+        if !matches!(self.checkpoint.as_str(), "off" | "best-effort" | "required") {
+            return Err(gerr(
+                "bad-grant",
+                "checkpoint policy must be off, best-effort or required",
+            ));
+        }
+        if !matches!(self.hard_links.as_str(), "protect" | "allow") {
+            return Err(gerr(
+                "bad-grant",
+                "hard-link policy must be protect or allow",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn checkpoint_mode(&self) -> crate::checkpoint::Mode {
+        // an unreadable value is the strictest
+        crate::checkpoint::Mode::parse(&self.checkpoint)
+            .unwrap_or(crate::checkpoint::Mode::Required)
+    }
+
+    pub fn hard_link_policy(&self) -> crate::inplace::HardLinks {
+        match self.hard_links.as_str() {
+            "allow" => crate::inplace::HardLinks::Allow,
+            _ => crate::inplace::HardLinks::Protect,
+        }
+    }
+}
+
 /// What the user chose (before it becomes a versioned grant).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantSpec {
@@ -51,6 +114,7 @@ pub struct GrantSpec {
     pub net: String,
     pub approval: String,
     pub expires_at_ms: Option<i64>,
+    pub exec: ExecPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +132,8 @@ pub struct StandingGrant {
     pub created_by: String,
     /// Digest of the exact consent text the user was shown.
     pub consent_sha256: String,
+    #[serde(default, skip_serializing_if = "ExecPolicy::is_default")]
+    pub exec: ExecPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +188,8 @@ pub struct Frozen {
     pub approval: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "ExecPolicy::is_default")]
+    pub exec: ExecPolicy,
 }
 
 impl Frozen {
@@ -140,7 +208,7 @@ impl Frozen {
 impl StandingGrant {
     /// Digest of everything that defines what the grant allows.
     pub fn digest(&self, project_id: &str) -> String {
-        let v = serde_json::json!({
+        let mut v = serde_json::json!({
             "schema": GRANT_SCHEMA,
             "projectId": project_id,
             "grantId": self.grant_id,
@@ -150,6 +218,12 @@ impl StandingGrant {
             "approval": self.approval,
             "expiresAtMs": self.expires_at_ms,
         });
+        if !self.exec.is_default() {
+            v["exec"] = serde_json::json!({"checkpoint": self.exec.checkpoint, "hardLinks": self.exec.hard_links});
+            if self.exec.git_worktree != "off" {
+                v["exec"]["gitWorktree"] = self.exec.git_worktree.clone().into();
+            }
+        }
         hex::encode(Sha256::digest(
             nexus_contracts::canonical_json(&v).as_bytes(),
         ))
@@ -164,6 +238,7 @@ impl StandingGrant {
             net: self.net.clone(),
             approval: self.approval.clone(),
             expires_at_ms: self.expires_at_ms,
+            exec: self.exec.clone(),
         }
     }
 }
@@ -227,10 +302,12 @@ pub fn validate_spec(
     };
     let approval = Approval::parse(&spec.approval)
         .ok_or_else(|| gerr("bad-grant", "approval must be ask or auto"))?;
-    if fs == FsScope::Workspace && project_is_direct {
+    let _ = project_is_direct;
+    spec.exec.validate()?;
+    if fs != FsScope::Workspace && !spec.exec.is_default() {
         return Err(gerr(
-            "not-available",
-            "commands that change your real folder directly are not available yet; use the isolated workspace for the workspace scope",
+            "bad-grant",
+            "checkpoint and hard-link policies apply to commands that change the project in place (filesystem scope: workspace)",
         ));
     }
     if let Some(e) = spec.expires_at_ms {
@@ -249,7 +326,13 @@ pub fn validate_spec(
 
 /// The exact words the user is shown before a grant is stored; the digest of this text is recorded.
 pub fn consent_text(project_label: &str, spec: &GrantSpec) -> String {
+    consent_text_for(project_label, spec, false)
+}
+
+/// As [`consent_text`], truthful about a project that edits its REAL folder (`direct`).
+pub fn consent_text_for(project_label: &str, spec: &GrantSpec, direct: bool) -> String {
     let fs = match spec.fs.as_str() {
+        "workspace" if direct => "Commands Nexus runs for this project (builds, tests, formatters, code generators, dependency installs) run in your REAL project folder, with no copy and no patch to apply: files they create, change or delete are changed on disk immediately, together with the files Nexus edits itself. They cannot see or change anything outside the project. `.git` is read-only (Nexus cannot commit, change hooks or configuration), secret-shaped files, sockets and similar entries are hidden from commands, and files with several hard links are read-only unless you allow otherwise below.",
         "workspace" => "Commands Nexus runs for this project (builds, tests, formatters, code generators, dependency installs) change the task's working copy directly: what they create or modify stays there and becomes part of the patch you review. They cannot see or change anything outside the project.",
         _ => "Commands Nexus runs for this project work on a throw-away copy; whatever they write is discarded (edits are made with Nexus's own file tools).",
     };
@@ -267,8 +350,28 @@ pub fn consent_text(project_label: &str, spec: &GrantSpec) -> String {
         Some(_) => "This permission expires automatically.",
         None => "This permission does not expire until you revoke it.",
     };
+    let mut extra = String::new();
+    if spec.fs == "workspace" && (direct || !spec.exec.is_default()) {
+        let ck = match spec.exec.checkpoint.as_str() {
+            "required" => "Before every command Nexus must save a complete checkpoint of your project files; if it cannot, the command does not run.",
+            "off" => "No checkpoint is taken before commands: what a command changes cannot be restored by Nexus.",
+            _ => "Before every command Nexus tries to save a checkpoint of your project files. If it cannot (very large files, little disk space, files that change while it copies), the command still runs and the result says exactly what could not be restored.",
+        };
+        let hl = match spec.exec.hard_links.as_str() {
+            "allow" => "You ALLOW commands to write files that have several hard links: a write through the project name also changes every other name of that file, including names outside the project.",
+            _ => "Files that have several hard links are read-only for commands, so a command cannot change content that is also reachable from outside the project.",
+        };
+        let gw = if spec.exec.git_worktree == "read-only" {
+            "\n• Git worktree: if the project folder is a linked Git worktree, the main repository's .git directory (history, configuration, hooks) is made READABLE to commands, read-only, after Nexus verified that it really belongs to this worktree."
+        } else {
+            ""
+        };
+        extra = format!(
+            "\n• Recovery: {ck}\n• Hard links: {hl}{gw}\n• Limits you should know: a checkpoint is not an atomic snapshot and does not cover dependency or build folders (node_modules, target, ...), .git, or secret-shaped files; a command's effect on the outside world (network installs, other tools) cannot be undone; restoring is an explicit action you take, and files you changed afterwards are never overwritten."
+        );
+    }
     format!(
-        "Permissions for \"{project_label}\".\n\n• Filesystem: {fs}\n• Network: {net}\n• Approval: {ap}\n• {exp}\n• Changing these permissions affects NEW tasks. A task that is already running never gains anything; if you narrow them it follows from its next operation; if you revoke them it stops, including a command in progress.\n• Nexus never commits, pushes, merges or deploys, and no model request can create, widen or renew this permission."
+        "Permissions for \"{project_label}\".\n\n• Filesystem: {fs}\n• Network: {net}\n• Approval: {ap}\n• {exp}{extra}\n• Changing these permissions affects NEW tasks. A task that is already running never gains anything; if you narrow them it follows from its next operation; if you revoke them it stops, including a command in progress.\n• Nexus never commits, pushes, merges or deploys, and no model request can create, widen or renew this permission."
     )
 }
 
@@ -297,6 +400,21 @@ pub fn narrowed(frozen: &Frozen, current: &StandingGrant) -> Frozen {
     if rank_net(&current.net) < rank_net(&f.net) {
         f.net = current.net.clone();
     }
+    // checkpoint: required > best-effort > off; hard links: protect > allow
+    let rank_ck = |s: &str| match s {
+        "off" => 0,
+        "best-effort" => 1,
+        _ => 2,
+    };
+    if rank_ck(&current.exec.checkpoint) > rank_ck(&f.exec.checkpoint) {
+        f.exec.checkpoint = current.exec.checkpoint.clone();
+    }
+    if current.exec.hard_links != "allow" {
+        f.exec.hard_links = "protect".into();
+    }
+    if current.exec.git_worktree == "off" {
+        f.exec.git_worktree = "off".into();
+    }
     // "ask" is the stricter approval behaviour; an unreadable value counts as ask
     if f.approval != "ask" && current.approval != "auto" {
         f.approval = "ask".into();
@@ -318,6 +436,7 @@ mod tests {
             net: net.into(),
             approval: ap.into(),
             expires_at_ms: exp,
+            exec: Default::default(),
         }
     }
 
@@ -332,6 +451,7 @@ mod tests {
             expires_at_ms: Some(10_000),
             created_by: "cli:uid:1".into(),
             consent_sha256: "x".into(),
+            exec: Default::default(),
         }
     }
 
@@ -352,7 +472,7 @@ mod tests {
         assert!(validate_spec(&spec("workspace", "install", "ask", None), false, 0).is_ok());
         assert!(validate_spec(&spec("scratch", "offline", "maybe", None), false, 0).is_err());
         // in-place commands over a user's real folder do not exist yet
-        assert!(validate_spec(&spec("workspace", "offline", "auto", None), true, 0).is_err());
+        assert!(validate_spec(&spec("workspace", "offline", "auto", None), true, 0).is_ok());
         assert!(validate_spec(&spec("scratch", "offline", "auto", None), true, 0).is_ok());
     }
 
@@ -464,5 +584,121 @@ mod tests {
         assert_eq!(f.approval_mode(), Approval::Ask);
         f.fs = "full".into();
         assert_eq!(f.fs_scope(), FsScope::Full); // parse keeps it visible; execution refuses it
+    }
+
+    #[test]
+    fn the_execution_policy_is_part_of_the_digest_only_when_it_is_not_the_default() {
+        let a = g();
+        let legacy = {
+            let v = serde_json::json!({
+                "schema": GRANT_SCHEMA, "projectId": "p", "grantId": a.grant_id, "version": a.version,
+                "fs": a.fs, "net": a.net, "approval": a.approval, "expiresAtMs": a.expires_at_ms,
+            });
+            hex::encode(Sha256::digest(
+                nexus_contracts::canonical_json(&v).as_bytes(),
+            ))
+        };
+        assert_eq!(
+            a.digest("p"),
+            legacy,
+            "existing grants must keep their digest"
+        );
+        for (c, h, w) in [
+            ("required", "protect", "off"),
+            ("best-effort", "allow", "off"),
+            ("off", "protect", "off"),
+            ("best-effort", "protect", "read-only"),
+        ] {
+            let mut b = g();
+            b.exec = ExecPolicy {
+                checkpoint: c.into(),
+                hard_links: h.into(),
+                git_worktree: w.into(),
+            };
+            assert_ne!(b.digest("p"), legacy, "{c} {h} {w}");
+        }
+    }
+
+    #[test]
+    fn a_running_task_can_only_lose_recovery_and_protection_settings_never_gain_them() {
+        let mut frozen = g().frozen("p");
+        frozen.exec = ExecPolicy {
+            checkpoint: "best-effort".into(),
+            hard_links: "allow".into(),
+            git_worktree: "read-only".into(),
+        };
+        let mut cur = g();
+        cur.exec = ExecPolicy {
+            checkpoint: "required".into(),
+            hard_links: "protect".into(),
+            git_worktree: "off".into(),
+        };
+        let n = narrowed(&frozen, &cur);
+        assert_eq!(
+            (
+                n.exec.checkpoint.as_str(),
+                n.exec.hard_links.as_str(),
+                n.exec.git_worktree.as_str()
+            ),
+            ("required", "protect", "off")
+        );
+        // a later, looser setting never reaches a task that froze a stricter one
+        let mut strict = g().frozen("p");
+        strict.exec = ExecPolicy {
+            checkpoint: "required".into(),
+            hard_links: "protect".into(),
+            git_worktree: "off".into(),
+        };
+        let mut loose = g();
+        loose.exec = ExecPolicy {
+            checkpoint: "off".into(),
+            hard_links: "allow".into(),
+            git_worktree: "read-only".into(),
+        };
+        let n = narrowed(&strict, &loose);
+        assert_eq!(
+            (
+                n.exec.checkpoint.as_str(),
+                n.exec.hard_links.as_str(),
+                n.exec.git_worktree.as_str()
+            ),
+            ("required", "protect", "off")
+        );
+    }
+
+    #[test]
+    fn the_consent_text_for_a_real_folder_names_the_real_folder_and_each_limit() {
+        let mut sp = spec("workspace", "offline", "auto", None);
+        let t = consent_text_for("proj", &sp, true);
+        for must in [
+            "REAL project folder",
+            "immediately",
+            ".git` is read-only",
+            "not an atomic snapshot",
+            "Before every command Nexus tries",
+        ] {
+            assert!(t.contains(must), "{must}: {t}");
+        }
+        sp.exec = ExecPolicy {
+            checkpoint: "required".into(),
+            hard_links: "allow".into(),
+            git_worktree: "read-only".into(),
+        };
+        let t = consent_text_for("proj", &sp, true);
+        assert!(
+            t.contains("must save a complete checkpoint")
+                && t.contains("ALLOW commands to write files that have several hard links")
+                && t.contains("Git worktree"),
+            "{t}"
+        );
+        // isolated copies keep their historical wording
+        assert!(
+            !consent_text("proj", &spec("workspace", "offline", "auto", None))
+                .contains("REAL project folder")
+        );
+        // scratch grants cannot carry policies
+        let mut bad = spec("scratch", "offline", "auto", None);
+        bad.exec.checkpoint = "required".into();
+        assert!(validate_spec(&bad, false, 0).is_err());
     }
 }

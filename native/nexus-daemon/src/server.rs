@@ -1507,6 +1507,9 @@ fn evaluate_autonomous_policy(
                 return Err("the operation's filesystem scope is not this task's".into());
             }
             let expected_write_back = match task_scope {
+                nexus_tools::exec_contract::FsScope::Workspace if direct => {
+                    "in-place-project-folder"
+                }
                 nexus_tools::exec_contract::FsScope::Workspace => "in-place-task-copy",
                 _ => "none",
             };
@@ -1784,8 +1787,15 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             op["execFsScope"] = "workspace".into();
             op["sandbox"]["workspace"] =
                 "the task's disposable working copy, read-write in place".into();
-            op["sandbox"]["writeBack"] = "in-place-task-copy".into();
-            op["filesystemEffects"] = "files the command creates, changes or deletes persist in this task's working copy (not the user's folder); .git is read-only; secret-shaped top-level entries are hidden".into();
+            if direct_meta(daemon, &request.task_instance_id).is_some() {
+                op["sandbox"]["workspace"] =
+                    "the user's real project folder, read-write in place".into();
+                op["sandbox"]["writeBack"] = "in-place-project-folder".into();
+                op["filesystemEffects"] = "files the command creates, changes or deletes are changed in the user's REAL project folder immediately; .git is read-only; secret-shaped entries, sockets and hard-linked files are protected; a checkpoint is taken first under the project's policy".into();
+            } else {
+                op["sandbox"]["writeBack"] = "in-place-task-copy".into();
+                op["filesystemEffects"] = "files the command creates, changes or deletes persist in this task's working copy (not the user's folder); .git is read-only; secret-shaped top-level entries are hidden".into();
+            }
         }
         if let Some(g) = &frozen {
             op["grant"] = grant_declaration(g);
@@ -2323,6 +2333,19 @@ impl nexus_tools::process::ProcessHooks for DaemonProcessHooks<'_> {
             );
         }
     }
+    fn exec_policy(&mut self) -> Option<nexus_tools::grant::ExecPolicy> {
+        // the owner's policy as this task holds it NOW (frozen at creation, only ever narrowed)
+        match grant_may_act(self.daemon, &self.task) {
+            Ok(Some(f)) => Some(f.exec),
+            // a task without a grant uses the daemon-wide defaults; an unreadable grant is the strictest
+            Ok(None) => None,
+            Err(_) => Some(nexus_tools::grant::ExecPolicy {
+                checkpoint: "required".into(),
+                hard_links: "protect".into(),
+                git_worktree: "off".into(),
+            }),
+        }
+    }
     fn fence(&mut self) -> Result<(), nexus_tools::ToolError> {
         let k = self.daemon.kernel.lock().map_err(|_| {
             nexus_tools::ToolError::new(
@@ -2857,7 +2880,15 @@ fn task_fs_scope(daemon: &Daemon, task: &str) -> nexus_tools::exec_contract::FsS
         return FsScope::Scratch;
     };
     if meta.get("kind").and_then(|v| v.as_str()) == Some("direct") {
-        // Direct + in-place execution is a later stage; it is never inferred.
+        // Direct + in-place execution only under an explicit standing grant whose filesystem axis is
+        // `workspace` (frozen into the task and re-checked now); never inferred from `execFsScope` or a
+        // request.
+        if meta.get("grant").is_some_and(|g| !g.is_null()) {
+            return match grant_may_act(daemon, task) {
+                Ok(Some(g)) if g.fs == "workspace" => FsScope::Workspace,
+                _ => FsScope::Scratch,
+            };
+        }
         return FsScope::Scratch;
     }
     // a task that holds a standing grant runs under the grant's filesystem scope - the stricter of what it
@@ -3062,17 +3093,43 @@ fn do_direct_open(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             return fail(&req.id, code, msg);
         }
     };
-    if task_permissions
+    let direct_in_place = task_permissions
         .as_ref()
-        .is_some_and(|g| g.fs_scope() != nexus_tools::exec_contract::FsScope::Scratch)
-    {
-        // Commands over the user's REAL folder are not implemented; never inferred from a grant.
-        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
-        return fail(
-            &req.id,
-            "scope-refused",
-            "in-place commands in the direct workspace are not available yet; nothing was started",
-        );
+        .is_some_and(|g| g.fs_scope() == nexus_tools::exec_contract::FsScope::Workspace);
+    if direct_in_place {
+        // Commands over the user's REAL folder need the full confinement stack; check it NOW so that a
+        // machine that cannot provide it refuses the task instead of failing every command later.
+        let c = nexus_tools::sandbox::preflight();
+        let mut missing: Vec<String> = Vec::new();
+        if !c.available {
+            missing.push(format!("the sandbox ({})", c.problems.join("; ")));
+        }
+        if !c
+            .landlock_abi
+            .is_some_and(|a| a >= nexus_tools::confine::MIN_ABI)
+        {
+            missing.push(format!(
+                "kernel confinement (Landlock ABI {} or newer; this kernel: {})",
+                nexus_tools::confine::MIN_ABI,
+                c.landlock_abi
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "none".into())
+            ));
+        }
+        if !c.launch_gate {
+            missing.push("the launch gate `nexus-confine` (it must sit next to nexusd)".into());
+        }
+        if !missing.is_empty() {
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                "scope-refused",
+                format!(
+                    "this project's permissions let commands change your real folder, but this machine cannot provide: {}; nothing was started and no weaker mode was used",
+                    missing.join(", ")
+                ),
+            );
+        }
     }
     let mut forbidden = vec![root.clone(), daemon.run_root.clone(), dir.clone()];
     if let Some(e) = &daemon.project_envs {
@@ -3155,6 +3212,7 @@ fn do_direct_open(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                 "path": canon_s,
                 "externalChanges": external,
                 "fromRecorded": from_known,
+                "execFsScope": if direct_in_place { "workspace" } else { "scratch" },
             }
         }),
     )
@@ -3423,10 +3481,50 @@ fn do_exec_effects(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     }
 }
 
+/// Can this machine run commands IN PLACE (over a working copy or the real folder)? The answer names the
+/// first thing that is missing, so a user sees an actionable reason instead of a failing command.
+fn in_place_availability(daemon: &Daemon) -> serde_json::Value {
+    let reason = (|| -> Option<String> {
+        if !daemon.process_enabled {
+            return Some("this daemon does not run commands (--enable-process)".into());
+        }
+        let c = daemon.sandbox_caps.as_ref()?;
+        if !c.available {
+            return Some(format!(
+                "the sandbox is unavailable: {}",
+                c.problems.join("; ")
+            ));
+        }
+        match c.landlock_abi {
+            None => return Some("this kernel has no Landlock; in-place commands need Linux 5.19 or newer with Landlock enabled".into()),
+            Some(a) if a < nexus_tools::confine::MIN_ABI => {
+                return Some(format!("Landlock ABI {a} is older than the required {}", nexus_tools::confine::MIN_ABI))
+            }
+            _ => {}
+        }
+        match nexus_tools::confine_host::locate_shim() {
+            None => Some(
+                "the launch gate `nexus-confine` was not found next to nexusd; reinstall Nexus"
+                    .into(),
+            ),
+            Some(p) => nexus_tools::confine_host::shim_is_trustworthy(&p).err(),
+        }
+    })();
+    serde_json::json!({ "available": reason.is_none(), "reason": reason })
+}
+
 /// Guarded restoration of the files an observed in-place command changed (operator action; the model has no
 /// path to it). Refused while the task still has a process open. Never invoked by recovery.
+///
+/// Two steps: a dry run returns the exact report and its `confirmDigest`; applying requires that digest
+/// back, recomputed from the CURRENT state, so anything that changed since the preview (a user edit, another
+/// restore) invalidates the confirmation. Every request is appended to `restore.audit.jsonl`.
 fn do_exec_restore(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
-    if let Err(r) = only_keys(&req.params, &["executionId", "dryRun"], &req.id) {
+    if let Err(r) = only_keys(
+        &req.params,
+        &["executionId", "dryRun", "confirm", "actor"],
+        &req.id,
+    ) {
         return r;
     }
     let id = match get_string(&req.params, "executionId") {
@@ -3438,6 +3536,15 @@ fn do_exec_restore(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         .get("dryRun")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let actor: String = req
+        .params
+        .get("actor")
+        .and_then(|v| v.as_str())
+        .unwrap_or("operator")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_'))
+        .take(48)
+        .collect();
     let eff = nexus_tools::observe::effects_dir(&daemon.run_root);
     let Some(rec) = nexus_tools::observe::read_record(&eff, &id) else {
         return fail(
@@ -3480,16 +3587,67 @@ fn do_exec_restore(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "scope-refused: the workspace cannot be opened",
         );
     };
-    let report = nexus_tools::restore::restore(
+    let store = nexus_tools::checkpoint::store_dir(&daemon.run_root);
+    let preview = nexus_tools::restore::restore(
         &ws,
-        &nexus_tools::checkpoint::store_dir(&daemon.run_root),
+        &store,
         &eff,
         &id,
         nexus_tools::restore::RestoreOptions {
-            dry_run: dry,
+            dry_run: true,
             max_operations: None,
         },
     );
+    let digest = preview.confirm_digest();
+    let audit = |outcome: &str, counts: serde_json::Value| {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let line = serde_json::json!({
+            "atMs": now_ms_i64(), "actor": actor, "executionId": id, "taskInstanceId": task,
+            "dryRun": dry, "outcome": outcome, "confirmDigest": digest, "counts": counts,
+        });
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(daemon.run_root.join("restore.audit.jsonl"))
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    };
+    if dry {
+        audit(&preview.outcome, preview.counts());
+        return ok(
+            &req.id,
+            serde_json::json!({ "restore": preview, "confirmDigest": digest }),
+        );
+    }
+    if preview.refused.is_some() {
+        audit("refused", preview.counts());
+        return ok(
+            &req.id,
+            serde_json::json!({ "restore": preview, "confirmDigest": digest }),
+        );
+    }
+    if req.params.get("confirm").and_then(|v| v.as_str()) != Some(digest.as_str()) {
+        audit("confirmation-mismatch", preview.counts());
+        return fail(
+            &req.id,
+            "consent-mismatch",
+            "consent-mismatch: the confirmation does not match what a restore would do now (the project changed since the preview, or the preview was not confirmed); nothing was changed",
+        );
+    }
+    let report = nexus_tools::restore::restore(
+        &ws,
+        &store,
+        &eff,
+        &id,
+        nexus_tools::restore::RestoreOptions {
+            dry_run: false,
+            max_operations: None,
+        },
+    );
+    audit(&report.outcome, report.counts());
     ok(&req.id, serde_json::json!({ "restore": report }))
 }
 
@@ -4355,6 +4513,7 @@ fn do_status(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "automatedPolicy": daemon.autonomous.as_ref().map(|_| AUTONOMOUS_POLICY_ID),
             "writesEnabled": daemon.writes_enabled,
             "processEnabled": daemon.process_enabled,
+            "inPlaceExecution": in_place_availability(daemon),
             "sandbox": daemon.sandbox_caps.as_ref().map(|c| serde_json::json!({
                 "available": c.available, "backend": c.backend,
                 "cgroupMemoryController": c.cgroup_memory_controller,
@@ -5201,6 +5360,7 @@ mod isolation_tests {
             net: net.into(),
             approval: approval.into(),
             expires_at_ms: None,
+            exec: Default::default(),
         };
         let trust = nexus_tools::registry::Trust::default();
         nexus_tools::registry::mutate(&regdir, &trust, |f| {
@@ -5236,6 +5396,35 @@ mod isolation_tests {
             o["execFsScope"] = fs.into();
         }
         o
+    }
+
+    #[test]
+    fn a_direct_task_runs_commands_in_place_only_under_a_workspace_grant_and_never_by_inference() {
+        use nexus_tools::exec_contract::FsScope;
+        // a direct task whose frozen grant says `workspace`: in place (the real folder)
+        let (d, _k, task, _dg, frozen, _r) = grant_rig("workspace", "offline", "auto");
+        let root = d.worktree_root.clone().unwrap();
+        set_scope(
+            &root,
+            &task,
+            serde_json::json!({"projectId": "p", "grant": frozen, "kind": "direct", "root": "/x"}),
+        );
+        assert_eq!(task_fs_scope(&d, &task), FsScope::Workspace);
+        // `execFsScope` in the record is NEVER consulted for a direct task
+        set_scope(
+            &root,
+            &task,
+            serde_json::json!({"projectId": "p", "grant": null, "execFsScope": "workspace", "kind": "direct", "root": "/x"}),
+        );
+        assert_eq!(task_fs_scope(&d, &task), FsScope::Scratch);
+        // a direct task holding a scratch grant stays scratch whatever the record also says
+        let (d2, _k2, task2, _dg2, frozen2, _r2) = grant_rig("scratch", "offline", "auto");
+        set_scope(
+            &d2.worktree_root.clone().unwrap(),
+            &task2,
+            serde_json::json!({"projectId": "p", "grant": frozen2, "execFsScope": "workspace", "kind": "direct", "root": "/x"}),
+        );
+        assert_eq!(task_fs_scope(&d2, &task2), FsScope::Scratch);
     }
 
     #[test]
@@ -5355,6 +5544,7 @@ mod isolation_tests {
             net: "install".into(),
             approval: "auto".into(),
             expires_at_ms: None,
+            exec: Default::default(),
         };
         nexus_tools::registry::set_grant(&regdir, &t, "p", &spec, "test", "c").unwrap();
         assert!(run().is_ok());
@@ -5399,6 +5589,7 @@ mod isolation_tests {
             net: net.into(),
             approval: ap.into(),
             expires_at_ms: None,
+            exec: Default::default(),
         }
     }
 
@@ -5594,6 +5785,7 @@ mod isolation_tests {
                 net: net.into(),
                 approval: ap.into(),
                 expires_at_ms: exp,
+                exec: Default::default(),
             };
             let mut st = nexus_tools::grant::GrantState {
                 current: nexus_tools::grant::StandingGrant {
@@ -5606,6 +5798,7 @@ mod isolation_tests {
                     expires_at_ms: spec.expires_at_ms,
                     created_by: "t".into(),
                     consent_sha256: "c".into(),
+                    exec: Default::default(),
                 },
                 revoked_at_ms: None,
                 revoked_by: None,

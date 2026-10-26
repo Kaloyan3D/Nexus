@@ -48,6 +48,22 @@ pub fn shim_is_trustworthy(p: &std::path::Path) -> Result<String, String> {
             return Ok(v.clone());
         }
     }
+    // The exact compatible gate: it must speak this build's plan protocol (a stale binary left over from
+    // another version is refused with a message that names both).
+    let said = std::process::Command::new(p)
+        .arg("--version")
+        .env_clear()
+        .output()
+        .map_err(|e| format!("the launch gate cannot be executed: {e}"))?;
+    let said = String::from_utf8_lossy(&said.stdout).trim().to_owned();
+    if said != crate::confine::PROTOCOL {
+        return Err(format!(
+            "the launch gate at {} speaks {:?} but this Nexus needs {:?}; reinstall the matching nexus-confine next to nexusd",
+            p.display(),
+            said,
+            crate::confine::PROTOCOL
+        ));
+    }
     let bytes = std::fs::read(p).map_err(|e| format!("cannot read the launch gate: {e}"))?;
     use sha2::Digest;
     let sha = hex::encode(sha2::Sha256::digest(&bytes));

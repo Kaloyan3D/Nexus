@@ -46,6 +46,7 @@ fn spec(fs: &str, net: &str, ap: &str, exp: Option<i64>) -> GrantSpec {
         net: net.into(),
         approval: ap.into(),
         expires_at_ms: exp,
+        exec: Default::default(),
     }
 }
 
@@ -351,7 +352,7 @@ fn a_running_task_can_only_lose_permission_never_gain_it() {
 }
 
 #[test]
-fn in_place_commands_and_the_direct_workspace_cannot_coexist_in_either_order() {
+fn an_in_place_grant_never_carries_over_when_the_kind_of_workspace_changes() {
     // a managed project can be direct only with an origin folder; build the record through the registry's own API
     let d = tempfile::tempdir().unwrap();
     let (_r, rd) = project(d.path());
@@ -363,7 +364,7 @@ fn in_place_commands_and_the_direct_workspace_cannot_coexist_in_either_order() {
         Ok(())
     })
     .unwrap();
-    // grant first, then direct: refused
+    // an in-place grant agreed for the disposable copy cannot silently start meaning "your real folder"
     reg::set_grant(
         &rd,
         &t,
@@ -375,18 +376,10 @@ fn in_place_commands_and_the_direct_workspace_cannot_coexist_in_either_order() {
     .unwrap();
     let e = reg::set_workspace_mode(&rd, &t, "alpha", reg::WorkspaceMode::Direct).unwrap_err();
     assert_eq!(e.code, "bad-workspace-mode");
-    // a scratch grant is fine with direct; and then an in-place grant is refused
-    reg::set_grant(
-        &rd,
-        &t,
-        "alpha",
-        &spec("scratch", "offline", "auto", None),
-        "cli",
-        "c",
-    )
-    .unwrap();
+    // revoke, switch, and grant again for the real folder: allowed (M4)
+    reg::revoke_grant(&rd, &t, "alpha", "cli").unwrap();
     reg::set_workspace_mode(&rd, &t, "alpha", reg::WorkspaceMode::Direct).unwrap();
-    let e = reg::set_grant(
+    let r = reg::set_grant(
         &rd,
         &t,
         "alpha",
@@ -394,8 +387,11 @@ fn in_place_commands_and_the_direct_workspace_cannot_coexist_in_either_order() {
         "cli",
         "c",
     )
-    .unwrap_err();
-    assert_eq!(e.code, "not-available");
+    .unwrap();
+    assert_eq!(r.grant.unwrap().current.fs, "workspace");
+    // ... and the same in the other direction
+    let e = reg::set_workspace_mode(&rd, &t, "alpha", reg::WorkspaceMode::Isolated).unwrap_err();
+    assert_eq!(e.code, "bad-workspace-mode");
 }
 
 #[test]

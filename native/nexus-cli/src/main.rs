@@ -1536,6 +1536,7 @@ fn main() {
         "intent" => cmd_intent(&args, &cfg),
         "tools" => cmd_tools(&args, &cfg),
         "project" => cmd_project(&args, &cfg),
+        "exec" => cmd_exec(&args, &cfg),
         "runtime" => cmd_runtime(&args, &cfg),
         "engine" => cmd_engine(&args, &cfg),
         "provider" => cmd_provider(&args, &cfg),
@@ -2293,12 +2294,100 @@ fn confirm_in_terminal(args: &[String], what: &str) -> bool {
     line.trim() == "yes"
 }
 
+/// A confirmation that cannot be given by a script: the exact phrase typed on a real terminal.
+fn confirm_phrase(phrase: &str) -> bool {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        eprintln!("this choice needs a person at a terminal (a script or --yes cannot confirm it)");
+        return false;
+    }
+    eprint!("Type '{phrase}' to confirm: ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut line);
+    line.trim() == phrase
+}
+
+/// `nexus exec effects <executionId>` and `nexus exec restore <executionId> [--apply [--yes]]`:
+/// what an in-place command changed, and the guarded restore of it. Preview first (changes nothing);
+/// applying needs the digest of the preview and a typed confirmation. The model has no path to this.
+fn cmd_exec(args: &[String], cfg: &ClientConfig) -> ExitCode {
+    use nexus_client::intent_client as ic;
+    const USAGE: &str =
+        "usage: nexus exec effects <executionId> | restore <executionId> [--apply] [--yes]";
+    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    let sock = flag_value(args, "--broker-socket")
+        .map(PathBuf::from)
+        .unwrap_or_else(ic::default_broker_socket);
+    let (Some(action), Some(id)) = (positional.first(), positional.get(1)) else {
+        return fail(cfg, USAGE);
+    };
+    match action.as_str() {
+        "effects" => match ic::exec_effects(&sock, id) {
+            Ok(v) => {
+                emit(
+                    cfg,
+                    &v,
+                    &serde_json::to_string_pretty(&v).unwrap_or_default(),
+                );
+                ExitCode::Ok
+            }
+            Err(e) => emit_err(cfg.json, &e),
+        },
+        "restore" => {
+            let pv = match ic::exec_restore_preview(&sock, id) {
+                Ok(v) => v,
+                Err(e) => return emit_err(cfg.json, &e),
+            };
+            let r = &pv["restore"];
+            let count = |k: &str| r[k].as_array().map(|a| a.len()).unwrap_or(0);
+            if !args.iter().any(|a| a == "--apply") {
+                emit(
+                    cfg,
+                    &pv,
+                    &serde_json::to_string_pretty(&pv).unwrap_or_default(),
+                );
+                eprintln!(
+                    "preview only: {} would be restored, {} skipped, {} in conflict (kept as they are), {} unrecoverable. Nothing was changed. Apply with: nexus exec restore {id} --apply",
+                    count("restored"), count("skipped"), count("conflicted"), count("unrecoverable")
+                );
+                return ExitCode::Ok;
+            }
+            if r["refused"].is_string() {
+                emit(
+                    cfg,
+                    &pv,
+                    &serde_json::to_string_pretty(&pv).unwrap_or_default(),
+                );
+                return fail(cfg, "the restore is refused; nothing was changed");
+            }
+            eprintln!("{}", serde_json::to_string_pretty(r).unwrap_or_default());
+            if !confirm_in_terminal(args, "this restore (files in conflict are left untouched)") {
+                return fail(cfg, "not confirmed; nothing was changed");
+            }
+            let digest = pv["confirmDigest"].as_str().unwrap_or("");
+            match ic::exec_restore_apply(&sock, id, digest, "cli") {
+                Ok(v) => {
+                    emit(
+                        cfg,
+                        &v,
+                        &serde_json::to_string_pretty(&v).unwrap_or_default(),
+                    );
+                    ExitCode::Ok
+                }
+                Err(e) => emit_err(cfg.json, &e),
+            }
+        }
+        _ => fail(cfg, USAGE),
+    }
+}
+
 /// `nexus project grant <id> show | set --fs F --net N --approval A [--expires 7d] | revoke | clear`
 /// Standing grants (permissions). Through the broker, like the Desktop's native backend; the model has no
 /// path to either.
 fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig) -> ExitCode {
     use nexus_client::intent_client as ic;
-    const USAGE: &str = "usage: nexus project grant <id> show | set --fs scratch|workspace --net offline|install --approval auto|ask [--expires 7d] [--yes] | revoke [--yes] | clear [--yes]";
+    const USAGE: &str = "usage: nexus project grant <id> show | set --fs scratch|workspace --net offline|install --approval auto|ask [--expires 7d] [--checkpoint off|best-effort|required] [--hard-links protect|allow] [--yes] | revoke [--yes] | clear [--yes]";
     let sock = flag_value(args, "--broker-socket")
         .map(PathBuf::from)
         .unwrap_or_else(ic::default_broker_socket);
@@ -2318,12 +2407,14 @@ fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig
                             format!("{id}: no standing grant (defaults: scratch, offline, automatic approval)")
                         } else {
                             format!(
-                                "{id}: {} v{} fs={} net={} approval={} expires={}",
+                                "{id}: {} v{} fs={} net={} approval={} checkpoint={} hard-links={} expires={}",
                                 g["status"].as_str().unwrap_or("?"),
                                 g["version"],
                                 g["fs"].as_str().unwrap_or("?"),
                                 g["net"].as_str().unwrap_or("?"),
                                 g["approval"].as_str().unwrap_or("?"),
+                                g["checkpoint"].as_str().unwrap_or("best-effort"),
+                                g["hardLinks"].as_str().unwrap_or("protect"),
                                 g["expiresAtMs"]
                             )
                         };
@@ -2346,7 +2437,13 @@ fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig
                     None => return fail(cfg, "--expires must look like 3600, 30m, 12h or 7d"),
                 },
             };
-            let pv = match ic::project_grant_preview(&sock, id, &fs, &net, &approval, expires) {
+            let checkpoint =
+                flag_value(args, "--checkpoint").unwrap_or_else(|| "best-effort".into());
+            let hard_links = flag_value(args, "--hard-links").unwrap_or_else(|| "protect".into());
+            let exec = Some((checkpoint.as_str(), hard_links.as_str()));
+            let pv = match ic::project_grant_preview_with(
+                &sock, id, &fs, &net, &approval, expires, exec,
+            ) {
                 Ok(v) => v,
                 Err(e) => return emit_err(cfg.json, &e),
             };
@@ -2358,8 +2455,18 @@ fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig
             if !confirm_in_terminal(args, "these permissions") {
                 return fail(cfg, "not confirmed; nothing was changed");
             }
+            // Allowing writes to hard-linked files can change files OUTSIDE the project: only a person at a
+            // terminal can say so; `--yes` and pipes are not accepted for this one choice.
+            if hard_links == "allow" && !confirm_phrase("allow hard-link writes") {
+                return fail(
+                    cfg,
+                    "hard-link writes were not confirmed at a terminal; nothing was changed",
+                );
+            }
             let digest = pv["textSha256"].as_str().unwrap_or("");
-            match ic::project_grant_set(&sock, id, &fs, &net, &approval, expires, digest, "cli") {
+            match ic::project_grant_set_with(
+                &sock, id, &fs, &net, &approval, expires, digest, "cli", exec,
+            ) {
                 Ok(v) => {
                     emit(
                         cfg,

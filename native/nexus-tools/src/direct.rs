@@ -474,7 +474,9 @@ impl Store {
         let complete = rec.outcome == "observed"
             && !fx.lists_may_be_incomplete
             && fx.created.count + fx.modified.count + fx.deleted.count == paths.len() as u64
-            && paths.len() <= MAX_OBSERVED_PATHS;
+            && paths.len() <= MAX_OBSERVED_PATHS
+            // changes inside summarised dependency/build folders are counted, not listed
+            && fx.bulk_changed.is_empty();
         paths.truncate(MAX_OBSERVED_PATHS);
         m.observed.push(Observed {
             execution_id: rec.execution_id.clone(),
@@ -584,12 +586,66 @@ fn read_current(ws: &Workspace, path: &str) -> Result<Option<Vec<u8>>, DirectErr
     }
 }
 
+/// The latest command observation of each path (with when it ended).
+fn latest_observed(
+    store: &Store,
+) -> Result<std::collections::BTreeMap<String, (ObservedPath, u64)>, DirectError> {
+    let mut m = std::collections::BTreeMap::new();
+    for o in store.observed()? {
+        for p in o.paths {
+            m.insert(p.path.clone(), (p, o.ended_ms));
+        }
+    }
+    Ok(m)
+}
+
+/// What a tool-written path is expected to contain NOW.
+enum Expected {
+    Absent,
+    Sha(String),
+    /// a command left it unhashed: nothing to compare against, never flagged
+    Unknown,
+}
+
+/// The content Nexus's tool last wrote, unless a COMMAND changed the path later - then what that command left
+/// (a command's edit is not the user's).
+fn expected_of(
+    e: &Entry,
+    obs: &std::collections::BTreeMap<String, (ObservedPath, u64)>,
+) -> Expected {
+    if let Some((o, ended)) = obs.get(&e.path) {
+        if *ended >= e.last_post_ms {
+            return if o.kind == "deleted" {
+                Expected::Absent
+            } else {
+                match &o.post_sha {
+                    Some(s) => Expected::Sha(s.clone()),
+                    None => Expected::Unknown,
+                }
+            };
+        }
+    }
+    match &e.last_post_sha {
+        Some(s) => Expected::Sha(s.clone()),
+        None => Expected::Absent,
+    }
+}
+
+fn deviates(exp: &Expected, cur: Option<&str>) -> bool {
+    match exp {
+        Expected::Absent => cur.is_some(),
+        Expected::Sha(s) => cur != Some(s.as_str()),
+        Expected::Unknown => false,
+    }
+}
+
 /// Paths this task wrote (verified) whose content is not what Nexus last wrote: something else
 /// changed them afterwards. A file Nexus deleted that exists again counts too.
 pub fn external_changes(store: &Store, root: &str) -> Result<Vec<String>, DirectError> {
     let ws = Workspace::open_root(root, WorkspacePolicy::default())
         .map_err(|e| err("scope-refused", e.message))?;
     let mut out = Vec::new();
+    let obs = latest_observed(store)?;
     for e in store.entries()? {
         if !e.applied {
             continue;
@@ -598,7 +654,7 @@ pub fn external_changes(store: &Store, root: &str) -> Result<Vec<String>, Direct
             .ok()
             .flatten()
             .map(|b| sha_hex(&b));
-        if cur != e.last_post_sha {
+        if deviates(&expected_of(&e, &obs), cur.as_deref()) {
             out.push(e.path);
         }
     }
@@ -695,13 +751,18 @@ pub fn diff(store: &Store, root: &str) -> Result<DirectDiff, DirectError> {
     let _cleanup = Cleanup(tmp.clone());
     let mut files = Vec::new();
     let mut changed_paths = Vec::new();
+    let obs_all = latest_observed(store)?;
     for e in store.entries()? {
         let pre = store.read_pre(&e);
         let cur = read_current(&ws, &e.path).unwrap_or(None);
         if pre == cur {
             continue; // touched but identical (an edit that was reverted, a refused operation)
         }
-        let external = e.applied && cur.as_deref().map(sha_hex) != e.last_post_sha;
+        let external = e.applied
+            && deviates(
+                &expected_of(&e, &obs_all),
+                cur.as_deref().map(sha_hex).as_deref(),
+            );
         let status = match (&pre, &cur) {
             (None, Some(_)) => "added",
             (Some(_), None) => "deleted",

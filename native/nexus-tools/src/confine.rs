@@ -20,6 +20,8 @@
 use std::ffi::CString;
 use std::os::fd::RawFd;
 
+/// Protocol of the plan arguments between the host and the gate. The host refuses a gate that reports another.
+pub const PROTOCOL: &str = "nexus-confine/1";
 pub const REFUSED_PREFIX: &str = "NEXUS-CONFINE-REFUSED:";
 pub const REFUSED_EXIT: i32 = 197;
 /// Where the gate is mounted inside the sandbox.
@@ -498,6 +500,10 @@ fn self_test() {
 
 /// Entry point of `nexus-confine`.
 pub fn shim_main(args: Vec<String>) -> ! {
+    if args.first().map(String::as_str) == Some("--version") {
+        println!("{PROTOCOL}");
+        std::process::exit(0);
+    }
     let (plan, cmd) = match Plan::parse(&args) {
         Ok(v) => v,
         Err(e) => refuse(&e),

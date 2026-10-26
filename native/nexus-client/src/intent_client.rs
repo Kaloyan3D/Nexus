@@ -1077,12 +1077,25 @@ pub fn project_grant_preview(
     approval: &str,
     expires_in_secs: Option<u64>,
 ) -> Result<serde_json::Value, ClientError> {
-    call(
-        socket,
-        "project-grant-preview",
-        serde_json::json!({ "projectId": project_id, "fs": fs, "net": net, "approval": approval, "expiresInSecs": expires_in_secs }),
-        30_000,
-    )
+    project_grant_preview_with(socket, project_id, fs, net, approval, expires_in_secs, None)
+}
+
+/// As [`project_grant_preview`], with the in-place recovery choices `(checkpoint, hardLinks)`.
+pub fn project_grant_preview_with(
+    socket: &Path,
+    project_id: &str,
+    fs: &str,
+    net: &str,
+    approval: &str,
+    expires_in_secs: Option<u64>,
+    exec: Option<(&str, &str)>,
+) -> Result<serde_json::Value, ClientError> {
+    let mut p = serde_json::json!({ "projectId": project_id, "fs": fs, "net": net, "approval": approval, "expiresInSecs": expires_in_secs });
+    if let Some((c, h)) = exec {
+        p["checkpoint"] = c.into();
+        p["hardLinks"] = h.into();
+    }
+    call(socket, "project-grant-preview", p, 30_000)
 }
 
 /// Store a standing grant. `text_sha256` must be the digest of the text the user confirmed (from the preview).
@@ -1097,11 +1110,74 @@ pub fn project_grant_set(
     text_sha256: &str,
     surface: &str,
 ) -> Result<serde_json::Value, ClientError> {
+    project_grant_set_with(
+        socket,
+        project_id,
+        fs,
+        net,
+        approval,
+        expires_in_secs,
+        text_sha256,
+        surface,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn project_grant_set_with(
+    socket: &Path,
+    project_id: &str,
+    fs: &str,
+    net: &str,
+    approval: &str,
+    expires_in_secs: Option<u64>,
+    text_sha256: &str,
+    surface: &str,
+    exec: Option<(&str, &str)>,
+) -> Result<serde_json::Value, ClientError> {
+    let mut p = serde_json::json!({ "projectId": project_id, "fs": fs, "net": net, "approval": approval, "expiresInSecs": expires_in_secs, "textSha256": text_sha256, "surface": surface });
+    if let Some((c, h)) = exec {
+        p["checkpoint"] = c.into();
+        p["hardLinks"] = h.into();
+    }
+    call(socket, "project-grant", p, 30_000)
+}
+
+/// The persisted effects record of an in-place execution.
+pub fn exec_effects(socket: &Path, execution_id: &str) -> Result<serde_json::Value, ClientError> {
     call(
         socket,
-        "project-grant",
-        serde_json::json!({ "projectId": project_id, "fs": fs, "net": net, "approval": approval, "expiresInSecs": expires_in_secs, "textSha256": text_sha256, "surface": surface }),
+        "exec-effects",
+        serde_json::json!({ "executionId": execution_id }),
         30_000,
+    )
+}
+
+/// Preview of a guarded restore (changes nothing); the answer carries the `confirmDigest` to apply it.
+pub fn exec_restore_preview(
+    socket: &Path,
+    execution_id: &str,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "exec-restore-preview",
+        serde_json::json!({ "executionId": execution_id }),
+        120_000,
+    )
+}
+
+/// Apply a guarded restore; `confirm` must be the digest of a preview taken against the current state.
+pub fn exec_restore_apply(
+    socket: &Path,
+    execution_id: &str,
+    confirm: &str,
+    surface: &str,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "exec-restore",
+        serde_json::json!({ "executionId": execution_id, "confirm": confirm, "surface": surface }),
+        600_000,
     )
 }
 

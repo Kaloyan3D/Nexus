@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 use std::path::{Path, PathBuf};
 
 pub const CHECKPOINT_DIR: &str = "_checkpoints";
@@ -236,10 +236,12 @@ fn enospc_after() -> Option<u64> {
 fn store_file(
     src: &mut std::fs::File,
     dst: &Path,
-    reflink: &mut Option<bool>,
-    written_total: &mut u64,
+    reflink: &std::sync::atomic::AtomicU8,
+    written_total: &std::sync::atomic::AtomicU64,
+    size: u64,
 ) -> std::io::Result<(String, bool)> {
     use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::Ordering::Relaxed;
     let mut out = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -247,10 +249,10 @@ fn store_file(
         .custom_flags(libc::O_NOFOLLOW)
         .open(dst)?;
     let mut cloned = false;
-    if *reflink != Some(false) {
+    if reflink.load(Relaxed) != 2 {
         let rc = unsafe { libc::ioctl(out.as_raw_fd(), FICLONE, src.as_raw_fd()) };
         if rc == 0 {
-            *reflink = Some(true);
+            reflink.store(1, Relaxed);
             cloned = true;
         } else {
             let e = std::io::Error::last_os_error();
@@ -259,13 +261,14 @@ fn store_file(
                 | Some(libc::EOPNOTSUPP)
                 | Some(libc::EINVAL)
                 | Some(libc::ENOTTY)
-                | Some(libc::ENOSYS) => *reflink = Some(false),
+                | Some(libc::ENOSYS) => reflink.store(2, Relaxed),
                 _ => return Err(e),
             }
         }
     }
     let mut h = Sha256::new();
-    let mut buf = vec![0u8; 256 * 1024];
+    // a buffer sized for the file (zeroing 256 KiB for every small file dominated the profile)
+    let mut buf = vec![0u8; (size as usize).clamp(4096, 256 * 1024)];
     loop {
         let n = src.read(&mut buf)?;
         if n == 0 {
@@ -274,15 +277,205 @@ fn store_file(
         h.update(&buf[..n]);
         if !cloned {
             if let Some(limit) = enospc_after() {
-                if *written_total + n as u64 > limit {
+                if written_total.load(Relaxed) + n as u64 > limit {
                     return Err(std::io::Error::from_raw_os_error(libc::ENOSPC));
                 }
             }
             out.write_all(&buf[..n])?;
-            *written_total += n as u64;
+            written_total.fetch_add(n as u64, Relaxed);
         }
     }
     Ok((hex::encode(h.finalize()), cloned))
+}
+
+/// Files up to this size are appended to a per-thread pack file instead of getting an inode each
+/// (creating tens of thousands of tiny files dominated checkpoint time on copy-on-write filesystems).
+const PACK_MAX: u64 = 64 * 1024;
+
+/// One reflink attempt from `path` into a scratch blob of the store (removed again).
+fn probe_reflink(root: RawFd, path: &str, files_dir: &Path, reflink: &std::sync::atomic::AtomicU8) {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(fd) = observe::open_rel_path(root, path) else {
+        return; // unknown stays unknown; each file then decides for itself
+    };
+    let src = std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd.into_raw_fd()) });
+    let probe = files_dir.join(".probe");
+    let Ok(out) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&probe)
+    else {
+        return;
+    };
+    let rc = unsafe { libc::ioctl(out.as_raw_fd(), FICLONE, src.as_raw_fd()) };
+    let _ = std::fs::remove_file(&probe);
+    use std::sync::atomic::Ordering::Relaxed;
+    if rc == 0 {
+        reflink.store(1, Relaxed);
+    } else if matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EXDEV)
+            | Some(libc::EOPNOTSUPP)
+            | Some(libc::EINVAL)
+            | Some(libc::ENOTTY)
+            | Some(libc::ENOSYS)
+    ) {
+        reflink.store(2, Relaxed);
+    }
+}
+
+enum JobRes {
+    /// `blob`: the pack reference (`p<thread>@<offset>`) of a packed file; `None` = its own blob file.
+    Stored {
+        sha: String,
+        cloned: bool,
+        blob: Option<String>,
+    },
+    /// Not stored, for an unplanned reason (the checkpoint becomes `incomplete`).
+    Excluded(&'static str),
+    NoSpace,
+}
+
+/// Store one planned file: open it through the pinned root without following links (the parent directory
+/// handle is reused between consecutive files), compare it with its observation, store it, compare again.
+struct PackWriter {
+    dir: PathBuf,
+    name: String,
+    w: Option<std::io::BufWriter<std::fs::File>>,
+    off: u64,
+}
+
+impl PackWriter {
+    fn append(&mut self, bytes: &[u8]) -> std::io::Result<u64> {
+        use std::os::unix::fs::OpenOptionsExt;
+        if self.w.is_none() {
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(self.dir.join(&self.name))?;
+            self.w = Some(std::io::BufWriter::with_capacity(1 << 20, f));
+        }
+        let at = self.off;
+        self.w.as_mut().expect("opened").write_all(bytes)?;
+        self.off += bytes.len() as u64;
+        Ok(at)
+    }
+
+    fn finish(&mut self) -> std::io::Result<()> {
+        match self.w.take() {
+            Some(mut w) => w.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_job(
+    root: RawFd,
+    path: &str,
+    rec: &observe::Rec,
+    dst: &Path,
+    reflink: &std::sync::atomic::AtomicU8,
+    written: &std::sync::atomic::AtomicU64,
+    cache: &mut Option<(String, Option<std::os::fd::OwnedFd>)>,
+    pack: &mut PackWriter,
+) -> JobRes {
+    use std::os::fd::FromRawFd;
+    let (dir, name) = match path.rfind('/') {
+        Some(i) => (&path[..i], &path[i + 1..]),
+        None => ("", path),
+    };
+    if cache.as_ref().map(|c| c.0.as_str()) != Some(dir) {
+        *cache = Some((dir.to_owned(), observe::open_dir_rel(root, dir)));
+    }
+    let Some(Some(dfd)) = cache.as_ref().map(|c| c.1.as_ref().map(|f| f.as_raw_fd())) else {
+        return JobRes::Excluded("unreadable");
+    };
+    let Ok(cname) = std::ffi::CString::new(name) else {
+        return JobRes::Excluded("unreadable");
+    };
+    let Ok(fd) = crate::workspace::open_rel(
+        dfd,
+        &cname,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+    ) else {
+        return JobRes::Excluded("unreadable");
+    };
+    let mut f = std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+    let same = |f: &std::fs::File| {
+        crate::workspace::fstat_fd(f.as_raw_fd())
+            .ok()
+            .is_some_and(|s| {
+                matches!(s.kind, crate::workspace::Kind::File)
+                    && s.ino == rec.ino
+                    && s.size == rec.size
+                    && (s.ctime_ns as i64) == rec.ctime_ns
+            })
+    };
+    if !same(&f) {
+        return JobRes::Excluded("changed-since-observation");
+    }
+    if rec.size <= PACK_MAX {
+        let mut bytes = Vec::with_capacity(rec.size as usize);
+        if Read::by_ref(&mut f)
+            .take(rec.size + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() as u64 != rec.size
+        {
+            return JobRes::Excluded("changed-during-checkpoint");
+        }
+        let sha = hex::encode(Sha256::digest(&bytes));
+        if let Some(limit) = enospc_after() {
+            if written.load(std::sync::atomic::Ordering::Relaxed) + rec.size > limit {
+                return JobRes::NoSpace;
+            }
+        }
+        let off = match pack.append(&bytes) {
+            Ok(o) => o,
+            Err(e) if matches!(e.raw_os_error(), Some(libc::ENOSPC) | Some(libc::EDQUOT)) => {
+                return JobRes::NoSpace
+            }
+            Err(_) => return JobRes::Excluded("unreadable"),
+        };
+        written.fetch_add(rec.size, std::sync::atomic::Ordering::Relaxed);
+        // (a file that changed meanwhile leaves an unreferenced span in the pack; it is never indexed)
+        return if same(&f) {
+            JobRes::Stored {
+                sha,
+                cloned: false,
+                blob: Some(format!("{}@{off}", pack.name)),
+            }
+        } else {
+            JobRes::Excluded("changed-during-checkpoint")
+        };
+    }
+    match store_file(&mut f, dst, reflink, written, rec.size) {
+        Ok((sha, cloned)) => {
+            if same(&f) {
+                JobRes::Stored {
+                    sha,
+                    cloned,
+                    blob: None,
+                }
+            } else {
+                let _ = std::fs::remove_file(dst);
+                JobRes::Excluded("changed-during-checkpoint")
+            }
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(dst);
+            if matches!(e.raw_os_error(), Some(libc::ENOSPC) | Some(libc::EDQUOT)) {
+                JobRes::NoSpace
+            } else {
+                JobRes::Excluded("unreadable")
+            }
+        }
+    }
 }
 
 fn cleanup(dir: &Path) {
@@ -364,18 +557,15 @@ pub fn create(
         .map(|(k, _)| k.clone())
         .collect();
     idx.coverage.git_not_captured = pre.bulk.values().any(|v| v.protected);
-    // Storage estimate for the files that would be stored.
-    let est: u64 = pre
-        .entries
-        .iter()
-        .filter(|(p, r)| r.kind == "f" && r.size <= b.max_file_bytes && !secret_shaped(p))
-        .map(|(_, r)| r.size)
-        .sum();
     let free = free_bytes(store);
-    let mut reflink: Option<bool> = if pol.force_copy { Some(false) } else { None };
-    let (mut n_ref, mut n_copy) = (0u64, 0u64);
-    let mut written = 0u64;
-    let mut preflighted = false;
+    // 1. Plan (no I/O on the project): which entries are stored, which are excluded and why.
+    struct Job {
+        path: String,
+        rec: observe::Rec,
+        blob: String,
+    }
+    let mut jobs: Vec<Job> = Vec::new();
+    let mut planned_bytes = 0u64;
     for (path, r) in &pre.entries {
         let mut e = Entry {
             kind: r.kind.clone(),
@@ -405,98 +595,163 @@ pub fn create(
                 } else if r.size > b.max_file_bytes {
                     e.excluded = Some("file-too-large".into());
                     why(format!("file-too-large:{path}"), &mut reasons);
-                } else if idx.files_stored >= b.max_files {
+                    idx.coverage.unplanned_excluded += 1;
+                } else if jobs.len() as u64 >= b.max_files {
                     e.excluded = Some("file-budget".into());
                     why("file-budget".into(), &mut reasons);
-                } else if idx.logical_bytes + r.size > b.max_bytes {
+                    idx.coverage.unplanned_excluded += 1;
+                } else if planned_bytes + r.size > b.max_bytes {
                     e.excluded = Some("size-budget".into());
                     why("size-budget".into(), &mut reasons);
-                } else {
-                    // Open through the pinned descriptor, no symlink followed, and verify identity.
-                    let opened = observe::open_rel_path(root, path);
-                    let Some(fd) = opened else {
-                        e.excluded = Some("unreadable".into());
-                        why(format!("unreadable:{path}"), &mut reasons);
-                        idx.coverage.unplanned_excluded += 1;
-                        idx.entries.insert(path.clone(), e);
-                        continue;
-                    };
-                    let mut f = std::fs::File::from(fd);
-                    let same = |f: &std::fs::File| {
-                        crate::workspace::fstat_fd(f.as_raw_fd())
-                            .ok()
-                            .is_some_and(|s| {
-                                matches!(s.kind, crate::workspace::Kind::File)
-                                    && s.ino == r.ino
-                                    && s.size == r.size
-                                    && (s.ctime_ns as i64) == r.ctime_ns
-                            })
-                    };
-                    if !same(&f) {
-                        e.excluded = Some("changed-since-observation".into());
-                        why(format!("changed-since-observation:{path}"), &mut reasons);
-                    } else {
-                        let blob = format!("{}", idx.entries.len());
-                        let dst = partial.join("files").join(&blob);
-                        match store_file(&mut f, &dst, &mut reflink, &mut written) {
-                            Ok((sha, cloned)) => {
-                                if !same(&f) {
-                                    let _ = std::fs::remove_file(&dst);
-                                    e.excluded = Some("changed-during-checkpoint".into());
-                                    why(format!("changed-during-checkpoint:{path}"), &mut reasons);
-                                } else {
-                                    e.sha256 = Some(sha);
-                                    e.blob = Some(blob);
-                                    e.reflinked = cloned;
-                                    idx.files_stored += 1;
-                                    idx.logical_bytes += r.size;
-                                    if cloned {
-                                        idx.reflinked_bytes += r.size;
-                                        n_ref += 1;
-                                    } else {
-                                        idx.copied_bytes += r.size;
-                                        n_copy += 1;
-                                    }
-                                    if !preflighted && reflink == Some(false) {
-                                        preflighted = true;
-                                        if let Some(fr) = free {
-                                            if est.saturating_add(b.min_free_bytes) > fr {
-                                                cleanup(&partial);
-                                                return Err(fail("insufficient-storage"));
-                                            }
-                                        }
-                                    }
-                                    if idx.files_stored == 2 {
-                                        crate::mutate::crash_point("checkpoint-during");
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                let _ = std::fs::remove_file(&dst);
-                                if err.raw_os_error() == Some(libc::ENOSPC)
-                                    || err.raw_os_error() == Some(libc::EDQUOT)
-                                {
-                                    cleanup(&partial);
-                                    return Err(fail("storage-exhausted"));
-                                }
-                                e.excluded = Some("unreadable".into());
-                                why(format!("unreadable:{path}"), &mut reasons);
-                            }
-                        }
-                    }
-                    if e.excluded.is_some() {
-                        idx.coverage.unplanned_excluded += 1;
-                    }
-                }
-                if e.excluded.as_deref() == Some("file-too-large")
-                    || e.excluded.as_deref() == Some("file-budget")
-                    || e.excluded.as_deref() == Some("size-budget")
-                {
                     idx.coverage.unplanned_excluded += 1;
+                } else {
+                    planned_bytes += r.size;
+                    jobs.push(Job {
+                        path: path.clone(),
+                        rec: r.clone(),
+                        blob: jobs.len().to_string(),
+                    });
                 }
             }
         }
         idx.entries.insert(path.clone(), e);
+    }
+    // 2. Store. The first file settles whether the store filesystem can reflink (and, if not, whether a
+    //    bounded copy fits); the rest run on a few threads, each over a contiguous slice and reusing the
+    //    directory handle of the previous file. Every file is still verified before and after.
+    let reflink = std::sync::atomic::AtomicU8::new(if pol.force_copy { 2 } else { 0 });
+    let written = std::sync::atomic::AtomicU64::new(0);
+    let stored_count = std::sync::atomic::AtomicU64::new(0);
+    let abort = std::sync::atomic::AtomicBool::new(false);
+    let files_dir = partial.join("files");
+    let mut results: Vec<Option<JobRes>> = (0..jobs.len()).map(|_| None).collect();
+    let run_slice = |t: usize, range: std::ops::Range<usize>| -> Vec<(usize, JobRes)> {
+        let mut cache: Option<(String, Option<std::os::fd::OwnedFd>)> = None;
+        let mut pack = PackWriter {
+            dir: files_dir.clone(),
+            name: format!("p{t}"),
+            w: None,
+            off: 0,
+        };
+        let mut out = Vec::with_capacity(range.len());
+        for i in range {
+            if abort.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            let j = &jobs[i];
+            let r = run_job(
+                root,
+                &j.path,
+                &j.rec,
+                &files_dir.join(&j.blob),
+                &reflink,
+                &written,
+                &mut cache,
+                &mut pack,
+            );
+            if matches!(r, JobRes::Stored { .. })
+                && stored_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == 2
+            {
+                crate::mutate::crash_point("checkpoint-during");
+            }
+            if matches!(r, JobRes::NoSpace) {
+                abort.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            out.push((i, r));
+        }
+        if let Err(e) = pack.finish() {
+            // a pack that could not be written out: nothing in it may be reported as stored
+            let code = matches!(e.raw_os_error(), Some(libc::ENOSPC) | Some(libc::EDQUOT));
+            for (_, r) in out.iter_mut() {
+                if matches!(r, JobRes::Stored { blob: Some(b), .. } if b.starts_with(&pack.name)) {
+                    *r = if code {
+                        JobRes::NoSpace
+                    } else {
+                        JobRes::Excluded("unreadable")
+                    };
+                }
+            }
+        }
+        out
+    };
+    if !jobs.is_empty() {
+        // Can the store filesystem reflink from the project? (One attempt with the first file; nothing kept.)
+        if reflink.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            probe_reflink(root, &jobs[0].path, &files_dir, &reflink);
+        }
+        if reflink.load(std::sync::atomic::Ordering::Relaxed) == 2 {
+            if let Some(fr) = free {
+                if planned_bytes.saturating_add(b.min_free_bytes) > fr {
+                    cleanup(&partial);
+                    return Err(fail("insufficient-storage"));
+                }
+            }
+        }
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .clamp(1, 8);
+        if jobs.len() < 256 || threads == 1 {
+            for (i, r) in run_slice(0, 0..jobs.len()) {
+                results[i] = Some(r);
+            }
+        } else {
+            let chunk = jobs.len().div_ceil(threads);
+            let parts: Vec<(usize, std::ops::Range<usize>)> = (0..threads)
+                .map(|t| (t, (t * chunk)..((t + 1) * chunk).min(jobs.len())))
+                .filter(|(_, r)| !r.is_empty())
+                .collect();
+            let all: Vec<Vec<(usize, JobRes)>> = std::thread::scope(|sc| {
+                let hs: Vec<_> = parts
+                    .into_iter()
+                    .map(|(t, r)| sc.spawn(move || run_slice(t, r)))
+                    .collect();
+                hs.into_iter()
+                    .map(|h| h.join().unwrap_or_default())
+                    .collect()
+            });
+            for v in all {
+                for (i, r) in v {
+                    results[i] = Some(r);
+                }
+            }
+        }
+    }
+    if results.iter().any(|r| matches!(r, Some(JobRes::NoSpace))) {
+        cleanup(&partial);
+        return Err(fail("storage-exhausted"));
+    }
+    // 3. Merge in path order.
+    let (mut n_ref, mut n_copy) = (0u64, 0u64);
+    for (j, r) in jobs.iter().zip(results) {
+        let e = idx.entries.get_mut(&j.path).expect("planned entry");
+        match r {
+            Some(JobRes::Stored { sha, cloned, blob }) => {
+                e.sha256 = Some(sha);
+                e.blob = Some(blob.unwrap_or_else(|| j.blob.clone()));
+                e.reflinked = cloned;
+                idx.files_stored += 1;
+                idx.logical_bytes += j.rec.size;
+                if cloned {
+                    idx.reflinked_bytes += j.rec.size;
+                    n_ref += 1;
+                } else {
+                    idx.copied_bytes += j.rec.size;
+                    n_copy += 1;
+                }
+            }
+            Some(JobRes::Excluded(code)) => {
+                e.excluded = Some(code.into());
+                idx.coverage.unplanned_excluded += 1;
+                why(format!("{code}:{}", j.path), &mut reasons);
+            }
+            // aborted or not run: never reported as stored
+            _ => {
+                e.excluded = Some("not-stored".into());
+                idx.coverage.unplanned_excluded += 1;
+                why(format!("not-stored:{}", j.path), &mut reasons);
+            }
+        }
     }
     idx.method = match (n_ref > 0, n_copy > 0) {
         (true, true) => "mixed",
@@ -566,9 +821,38 @@ pub fn read_index(store: &Path, id: &str) -> Result<Index, String> {
     Ok(idx)
 }
 
-/// Open a stored blob (size checked; the content hash is verified by whoever consumes the bytes).
-pub fn open_blob(store: &Path, id: &str, e: &Entry) -> Result<std::fs::File, String> {
+/// A stored pre-image, readable from its start to its end.
+pub struct BlobReader(std::io::Take<std::fs::File>);
+
+impl Read for BlobReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+/// Open a stored blob (location and size checked; the content hash is verified by whoever consumes the bytes).
+pub fn open_blob(store: &Path, id: &str, e: &Entry) -> Result<BlobReader, String> {
+    use std::io::{Seek, SeekFrom};
     let blob = e.blob.as_deref().ok_or("not-stored")?;
+    if let Some((pack, off)) = blob.split_once('@') {
+        // packed: `p<digits>@<offset>`
+        let ok_name = pack.len() > 1
+            && pack.starts_with('p')
+            && pack[1..].bytes().all(|b| b.is_ascii_digit());
+        let off: u64 = off.parse().map_err(|_| "corrupt".to_owned())?;
+        if !ok_name {
+            return Err("corrupt".into());
+        }
+        let p = store.join(id).join("files").join(pack);
+        let md = std::fs::symlink_metadata(&p).map_err(|_| "missing".to_owned())?;
+        if !md.is_file() || md.len() < off.saturating_add(e.size) {
+            return Err("corrupt".into());
+        }
+        let mut f = std::fs::File::open(&p).map_err(|_| "missing".to_owned())?;
+        f.seek(SeekFrom::Start(off))
+            .map_err(|_| "corrupt".to_owned())?;
+        return Ok(BlobReader(f.take(e.size)));
+    }
     if blob.is_empty() || !blob.bytes().all(|b| b.is_ascii_digit()) {
         return Err("corrupt".into());
     }
@@ -577,7 +861,8 @@ pub fn open_blob(store: &Path, id: &str, e: &Entry) -> Result<std::fs::File, Str
     if !md.is_file() || md.len() != e.size {
         return Err("corrupt".into());
     }
-    std::fs::File::open(&p).map_err(|_| "missing".to_owned())
+    let f = std::fs::File::open(&p).map_err(|_| "missing".to_owned())?;
+    Ok(BlobReader(f.take(e.size)))
 }
 
 /// Read a pre-image fully, verifying its hash (bounded; for diffs).
@@ -597,7 +882,7 @@ pub fn read_preimage(
     let mut f = open_blob(store, id, e)?;
     let mut b = Vec::with_capacity(e.size as usize);
     f.read_to_end(&mut b).map_err(|_| "corrupt".to_owned())?;
-    if Some(hex::encode(Sha256::digest(&b))) != e.sha256 {
+    if b.len() as u64 != e.size || Some(hex::encode(Sha256::digest(&b))) != e.sha256 {
         return Err("corrupt".into());
     }
     Ok(Some(b))

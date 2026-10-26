@@ -58,7 +58,11 @@ pub fn code_preamble_body_with(
             )
             .replace(
                 "proc_run runs in a sandbox over a throw-away copy:",
-                "proc_run runs in a sandbox over a throw-away snapshot of the project's current files (including your edits so far). Whatever a command creates, changes or deletes there (mkdir, echo > file, formatters, generators) is DISCARDED when it ends and the result lists it: put files into the project with fs_write (it also creates missing folders), then run the check over what is really there. Also:",
+                if in_place_commands {
+                    "proc_run runs in a sandbox directly ON THE REAL PROJECT FOLDER, the very files fs_edit and fs_write change: a file you write is visible to the next command at once, and what a command creates, changes or deletes (mkdir, formatters, code generators, dependency installs, build output) is changed on disk immediately, for the user too. Be deliberate: run formatters and generators only over what the task needs, never delete or overwrite what you were not asked to touch, and leave no stray files. Nexus saves a checkpoint before each command where it can and the result states what could be restored; do not rely on it. `.git` is read-only (you cannot commit or change git configuration), secret-shaped files, sockets and hard-linked files are protected, and dependency and build folders (node_modules, target, ...) are not covered by recovery. Also:"
+                } else {
+                    "proc_run runs in a sandbox over a throw-away snapshot of the project's current files (including your edits so far). Whatever a command creates, changes or deletes there (mkdir, echo > file, formatters, generators) is DISCARDED when it ends and the result lists it: put files into the project with fs_write (it also creates missing folders), then run the check over what is really there. Also:"
+                },
             );
     }
     if in_place_commands && !direct {
