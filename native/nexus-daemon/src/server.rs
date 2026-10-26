@@ -2992,6 +2992,13 @@ fn resolve_task_permissions(
             "the project's permissions name a capability this build does not provide".into(),
         ));
     }
+    if frozen.net_scope() == NetScope::Controlled && frozen.fs_scope() != FsScope::Workspace {
+        return Err((
+            "scope-refused",
+            "Controlled Internet is available to commands that run in place (filesystem scope: workspace)"
+                .into(),
+        ));
+    }
     if frozen.net_scope() == NetScope::Controlled {
         let c = controlled_availability(daemon);
         if c["available"] != true {
