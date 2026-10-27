@@ -1536,6 +1536,7 @@ fn main() {
         "intent" => cmd_intent(&args, &cfg),
         "tools" => cmd_tools(&args, &cfg),
         "project" => cmd_project(&args, &cfg),
+        "job" => cmd_job(&args, &cfg),
         "exec" => cmd_exec(&args, &cfg),
         "runtime" => cmd_runtime(&args, &cfg),
         "engine" => cmd_engine(&args, &cfg),
@@ -2681,5 +2682,70 @@ fn depcache_command(cfg: &ClientConfig, args: &[String]) -> ExitCode {
             ExitCode::Ok
         }
         _ => usage_err(cfg, "unknown depcache subcommand"),
+    }
+}
+
+fn cmd_job(args: &[String], cfg: &ClientConfig) -> ExitCode {
+    use nexus_client::intent_client as ic;
+    const USAGE: &str = "usage: nexus job start <project-id> [--expose PORT]... -- <program> [args...] | status <job-id> | logs <job-id> | stop <job-id> | list";
+    let sock = flag_value(args, "--broker-socket")
+        .map(PathBuf::from)
+        .unwrap_or_else(ic::default_broker_socket);
+    let sub = args.get(1).map(|s| s.as_str()).unwrap_or("");
+    let show = |v: serde_json::Value| {
+        emit(
+            cfg,
+            &v,
+            &serde_json::to_string_pretty(&v).unwrap_or_default(),
+        );
+        ExitCode::Ok
+    };
+    let run = |r: Result<serde_json::Value, nexus_client::ClientError>| match r {
+        Ok(v) => show(v),
+        Err(e) => emit_err(cfg.json, &e),
+    };
+    match sub {
+        "start" => {
+            let (Some(pid), Some(dash)) = (args.get(2), args.iter().position(|a| a == "--")) else {
+                return fail(cfg, USAGE);
+            };
+            let Some(program) = args.get(dash + 1) else {
+                return fail(cfg, USAGE);
+            };
+            let prog_args: Vec<String> = args[dash + 2..].to_vec();
+            let mut ports: Vec<u16> = Vec::new();
+            let mut i = 3;
+            while i + 1 < dash {
+                if args[i] == "--expose" {
+                    if let Ok(p) = args[i + 1].parse::<u16>() {
+                        ports.push(p);
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            run(ic::job_start(&sock, pid, program, &prog_args, &ports))
+        }
+        "status" => match args.get(2) {
+            Some(id) => run(ic::job_status(&sock, id)),
+            None => fail(cfg, USAGE),
+        },
+        "logs" => match args.get(2) {
+            Some(id) => match ic::job_logs(&sock, id) {
+                Ok(v) => {
+                    println!("{}", v.get("logs").and_then(|l| l.as_str()).unwrap_or(""));
+                    ExitCode::Ok
+                }
+                Err(e) => emit_err(cfg.json, &e),
+            },
+            None => fail(cfg, USAGE),
+        },
+        "stop" => match args.get(2) {
+            Some(id) => run(ic::job_stop(&sock, id)),
+            None => fail(cfg, USAGE),
+        },
+        "list" => run(ic::job_list(&sock)),
+        _ => fail(cfg, USAGE),
     }
 }

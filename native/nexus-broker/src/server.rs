@@ -54,6 +54,9 @@ pub struct Broker {
     /// One writer per folder; claimed under the store lock at submission, released when the run ends.
     pub(crate) direct_claims: Mutex<HashMap<String, String>>,
     pub(crate) bridge_lock: Mutex<()>,
+    /// M7D: the broker-owned background-job manager (lazily opened under the state dir).
+    pub(crate) jobs: Mutex<Option<Arc<nexus_tools::jobs::JobManager>>>,
+    pub(crate) jobs_state: std::path::PathBuf,
     pub shutdown: AtomicBool,
     conns: AtomicUsize,
     unauth_conns: AtomicUsize,
@@ -1330,6 +1333,38 @@ impl Broker {
         }
     }
 
+    fn job_manager(&self) -> Result<Arc<nexus_tools::jobs::JobManager>, (&'static str, String)> {
+        let mut g = self.jobs.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(m) = &*g {
+            return Ok(m.clone());
+        }
+        let m = nexus_tools::jobs::JobManager::open(&self.jobs_state).map_err(|e| {
+            (
+                "not-available",
+                format!("background jobs are unavailable: {}", e.message),
+            )
+        })?;
+        let m = Arc::new(m);
+        *g = Some(m.clone());
+        Ok(m)
+    }
+
+    /// M7D background jobs. User clients only (uid-gated socket; the model has no path here).
+    fn job_verb(&self, cmd: &str, params: &Value) -> CmdResult {
+        let env = self.cfg.registry_env().ok_or((
+            "not-available",
+            "this broker cannot manage projects (not in the interactive profile)".to_owned(),
+        ))?;
+        let mgr = self.job_manager()?;
+        match cmd {
+            "job-start" => crate::jobs::job_start(&mgr, &env, &self.cfg.state_dir, params),
+            "job-status" => crate::jobs::job_status(&mgr, params),
+            "job-logs" => crate::jobs::job_logs(&mgr, params),
+            "job-stop" => crate::jobs::job_stop(&mgr, params),
+            _ => crate::jobs::job_list(&mgr),
+        }
+    }
+
     /// Evidence and guarded restoration of in-place commands. User clients only (the broker socket is
     /// uid-gated; the model has no path to it). The broker adds nothing: the daemon decides and audits.
     fn exec_evidence_verb(&self, client: &str, cmd: &str, params: &Value) -> CmdResult {
@@ -1594,6 +1629,9 @@ impl Broker {
             | "project-grant-clear" => self.project_grant_verb(client, cmd, params),
             "exec-effects" | "exec-restore-preview" | "exec-restore" => {
                 self.exec_evidence_verb(client, cmd, params)
+            }
+            "job-start" | "job-status" | "job-logs" | "job-stop" | "job-list" => {
+                self.job_verb(cmd, params)
             }
             "project-adopt" => self.project_adopt(client, run_id),
             "provider-consent-status" => self.consent_status(),
@@ -1999,6 +2037,7 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let socket = cfg.socket_path.clone();
     let cfg_max_active = cfg.max_active;
+    let jobs_state = cfg.state_dir.join("jobs");
     let broker = Arc::new(Broker {
         cfg,
         store,
@@ -2011,6 +2050,8 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
         cancel_flags: Mutex::new(HashMap::new()),
         direct_claims: Mutex::new(HashMap::new()),
         bridge_lock: Mutex::new(()),
+        jobs_state,
+        jobs: Mutex::new(None),
         shutdown: AtomicBool::new(false),
         conns: AtomicUsize::new(0),
         unauth_conns: AtomicUsize::new(0),
