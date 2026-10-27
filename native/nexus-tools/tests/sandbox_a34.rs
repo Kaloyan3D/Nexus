@@ -62,6 +62,7 @@ fn spec(id: &str, program: &str, args: &[&str], src: &std::path::Path) -> Sandbo
         protect: Vec::new(),
         fd_ro_binds: Vec::new(),
         egress: None,
+        dev: None,
         net: false,
         limits: SandboxLimits {
             wall_ms: 20_000,

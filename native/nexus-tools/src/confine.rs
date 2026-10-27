@@ -118,6 +118,9 @@ pub struct Plan {
     pub egress_sock: Option<String>,
     pub bridge_http: Option<u16>,
     pub bridge_forward: Vec<u16>,
+    /// M7C: sandbox loopback ports to expose through unix sockets in `/nexus-dev`
+    /// (`dev-<port>.sock`), relayed by a bridge child of the gate.
+    pub dev_ports: Vec<u16>,
 }
 
 impl Plan {
@@ -146,6 +149,10 @@ impl Plan {
         }
         for p in &self.bridge_forward {
             a.push("--bridge-forward".into());
+            a.push(p.to_string());
+        }
+        for p in &self.dev_ports {
+            a.push("--dev-port".into());
             a.push(p.to_string());
         }
         for e in &self.expect {
@@ -235,6 +242,12 @@ impl Plan {
                     need(i, 1)?;
                     p.bridge_forward
                         .push(args[i + 1].parse().map_err(|_| "bad --bridge-forward")?);
+                    i += 2;
+                }
+                "--dev-port" => {
+                    need(i, 1)?;
+                    p.dev_ports
+                        .push(args[i + 1].parse().map_err(|_| "bad --dev-port")?);
                     i += 2;
                 }
                 "--readonly" => {
@@ -623,6 +636,72 @@ fn start_bridge(plan: &Plan) {
     }
 }
 
+/// M7C: relay one accepted unix-socket connection to a loopback TCP port inside the sandbox.
+fn dev_conn(client: std::os::unix::net::UnixStream, port: u16) {
+    let Ok(mut up) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+        return; // the dev server is not listening (yet): the connection fails, nothing else tried
+    };
+    let (Ok(mut c2), Ok(mut u2)) = (client.try_clone(), up.try_clone()) else {
+        return;
+    };
+    let mut c1 = client;
+    let t = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut c1, &mut up);
+        let _ = up.shutdown(std::net::Shutdown::Write);
+    });
+    let _ = std::io::copy(&mut u2, &mut c2);
+    let _ = c2.shutdown(std::net::Shutdown::Write);
+    let _ = t.join();
+}
+
+/// Start the development bridge in a child of the gate (inside the sandbox, after Landlock),
+/// mirroring the egress bridge: for each authorized port, listen on `/nexus-dev/dev-<port>.sock`
+/// (a Nexus-bound directory) and relay to that loopback port in the sandbox's own net namespace.
+fn start_dev_bridge(plan: &Plan) {
+    if plan.dev_ports.is_empty() {
+        return;
+    }
+    let mut ls = Vec::new();
+    for p in &plan.dev_ports {
+        let path = format!("/nexus-dev/dev-{p}.sock");
+        let _ = std::fs::remove_file(&path);
+        match std::os::unix::net::UnixListener::bind(&path) {
+            Ok(l) => ls.push((l, *p)),
+            Err(e) => refuse(&format!(
+                "cannot listen on {path} for the development bridge: {e}"
+            )),
+        }
+    }
+    match unsafe { libc::fork() } {
+        -1 => refuse("cannot start the development bridge"),
+        0 => {
+            unsafe {
+                libc::setsid();
+                libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+                let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+                if null >= 0 {
+                    libc::dup2(null, 0);
+                    libc::dup2(null, 1);
+                    libc::dup2(null, 2);
+                }
+            }
+            let mut hs = Vec::new();
+            for (l, port) in ls {
+                hs.push(std::thread::spawn(move || {
+                    for c in l.incoming().flatten() {
+                        std::thread::spawn(move || dev_conn(c, port));
+                    }
+                }));
+            }
+            for h in hs {
+                let _ = h.join();
+            }
+            unsafe { libc::_exit(0) };
+        }
+        _ => {}
+    }
+}
+
 /// Entry point of `nexus-confine`.
 pub fn shim_main(args: Vec<String>) -> ! {
     if args.first().map(String::as_str) == Some("--version") {
@@ -660,6 +739,7 @@ pub fn shim_main(args: Vec<String>) -> ! {
     apply_landlock(&plan, abi);
     self_test();
     start_bridge(&plan);
+    start_dev_bridge(&plan);
     // nothing but 0-2 may survive into the command
     unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) };
     let cargs: Vec<CString> = cmd.iter().map(|a| cstr(a)).collect();

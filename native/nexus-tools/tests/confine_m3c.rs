@@ -101,6 +101,7 @@ fn launch_with(
         protect: mount.protect(),
         fd_ro_binds: mount.fd_ro_binds(),
         egress: None,
+        dev: None,
         net,
         limits: SandboxLimits {
             wall_ms: 60_000,
@@ -456,6 +457,7 @@ fn a_directory_swapped_for_a_link_after_the_scan_is_caught_before_the_command_ru
         protect: mount.protect(),
         fd_ro_binds: mount.fd_ro_binds(),
         egress: None,
+        dev: None,
         net: false,
         limits: SandboxLimits {
             wall_ms: 30_000,
@@ -511,6 +513,7 @@ fn an_entry_that_disappears_between_the_scan_and_the_launch_never_exposes_anythi
         protect: mount.protect(),
         fd_ro_binds: mount.fd_ro_binds(),
         egress: None,
+        dev: None,
         net: false,
         limits: SandboxLimits {
             wall_ms: 30_000,
@@ -592,6 +595,7 @@ fn the_mounted_workspace_is_the_pinned_object_even_after_the_path_is_replaced() 
         protect: mount.protect(),
         fd_ro_binds: mount.fd_ro_binds(),
         egress: None,
+        dev: None,
         net: false,
         limits: SandboxLimits {
             wall_ms: 30_000,

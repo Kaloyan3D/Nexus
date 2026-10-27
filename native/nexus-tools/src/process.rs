@@ -1407,6 +1407,7 @@ pub fn run_process(
         pinned_root: mount.as_ref().map(|m| m.root_fd()),
         protect: mount.as_ref().map(|m| m.protect()).unwrap_or_default(),
         fd_ro_binds: mount.as_ref().map(|m| m.fd_ro_binds()).unwrap_or_default(),
+        dev: None,
         egress: egress.as_ref().map(|e| crate::sandbox::EgressSpec {
             socket: e.socket(),
             http_port: crate::egress::PROXY_PORT,
