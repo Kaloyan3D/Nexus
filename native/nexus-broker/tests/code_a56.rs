@@ -19959,3 +19959,70 @@ fn m8_c_unsupported_full_combinations_are_refused_at_grant_time() {
     }
     b.shutdown();
 }
+
+#[test]
+fn m81_a_job_from_an_ended_task_blocks_an_unrelated_direct_run_until_stopped() {
+    if !sandbox_ready() {
+        return;
+    }
+    // Task A: start a file-writing watcher job and finish, leaving it alive.
+    let responder_a: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        match tool_calls_done(body) {
+            0 => Answer::Frames(call_frames(
+                &resp,
+                n,
+                "w0",
+                "job_start",
+                r#"{"program":"sh","args":["-c","while true; do date +%s%N >> watcher.log; sleep 1; done"],"cwd":".","exposePorts":[]}"#,
+            )),
+            _ => Answer::Frames(text_frames(&resp, "watcher started")),
+        }
+    });
+    let (fx, b, sock, pid, folder) = m71_env(responder_a, "m81-jobs");
+    let _ = &fx;
+    // dev-port grant from m71_env covers fs=workspace; the watcher needs no port
+    let mut intent_a = code_intent_for(&pid, "Start the watcher.", "m81-a-0001", |_| {});
+    intent_a.model = Some(nexus_contracts::intent::ModelSelection {
+        provider_id: "e2e-mock".into(),
+        remote_model_id: "e2e-mock-model".into(),
+        logical_model_id: Some("e2e/e2e-1".into()),
+        route_id: Some("e2e-mock/e2e-1".into()),
+        mode_id: Some("engineering-v2-jobs".into()),
+    });
+    let run_a = submit_wait(&sock, &intent_a, 300);
+    assert_eq!(run_a.state, "completed", "{run_a:?}");
+    let jobs = ic::job_list(&sock).expect("jobs");
+    assert_eq!(jobs["jobs"][0]["state"], "running", "{jobs}");
+    let job_id = jobs["jobs"][0]["jobId"].as_str().unwrap().to_owned();
+    // the watcher is really writing to the project after its task ended
+    std::thread::sleep(Duration::from_millis(1200));
+    assert!(
+        folder.join("watcher.log").exists(),
+        "watcher writes post-task"
+    );
+
+    // Task B: an unrelated run on the same Direct project must not silently
+    // acquire the workspace while A's job can still write to it.
+    let intent_b = code_intent_for(&pid, "Edit something.", "m81-b-0001", |_| {});
+    let refused = ic::submit(&sock, &intent_b);
+    assert!(
+        refused.is_err(),
+        "unrelated run must be refused while a foreign job is running: {refused:?}"
+    );
+    let msg = format!("{:?}", refused.err().unwrap());
+    assert!(
+        msg.contains(&job_id),
+        "refusal names the blocking job: {msg}"
+    );
+
+    // Once the job stops, Task B proceeds normally.
+    ic::job_stop(&sock, &job_id).expect("stop");
+    let run_b = submit_wait(
+        &sock,
+        &code_intent_for(&pid, "Edit something.", "m81-b-0002", |_| {}),
+        300,
+    );
+    assert_eq!(run_b.state, "completed", "{run_b:?}");
+    b.shutdown();
+}

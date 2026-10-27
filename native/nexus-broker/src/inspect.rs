@@ -1328,6 +1328,24 @@ pub(crate) fn run(
         .and_then(|r| r.run.connection_id.clone());
     let bound_ctx = extension.get("contextLimitTokens").and_then(|v| v.as_u64());
     let bound_out = extension.get("outputLimitTokens").and_then(|v| v.as_u64());
+    // M8.1: background jobs that may write this project's folder while this
+    // run works are named on the run record. Their effects are concurrent
+    // with (and never attributed to) this run's commands.
+    {
+        let active = b.running_job_ids(&workspace_id);
+        if !active.is_empty() {
+            b.update(run_id, |r| {
+                let note = format!(
+                    "Background job(s) {} from this conversation or started by the user are still running and can change project files concurrently; their changes are not attributed to this run's commands and checkpoints taken now may not cover them.",
+                    active.join(", ")
+                );
+                r.workspace_note = Some(match r.workspace_note.take() {
+                    Some(prev) => format!("{prev} {note}"),
+                    None => note,
+                });
+            });
+        }
+    }
     b.update(run_id, |r| {
         r.conversation_id = Some(conv.clone());
         r.provider_id = Some(provider_id.clone());
@@ -1917,6 +1935,14 @@ fn job_call(
     match result {
         Ok(v) => {
             act.status = "executed".into();
+            if name == "job_start" {
+                if let (Some(j), Some(pid)) = (
+                    v.get("jobId").and_then(|x| x.as_str()),
+                    sh.intent.workspace_id.as_deref(),
+                ) {
+                    ctx.b.note_job_owner(j, pid, ctx.run_id);
+                }
+            }
             let text = nexus_contracts::canonical_json(&v);
             Rendered {
                 digest: digest_of(&text),

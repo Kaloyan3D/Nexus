@@ -57,6 +57,11 @@ pub struct Broker {
     /// M7D: the broker-owned background-job manager (lazily opened under the state dir).
     pub(crate) jobs: Mutex<Option<Arc<nexus_tools::jobs::JobManager>>>,
     pub(crate) jobs_state: std::path::PathBuf,
+    /// M8.1: background job ownership for workspace coordination:
+    /// job id -> (project id, owning run id; `user` for CLI/Desktop starts).
+    /// In-memory only: after a broker restart no job survives as `running`
+    /// (records reconcile to interrupted/stopped), so nothing is lost.
+    pub(crate) job_owners: Mutex<HashMap<String, (String, String)>>,
     pub shutdown: AtomicBool,
     conns: AtomicUsize,
     unauth_conns: AtomicUsize,
@@ -641,6 +646,42 @@ impl Broker {
                 }
             }
             if let Some(pid) = direct_project.as_ref().filter(|_| !read_only) {
+                // M8.1: a background job outlives its run, but it must not
+                // outlive workspace coordination. A running job owned by a
+                // DIFFERENT conversation blocks a new writer on this folder
+                // (the existing one-writer rule, extended to job lifetime);
+                // same-conversation and user-started jobs proceed and are
+                // named on the run record instead of silently concurrent.
+                // The conversation this submission will work in, when it
+                // continues one; a fresh submission is a new conversation.
+                let new_conv: Option<String> = continuation
+                    .and_then(|c| {
+                        all.iter()
+                            .find(|r| r.run.run_id == c)
+                            .and_then(|r| r.run.conversation_id.clone())
+                    })
+                    .or_else(|| {
+                        link.as_ref().and_then(|l| {
+                            all.iter()
+                                .filter(|r| r.run.thread_id.as_deref() == Some(l.thread_id.as_str()))
+                                .max_by_key(|r| r.run.created_at_ms)
+                                .and_then(|r| r.run.conversation_id.clone())
+                        })
+                    });
+                for (job_id, owner_run) in self.running_model_jobs(pid) {
+                    let owner_conv = all
+                        .iter()
+                        .find(|r| r.run.run_id == owner_run)
+                        .and_then(|r| r.run.conversation_id.clone());
+                    if owner_conv != new_conv {
+                        return Err((
+                            "project-busy",
+                            format!(
+                                "background job {job_id} from another task is still running and can write to this project's folder. Stop it (nexus job stop {job_id}) or wait for it to finish, then send again; nothing was changed."
+                            ),
+                        ));
+                    }
+                }
                 let mut g = self.direct_claims.lock().unwrap_or_else(|p| p.into_inner());
                 if g.contains_key(pid) {
                     return Err((
@@ -1366,6 +1407,54 @@ impl Broker {
         Ok(m)
     }
 
+    /// Record who started a job (M8.1 workspace coordination).
+    pub(crate) fn note_job_owner(&self, job_id: &str, project: &str, owner_run: &str) {
+        if let Ok(mut g) = self.job_owners.lock() {
+            g.insert(
+                job_id.to_owned(),
+                (project.to_owned(), owner_run.to_owned()),
+            );
+        }
+    }
+
+    /// Running jobs of a project started by a model run (user starts excluded).
+    pub(crate) fn running_model_jobs(&self, project: &str) -> Vec<(String, String)> {
+        let Ok(mgr) = self.job_manager() else {
+            return Vec::new();
+        };
+        let owners = self
+            .job_owners
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        mgr.list()
+            .iter()
+            .filter(|r| r.state == "running")
+            .filter_map(|r| {
+                let (pid, owner) = owners.get(&r.id)?;
+                (pid == project && owner != "user").then(|| (r.id.clone(), owner.clone()))
+            })
+            .collect()
+    }
+
+    /// All running job ids of a project (any owner), for honest run notes.
+    pub(crate) fn running_job_ids(&self, project: &str) -> Vec<String> {
+        let Ok(mgr) = self.job_manager() else {
+            return Vec::new();
+        };
+        let owners = self
+            .job_owners
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        mgr.list()
+            .iter()
+            .filter(|r| r.state == "running")
+            .filter(|r| owners.get(&r.id).is_some_and(|(pid, _)| pid == project))
+            .map(|r| r.id.clone())
+            .collect()
+    }
+
     /// M7D background jobs. User clients only (uid-gated socket; the model has no path here).
     fn job_verb(&self, cmd: &str, params: &Value) -> CmdResult {
         let env = self.cfg.registry_env().ok_or((
@@ -1374,7 +1463,16 @@ impl Broker {
         ))?;
         let mgr = self.job_manager()?;
         match cmd {
-            "job-start" => crate::jobs::job_start(&mgr, &env, &self.cfg.state_dir, params),
+            "job-start" => {
+                let v = crate::jobs::job_start(&mgr, &env, &self.cfg.state_dir, params)?;
+                if let (Some(j), Some(p)) = (
+                    v.get("jobId").and_then(|x| x.as_str()),
+                    params.get("projectId").and_then(|x| x.as_str()),
+                ) {
+                    self.note_job_owner(j, p, "user");
+                }
+                Ok(v)
+            }
             "job-status" => crate::jobs::job_status(&mgr, params),
             "job-logs" => crate::jobs::job_logs(&mgr, params),
             "job-stop" => crate::jobs::job_stop(&mgr, params),
@@ -2069,6 +2167,7 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
         bridge_lock: Mutex::new(()),
         jobs_state,
         jobs: Mutex::new(None),
+        job_owners: Mutex::new(HashMap::new()),
         shutdown: AtomicBool::new(false),
         conns: AtomicUsize::new(0),
         unauth_conns: AtomicUsize::new(0),
