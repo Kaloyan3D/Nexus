@@ -20026,3 +20026,72 @@ fn m81_a_job_from_an_ended_task_blocks_an_unrelated_direct_run_until_stopped() {
     assert_eq!(run_b.state, "completed", "{run_b:?}");
     b.shutdown();
 }
+
+#[test]
+fn thread_submission_stores_each_messages_read_only_decision_independently() {
+    if !sandbox_ready() {
+        return;
+    }
+    const PROMPT: &str = "Build a Python application that tracks expenses from the command line, with a SQLite database, unit tests and a README.\n\nDo not modify .git or access files outside the project.";
+    let responder: Responder =
+        Arc::new(move |n, _body| Answer::Frames(text_frames(&format!("resp_{n}"), "done")));
+    let fx = fixture_autonomous(responder);
+    let b = interactive_broker(&fx, "classifier-store");
+    let sock = b.socket_path().to_owned();
+
+    // 1. an explicitly read-only message is stored read-only
+    let s1 = tsend(
+        &sock,
+        None,
+        "proj",
+        "Review only. Do not modify any files.",
+        "auto",
+        "continue",
+        "classifier-key-0001",
+    )
+    .expect("send 1");
+    let tid = s1["threadId"].as_str().unwrap().to_owned();
+    assert_eq!(s1["mode"]["readOnly"], true, "{s1}");
+    let r1 = wait_terminal(&sock, s1["run"]["runId"].as_str().unwrap(), 180);
+    assert_eq!(r1.state, "completed", "{r1:?}");
+    assert!(r1.read_only, "{r1:?}");
+
+    // 2. the Python-application prompt under "Make changes" (edit): the
+    // thread STORE (not just the classifier) records readOnly=false, and
+    // the earlier read-only run does not stick to this conversation
+    let s2 = tsend(
+        &sock,
+        Some(&tid),
+        "proj",
+        PROMPT,
+        "edit",
+        "continue",
+        "classifier-key-0002",
+    )
+    .expect("send 2");
+    assert_eq!(s2["mode"]["readOnly"], false, "{s2}");
+    let r2 = wait_terminal(&sock, s2["run"]["runId"].as_str().unwrap(), 180);
+    assert_eq!(r2.state, "completed", "{r2:?}");
+    assert!(!r2.read_only, "{r2:?}");
+    let t = wait_folded(&sock, &tid, 2);
+    assert_eq!(t["runs"][0]["readOnly"], true, "{t}");
+    assert_eq!(t["runs"][1]["readOnly"], false, "{t}");
+    assert!(!run_of(&t, 1).read_only, "{t}");
+
+    // 3. the same prompt under Auto is writable too
+    let s3 = tsend(
+        &sock,
+        Some(&tid),
+        "proj",
+        PROMPT,
+        "auto",
+        "continue",
+        "classifier-key-0003",
+    )
+    .expect("send 3");
+    assert_eq!(s3["mode"]["readOnly"], false, "{s3}");
+    let r3 = wait_terminal(&sock, s3["run"]["runId"].as_str().unwrap(), 180);
+    assert_eq!(r3.state, "completed", "{r3:?}");
+    assert!(!r3.read_only, "{r3:?}");
+    b.shutdown();
+}

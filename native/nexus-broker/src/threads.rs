@@ -569,7 +569,19 @@ fn negated_change(clause: &[String]) -> bool {
             continue;
         }
         let window: Vec<&String> = rest.iter().take(4).collect();
-        let obj = window.iter().any(|w| OBJECTS.contains(&w.as_str()));
+        // "don't touch .env files", "do not modify .git or ...": the generic
+        // object is qualified by a SPECIFIC named target first, so the
+        // negation covers that target only. A generic object reached only
+        // through filler ("any files", "the code") is a global prohibition.
+        const FILLER: &[&str] = &[
+            "any", "anything", "the", "a", "an", "all", "please", "this", "that", "these", "those",
+            "my", "your", "our", "their", "its", "no", "some",
+        ];
+        let obj = match window.iter().position(|w| OBJECTS.contains(&w.as_str())) {
+            Some(0) => true,
+            Some(j) => !rest[..j].iter().any(|w| !FILLER.contains(&w.as_str())),
+            None => false,
+        };
         let bare = rest.is_empty()
             || rest.iter().all(|w| {
                 matches!(
@@ -657,18 +669,61 @@ pub fn explicit_read_only(text: &str) -> bool {
         {
             return true;
         }
+        // "Review only", "explain only": the mirror image of the branch above
+        if t == "only"
+            && matches!(
+                if i > 0 { all[i - 1].as_str() } else { "" },
+                "review"
+                    | "explain"
+                    | "inspect"
+                    | "analyze"
+                    | "analyse"
+                    | "audit"
+                    | "look"
+                    | "read"
+                    | "investigate"
+            )
+            && !has_change_verb
+        {
+            return true;
+        }
         if matches!(t, "review-only" | "explain-only") {
             return true;
         }
     }
     // negated change instructions, clause by clause
-    for clause in text.split(['.', ';', '!', '?', '\n', ',', '(', ')', ':']) {
-        let toks = tokens(clause);
+    for clause in clauses(text) {
+        let toks = tokens(&clause);
         if negated_change(&toks) {
             return true;
         }
     }
     false
+}
+
+/// Split into clauses on sentence punctuation. A `.` only separates when it
+/// ends a sentence (followed by whitespace or the end of the text): the dot
+/// in `.git`, `src/lib.rs` or `1.5` is part of a name, and splitting there
+/// would truncate "Do not modify .git ..." to a bare "Do not modify" and
+/// misread a path-specific restriction as a global prohibition.
+fn clauses(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for (i, c) in chars.iter().enumerate() {
+        let sep = match c {
+            ';' | '!' | '?' | '\n' | ',' | '(' | ')' | ':' => true,
+            '.' => chars.get(i + 1).is_none_or(|n| n.is_whitespace()),
+            _ => false,
+        };
+        if sep {
+            out.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(*c);
+        }
+    }
+    out.push(cur);
+    out
 }
 
 /// Decide whether a request may change files. Restrictions the user typed always win; the
@@ -2352,9 +2407,44 @@ mod tests {
             "Do not modify the original repository, commit, push or deploy.",
             "Implement checkpoint R-NATIVE-1.\n\nWork autonomously in the isolated workspace.\n\nDo not modify the original repository, commit, push or deploy.\n\nDeliver a reviewable patch.",
             "Don't change the production database or the live config",
+            // path-specific restrictions are not global prohibitions: the
+            // leading dot of `.git` must not truncate the clause into a
+            // bare "Do not modify" (found live, see the regression below)
+            "Do not modify .git or access files outside the project.",
+            "Do not modify .git",
+            "Don't touch .env files",
+            "Do not modify .git/config or anything under .git/hooks",
+            "Write the code, but do not modify .git in any way.",
         ] {
             assert!(!explicit_read_only(t), "{t}");
         }
+    }
+
+    /// The exact failing shape from live use: a request to BUILD a Python
+    /// application, with a protected-path restriction, sent with changes
+    /// allowed. It must classify writable under both `edit` ("Make changes")
+    /// and `auto`, while genuine read-only instructions stay read-only.
+    #[test]
+    fn a_python_application_request_with_a_git_restriction_is_writable() {
+        const PROMPT: &str = "Build a Python application that tracks expenses from the command line, with a SQLite database, unit tests and a README.\n\nDo not modify .git or access files outside the project.";
+        assert!(
+            !explicit_read_only(PROMPT),
+            "path restriction misread as global"
+        );
+        assert!(
+            !classify_mode(PROMPT, "edit").read_only,
+            "Make changes must be writable"
+        );
+        assert!(
+            !classify_mode(PROMPT, "auto").read_only,
+            "Auto must be writable"
+        );
+        // explicit global prohibitions still win over the mode selection
+        assert!(explicit_read_only("Do not modify any files"));
+        assert!(classify_mode("Do not modify any files", "edit").read_only);
+        assert!(explicit_read_only("Review only"));
+        assert!(classify_mode("Review only", "edit").read_only);
+        assert!(classify_mode("Review only. Do not change anything.", "auto").read_only);
     }
 
     #[test]
