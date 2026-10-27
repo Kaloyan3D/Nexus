@@ -274,3 +274,75 @@ fn git_write_does_not_follow_pointers_or_environment_out_of_the_workspace() {
     let t = text(&o);
     assert!(!Path::new("/tmp/elsewhere").exists(), "{t}");
 }
+
+/// A1 characterization: `.git` does not exist before the command. What can ONE command do?
+#[test]
+fn a1_a_repo_created_by_the_command_itself_is_not_mount_protected_in_that_command() {
+    if !ready("a1") {
+        return;
+    }
+    // without gitWrite
+    let t = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(t.path()).unwrap().join("proj");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    let ws = Workspace::open_root(root.to_str().unwrap(), WorkspacePolicy::default()).unwrap();
+    let w = W { _t: t, root, ws };
+    let script = "export GIT_AUTHOR_NAME=m6 GIT_AUTHOR_EMAIL=m6@example.invalid GIT_COMMITTER_NAME=m6 GIT_COMMITTER_EMAIL=m6@example.invalid; \
+git init -q; echo init-rc=$?; \
+printf '[core]\\n\\trepositoryformatversion = 0\\n[user]\\n\\tname = planted\\n' > .git/config; echo config-rc=$?; \
+printf '#!/bin/sh\\necho hook-ran >> hook-marker.txt\\n' > .git/hooks/pre-commit; chmod +x .git/hooks/pre-commit; echo hook-rc=$?; \
+git add a.txt; git commit -q -m first; echo commit-rc=$?; ls hook-marker.txt 2>/dev/null; echo marker-rc=$?";
+    let o = launch_with(&w, &PrepareOptions::default(), script).expect("launch");
+    let txt = text(&o);
+    // PINNED LIMITATION (A1): mounts are prepared from what exists before the command, so the
+    // creating command itself is not protected. This assertion documents current reality; the
+    // consent text states it and the execution result flags `gitMetadataCreated`.
+    for want in [
+        "init-rc=0",
+        "config-rc=0",
+        "hook-rc=0",
+        "commit-rc=0",
+        "marker-rc=0",
+    ] {
+        assert!(txt.contains(want), "creation window ({want}): {txt}");
+    }
+    // from the NEXT command on, the existing protection applies in full
+    std::fs::write(w.root.join("c.txt"), "three\n").unwrap();
+    let o = launch_with(
+        &w,
+        &PrepareOptions::default(),
+        "echo x >> .git/config; echo cfg-rc=$?; git add c.txt; echo add-rc=$?",
+    )
+    .expect("launch");
+    let txt = text(&o);
+    assert!(!txt.contains("cfg-rc=0"), "{txt}");
+    assert!(!txt.contains("add-rc=0"), "{txt}");
+    // with gitWrite on a fresh project: hooks/config created in the same first command
+    let t2 = tempfile::tempdir().unwrap();
+    let root2 = std::fs::canonicalize(t2.path()).unwrap().join("proj");
+    std::fs::create_dir_all(&root2).unwrap();
+    std::fs::write(root2.join("a.txt"), "one\n").unwrap();
+    let ws2 = Workspace::open_root(root2.to_str().unwrap(), WorkspacePolicy::default()).unwrap();
+    let w2 = W {
+        _t: t2,
+        root: root2,
+        ws: ws2,
+    };
+    let o = launch_with(&w2, &gw_opts(), script).expect("launch");
+    let txt2 = text(&o);
+    // same creation window under the grant (hooks/config of a just-created repo)
+    assert!(txt2.contains("commit-rc=0"), "{txt2}");
+    // next command: commits work, hooks/config stay protected
+    std::fs::write(w2.root.join("c.txt"), "three\n").unwrap();
+    let o = launch_with(
+        &w2,
+        &gw_opts(),
+        "export GIT_AUTHOR_NAME=m6 GIT_AUTHOR_EMAIL=m6@example.invalid GIT_COMMITTER_NAME=m6 GIT_COMMITTER_EMAIL=m6@example.invalid; git add c.txt && git commit -q -m second; echo commit2-rc=$?; echo x > .git/hooks/evil2; echo hook2-rc=$?; echo x >> .git/config; echo cfg2-rc=$?",
+    )
+    .expect("launch");
+    let txt2 = text(&o);
+    assert!(txt2.contains("commit2-rc=0"), "{txt2}");
+    assert!(!txt2.contains("hook2-rc=0"), "{txt2}");
+    assert!(!txt2.contains("cfg2-rc=0"), "{txt2}");
+}
