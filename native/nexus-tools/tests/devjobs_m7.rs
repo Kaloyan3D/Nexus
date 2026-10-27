@@ -47,6 +47,7 @@ fn world(files: &[(&str, &str)]) -> W {
     W { _t: t, root, ws }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start(
     mgr: &JobManager,
     w: &W,
