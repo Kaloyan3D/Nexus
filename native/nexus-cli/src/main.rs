@@ -2451,10 +2451,12 @@ fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig
                 flag_value(args, "--checkpoint").unwrap_or_else(|| "best-effort".into());
             let hard_links = flag_value(args, "--hard-links").unwrap_or_else(|| "protect".into());
             let exec = Some((checkpoint.as_str(), hard_links.as_str()));
-            // Controlled Internet destinations (repeatable flags)
-            let mut dest = ic::NetChoice::default();
-            // M6B: explicit Git write capability (sealed into the grant; hooks/config stay read-only)
-            dest.git_write = args.iter().any(|a| a == "--git-write");
+            // Controlled Internet destinations (repeatable flags); `--git-write` is the owner's
+            // explicit Git-write choice (M6B; sealed into the grant, hooks/config stay read-only)
+            let mut dest = ic::NetChoice {
+                git_write: args.iter().any(|a| a == "--git-write"),
+                ..Default::default()
+            };
             let mut it = args.iter();
             while let Some(a) = it.next() {
                 let next = it.clone().next().cloned();
