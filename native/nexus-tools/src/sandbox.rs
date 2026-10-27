@@ -179,7 +179,9 @@ impl ConfineSpec {
     pub fn plan(&self, spec: &SandboxSpec) -> crate::confine::Plan {
         use crate::confine::{Expect, Plan};
         let mut ro: Vec<String> = vec!["/usr".into(), "/proc".into(), "/nexus".into()];
-        if spec.net {
+        // TLS trust and name-service files are needed with host networking AND with Controlled
+        // Internet (egress): without CA roots no client can verify a real certificate (M6C live).
+        if spec.net || spec.egress.is_some() {
             ro.extend(
                 NET_FILES
                     .iter()
@@ -585,7 +587,7 @@ pub fn bwrap_argv(spec: &SandboxSpec) -> Vec<String> {
         a.push(spec.src_dir.to_string_lossy().into_owned());
         a.push("/work/src".to_owned());
     }
-    if spec.net {
+    if spec.net || spec.egress.is_some() {
         // name resolution and TLS trust only; no other host configuration
         for f in NET_FILES {
             if std::path::Path::new(f).exists() {
