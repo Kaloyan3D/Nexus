@@ -80,6 +80,9 @@ function evidenceBadge(r: ThreadRunView): { label: string; tone: "success" | "wa
       detail: run.completionNote ?? "Verification commands failed and were never re-run successfully; the change is blocked or unverified, not passed.",
     };
   }
+  if (run.completion === "unexecuted-claims") {
+    return { label: "Not verified · a command did not run", tone: "warning", detail: run.completionNote ?? "A command in this run was refused, failed or never executed, so its claimed result is not evidence. Passing checks elsewhere in the run do not cover it." };
+  }
   if (run.completion === "no-change-reported") {
     return { label: "Completed · no change was made", tone: "warning", detail: "The request asked for an implementation, but no file was changed and no check ran. Read the answer to see why." };
   }

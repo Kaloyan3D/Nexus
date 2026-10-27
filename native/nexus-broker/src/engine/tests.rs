@@ -763,13 +763,19 @@ fn p2_an_exhausted_cap_with_an_unresolved_failure_is_never_fulfilled() {
     let (_, finished) = guided_rounds(10);
     assert!(finished);
     let s = unresolved_snapshot(20);
-    let c =
-        crate::completion::decide_run(true, 3, Some("pass"), "All checks pass.", s.failed_checks);
+    let c = crate::completion::decide_run(
+        true,
+        3,
+        Some("pass"),
+        "All checks pass.",
+        s.failed_checks,
+        0,
+    );
     assert_eq!(c, crate::completion::Completion::FailingChecks);
     assert_ne!(c, crate::completion::Completion::Fulfilled);
     // resolved: the same facts with no unresolved check are fulfilled
     assert_eq!(
-        crate::completion::decide_run(true, 3, Some("pass"), "All checks pass.", 0),
+        crate::completion::decide_run(true, 3, Some("pass"), "All checks pass.", 0, 0),
         crate::completion::Completion::Fulfilled
     );
 }
