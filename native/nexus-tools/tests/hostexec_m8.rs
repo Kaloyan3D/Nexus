@@ -183,3 +183,74 @@ fn m8_cancellation_kills_the_host_process_group() {
     let out = r.output.expect("output");
     assert_eq!(out["reason"], "cancelled", "{out}");
 }
+
+#[test]
+fn m81_setsid_descendant_cannot_escape_cancellation() {
+    let w = world();
+    let cancel = CancellationToken::new("c6");
+    let c2 = cancel.clone();
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        c2.cancel();
+    });
+    let r = run(
+        &w,
+        "sh",
+        &[
+            "-c",
+            "setsid sh -c 'while true; do date +%s%N >> hb.txt; sleep 0.2; done' & sleep 30",
+        ],
+        "full",
+        &cancel,
+    );
+    t.join().unwrap();
+    let out = r.output.expect("output");
+    assert_eq!(out["reason"], "cancelled", "{out}");
+    if out["resourceEnforcement"] != "kernel-cgroup" {
+        println!(
+            "NOT RUN (escape assertion): no writable cgroup on this machine; enforcement={}",
+            out["resourceEnforcement"]
+        );
+        return;
+    }
+    // the setsid descendant must be dead: the heartbeat stops growing
+    let hb = w.root.join("hb.txt");
+    let s1 = std::fs::metadata(&hb).map(|m| m.len()).unwrap_or(0);
+    std::thread::sleep(std::time::Duration::from_millis(900));
+    let s2 = std::fs::metadata(&hb).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(
+        s1, s2,
+        "setsid descendant survived cancellation (hb {s1} -> {s2})"
+    );
+    assert!(s1 > 0, "descendant actually ran before cancellation");
+}
+
+#[test]
+fn m81_detached_descendant_is_reaped_when_the_command_exits() {
+    let w = world();
+    let r = run(
+        &w,
+        "sh",
+        &[
+            "-c",
+            "setsid sh -c 'while true; do date +%s%N >> hb2.txt; sleep 0.2; done' & echo spawned",
+        ],
+        "full",
+        &CancellationToken::new("c7"),
+    );
+    let out = r.output.expect("output");
+    assert_eq!(out["exitCode"], 0, "{out}");
+    if out["resourceEnforcement"] != "kernel-cgroup" {
+        println!("NOT RUN (reap assertion): no writable cgroup on this machine");
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let hb = w.root.join("hb2.txt");
+    let s1 = std::fs::metadata(&hb).map(|m| m.len()).unwrap_or(0);
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    let s2 = std::fs::metadata(&hb).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(
+        s1, s2,
+        "daemonized descendant outlived its command (hb {s1} -> {s2})"
+    );
+}
