@@ -663,7 +663,9 @@ impl Broker {
                     .or_else(|| {
                         link.as_ref().and_then(|l| {
                             all.iter()
-                                .filter(|r| r.run.thread_id.as_deref() == Some(l.thread_id.as_str()))
+                                .filter(|r| {
+                                    r.run.thread_id.as_deref() == Some(l.thread_id.as_str())
+                                })
                                 .max_by_key(|r| r.run.created_at_ms)
                                 .and_then(|r| r.run.conversation_id.clone())
                         })
