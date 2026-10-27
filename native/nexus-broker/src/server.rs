@@ -1249,6 +1249,8 @@ impl Broker {
                     "known": true, "standingGrants": standing, "askAvailable": standing && ask,
                     "inPlaceAvailable": ip.get("available").and_then(|v| v.as_bool()).unwrap_or(false),
                     "inPlaceReason": ip.get("reason").cloned().unwrap_or(Value::Null),
+                    "hostExecAvailable": r.get("hostExecution").and_then(|h| h.get("available")).and_then(|v| v.as_bool()).unwrap_or(false),
+                    "hostExecReason": r.get("hostExecution").and_then(|h| h.get("reason")).cloned().unwrap_or(Value::Null),
                     "controlledAvailable": ci.get("available").and_then(|v| v.as_bool()).unwrap_or(false),
                     "controlledReason": ci.get("reason").cloned().unwrap_or(Value::Null),
                     "askReason": if !standing { json!("this installation's daemon does not apply per-project permissions") }
@@ -1299,6 +1301,19 @@ impl Broker {
                     format!(
                         "commands that change the project in place are not available on this machine: {}; nothing was changed",
                         sup["inPlaceReason"].as_str().unwrap_or("the confinement they need is missing")
+                    ),
+                ));
+            }
+            if params.get("fs").and_then(|v| v.as_str()) == Some("full")
+                && sup["hostExecAvailable"] != true
+            {
+                return Err((
+                    "not-available",
+                    format!(
+                        "Full Access is not available on this machine: {}; nothing was changed",
+                        sup["hostExecReason"]
+                            .as_str()
+                            .unwrap_or("the host backend is not enabled")
                     ),
                 ));
             }

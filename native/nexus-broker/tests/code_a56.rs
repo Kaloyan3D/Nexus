@@ -19819,3 +19819,143 @@ fn m71_b_job_outlives_its_run_until_the_grant_is_revoked() {
     assert!(stopped, "revocation must stop the job");
     b.shutdown();
 }
+
+// ---- M8: Full Access through the real broker/daemon ------------------------------------
+
+fn m8_env(
+    responder: Responder,
+    name: &str,
+    host_exec: bool,
+) -> (Fx, BrokerHandle, PathBuf, String, PathBuf) {
+    let mut daemon_args: Vec<String> = [
+        "--standing-grants",
+        "--approver-cap",
+        "@APPROVER_CAP@",
+        "--approver-uids",
+        "@UID@",
+        "--approver-same-user",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    if host_exec {
+        daemon_args.push("--enable-host-exec".to_owned());
+    }
+    let fx = fixture_full(
+        responder,
+        Box::new(|_| {}),
+        &[],
+        true,
+        true,
+        None,
+        &daemon_args,
+    );
+    let b = managed_broker(&fx, name);
+    let sock = b.socket_path().to_owned();
+    let folder = fx.work.join("managed");
+    let pid = open_managed_project(&fx, &sock, &folder);
+    ic::project_set_workspace(&sock, &pid, "direct").expect("direct");
+    (fx, b, sock, pid, folder)
+}
+
+fn m8_grant(sock: &Path, pid: &str, fs: &str, net: &str) -> Result<(), String> {
+    let pv = ic::project_grant_preview_with(sock, pid, fs, net, "auto", None, None)
+        .map_err(|e| e.message)?;
+    assert!(
+        pv["text"].as_str().unwrap().contains("FULL ACCESS"),
+        "consent must name Full Access plainly: {}",
+        pv["text"]
+    );
+    let digest = pv["textSha256"].as_str().unwrap().to_owned();
+    ic::project_grant_set_with(sock, pid, fs, net, "auto", None, &digest, "cli", None)
+        .map(|_| ())
+        .map_err(|e| e.message)
+}
+
+#[test]
+fn m8_a_model_command_runs_on_the_host_under_a_full_grant() {
+    if !sandbox_ready() {
+        return;
+    }
+    let evidence = Arc::new(Mutex::new(Vec::<String>::new()));
+    let ev = evidence.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        match tool_calls_done(body) {
+            0 => Answer::Frames(call_frames(
+                &resp,
+                n,
+                "h0",
+                "proc_run",
+                r#"{"program":"sh","args":["-c","echo host-ok > host-made.txt; cat host-made.txt"]}"#,
+            )),
+            _ => {
+                ev.lock().unwrap().push(m71_last_output(body));
+                Answer::Frames(text_frames(&resp, "done"))
+            }
+        }
+    });
+    let (fx, b, sock, pid, folder) = m8_env(responder, "m8-host", true);
+    let _ = &fx;
+    m8_grant(&sock, &pid, "full", "full").expect("full grant");
+    let run = submit_wait(
+        &sock,
+        &code_intent_for(
+            &pid,
+            "Write host-made.txt via a command.",
+            "m8-host-0001",
+            |_| {},
+        ),
+        300,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let ev = evidence.lock().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(folder.join("host-made.txt"))
+            .unwrap_or_else(|_| panic!("evidence: {ev:?}")),
+        "host-ok\n",
+        "the host command wrote the real project folder"
+    );
+    assert!(
+        ev.iter()
+            .any(|o| o.contains("\"backend\":\"host\"") && o.contains("host-ok")),
+        "{ev:?}"
+    );
+    assert_eq!(run.exec_scope.as_deref(), Some("full"), "{run:?}");
+    b.shutdown();
+}
+
+#[test]
+fn m8_b_full_grant_is_refused_when_the_daemon_did_not_enable_host_exec() {
+    if !sandbox_ready() {
+        return;
+    }
+    let responder: Responder =
+        Arc::new(|n, _| Answer::Frames(text_frames(&format!("resp_{n}"), "unused")));
+    let (fx, b, sock, pid, _folder) = m8_env(responder, "m8-nohost", false);
+    let _ = &fx;
+    let err = m8_grant(&sock, &pid, "full", "full").expect_err("grant must be refused");
+    assert!(err.contains("Full Access is not available"), "{err}");
+    // unsupported combinations fail actionably at grant time too (via a daemon that allows full)
+    b.shutdown();
+}
+
+#[test]
+fn m8_c_unsupported_full_combinations_are_refused_at_grant_time() {
+    if !sandbox_ready() {
+        return;
+    }
+    let responder: Responder =
+        Arc::new(|n, _| Answer::Frames(text_frames(&format!("resp_{n}"), "unused")));
+    let (fx, b, sock, pid, _folder) = m8_env(responder, "m8-combos", true);
+    let _ = &fx;
+    for (fs, net) in [
+        ("full", "offline"),
+        ("full", "controlled"),
+        ("workspace", "full"),
+    ] {
+        let pv = ic::project_grant_preview_with(&sock, &pid, fs, net, "auto", None, None);
+        assert!(pv.is_err(), "{fs}/{net} must be refused: {pv:?}");
+    }
+    b.shutdown();
+}

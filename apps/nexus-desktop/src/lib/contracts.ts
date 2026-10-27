@@ -569,6 +569,9 @@ export interface PermissionSupport {
   askReason: string | null;
   /** In-place commands (Landlock + launch gate) can run on this machine; absent = not reported. */
   inPlaceAvailable?: boolean;
+  /** M8: Full Access (unsandboxed host execution) is available on this installation. */
+  hostExecAvailable?: boolean;
+  hostExecReason?: string | null;
   inPlaceReason?: string | null;
   /** Controlled Internet (the network gatekeeper) can run on this machine; absent = not reported. */
   controlledAvailable?: boolean;
@@ -588,7 +591,7 @@ export interface ProjectGrantView {
   version: number;
   digest: string;
   /** `scratch`: commands work on a throw-away copy. `workspace`: they change the task's working copy in place. */
-  fs: "scratch" | "workspace";
+  fs: "scratch" | "workspace" | "full";
   net: "offline" | "controlled" | "install";
   /** Controlled Internet: the destinations commands may reach (an allowlist of WHERE, not of what is sent). */
   netPolicy?: { hosts: { host: string; ports: number[] }[]; local_ports?: number[] };

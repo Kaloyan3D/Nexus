@@ -1180,6 +1180,10 @@ fn run_host_branch(
             "note": "Full Access: unsandboxed host execution under the OS user's authority; effects outside the project are not observed and cannot be undone",
         }),
     )?;
+    hooks.journal(
+        PH_RUNNING,
+        serde_json::json!({ "backend": "host/1", "fsScope": "full", "processStarted": true }),
+    )?;
     let outcome = {
         let mut should_stop = || -> Option<&'static str> {
             if cancel.is_cancelled() {
