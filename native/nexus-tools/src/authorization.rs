@@ -636,9 +636,15 @@ struct KernelProcessHooks<'a> {
     /// Controlled Internet, supplied by the embedder (the daemon has its own hooks).
     net: Option<crate::netpolicy::NetPolicy>,
     narrow: Option<NarrowProbe<'a>>,
+    /// The task's frozen grant execution policy (checkpoint/hard-links/Git), supplied by the
+    /// embedder exactly like `net`; the daemon supplies its own from the standing grant.
+    exec: Option<crate::grant::ExecPolicy>,
 }
 
 impl crate::process::ProcessHooks for KernelProcessHooks<'_> {
+    fn exec_policy(&mut self) -> Option<crate::grant::ExecPolicy> {
+        self.exec.clone()
+    }
     fn net_policy(&mut self) -> Option<crate::netpolicy::NetPolicy> {
         self.net.clone()
     }
@@ -762,6 +768,45 @@ pub fn execute_process_net<'a>(
         last: None,
         net,
         narrow,
+        exec: None,
+    };
+    let result = run_process_call(
+        call,
+        cancel,
+        policy,
+        run_root,
+        scope_max_wall_ms,
+        env,
+        &mut hooks,
+    )?;
+    let journal = hooks.last.ok_or_else(|| {
+        ToolError::new(ToolErrorCode::IoError, "process produced no journal record")
+    })?;
+    Ok(ToolExecutionOutcome { result, journal })
+}
+
+/// As [`execute_process_in`], for an execution whose task holds a frozen grant execution
+/// policy (checkpoint, hard-link and Git-write choices). Only the embedder can supply it;
+/// no tool argument can.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_process_policy(
+    kernel: &mut Kernel,
+    call: &AuthorizedToolCall,
+    cancel: &CancellationToken,
+    policy: &crate::process::CommandPolicy,
+    run_root: &std::path::Path,
+    scope_max_wall_ms: u64,
+    env: Option<&crate::process::ProjectEnv>,
+    exec: Option<crate::grant::ExecPolicy>,
+) -> Result<ToolExecutionOutcome, ToolError> {
+    let started = begin(kernel, call, cancel)?;
+    let mut hooks = KernelProcessHooks {
+        kernel,
+        verified: &started.verified,
+        last: None,
+        net: None,
+        narrow: None,
+        exec,
     };
     let result = run_process_call(
         call,
