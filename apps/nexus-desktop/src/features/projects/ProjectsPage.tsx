@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { FolderGit2, FolderOpen, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
 import { useNexus } from "../../state/NexusContext";
-import type { ProjectView, WorkspaceMode } from "../../lib/contracts";
+import type { JobView, ProjectView, WorkspaceMode } from "../../lib/contracts";
 import { Alert, Badge, Button, EmptyState } from "../../components/ui/primitives";
 
 /**
@@ -270,12 +270,68 @@ function OpenedProjects() {
   );
 }
 
+/** M7D: background jobs (dev servers, watchers) across projects — state, exposed loopback
+ * URLs and stop. Status only; no credentials are involved. */
+function JobsPanel() {
+  const { api } = useNexus();
+  const [jobs, setJobs] = useState<JobView[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const load = () => {
+    api
+      .jobList()
+      .then((r) => {
+        setJobs(r.jobs);
+        setErr(null);
+      })
+      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
+  };
+  useEffect(() => {
+    load();
+    const h = setInterval(load, 3000);
+    return () => clearInterval(h);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  if (err) return null;
+  if (jobs.length === 0) return null;
+  return (
+    <section aria-label="Background jobs" className="nv-stack" style={{ gap: 6 }}>
+      <h2 className="nv-subheading">Background jobs</h2>
+      <ul className="nv-list">
+        {jobs.map((j) => (
+          <li key={j.jobId}>
+            <Badge tone={j.state === "running" ? "success" : j.state === "failed" ? "warning" : "neutral"}>{j.state}</Badge>{" "}
+            <code>{j.command}</code>
+            {j.exposed.map((x) => (
+              <span key={x.port}>
+                {" · "}
+                <a href={x.url} target="_blank" rel="noreferrer">
+                  {x.url}
+                </a>
+              </span>
+            ))}
+            {j.exitCode != null ? <span className="nv-note"> · exit {j.exitCode}</span> : null}
+            {j.state === "running" ? (
+              <>
+                {" "}
+                <Button size="sm" variant="ghost" onClick={() => void api.jobStop(j.jobId).then(load)}>
+                  Stop
+                </Button>
+              </>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function ProjectsPage() {
   const { intentCodeSources, intentWorkspaces, intentCodeLimits, runtimeState } = useNexus();
   if (runtimeState?.mode === "interactive") {
     return (
       <div className="nv-page nv-narrow">
         <OpenedProjects />
+        <JobsPanel />
         <h2 className="nv-subheading">What applies to every task</h2>
         <ul className="nv-list" aria-label="Execution policy">
           <li>Each project has a workspace setting you choose: Nexus edits the real files in the project folder directly (every change is on disk as soon as it is made; it keeps the original of every file it changes), or works in an isolated copy that you review and apply. Nothing is ever committed, pushed or merged.</li>

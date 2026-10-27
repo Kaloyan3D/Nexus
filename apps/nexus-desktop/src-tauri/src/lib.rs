@@ -651,6 +651,30 @@ async fn project_list(with_changes: Option<bool>) -> Result<serde_json::Value, U
     .map_err(|_| internal())?
 }
 
+/// M7D: background jobs (dev servers, watchers) — status and stop, nothing privileged.
+#[tauri::command]
+async fn job_list() -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::job_list(&nexus_client::intent_client::default_broker_socket())
+            .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+#[tauri::command]
+async fn job_stop(job_id: String) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::job_stop(
+            &nexus_client::intent_client::default_broker_socket(),
+            &job_id,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
 /// Settings: the user's own, lower run limits. Everything is optional; leaving a field out
 /// resets it to the built-in value. The broker clamps to 1..=built-in.
 #[tauri::command]
@@ -1201,6 +1225,8 @@ pub fn run() {
             provider_revoke,
             project_pick,
             project_list,
+            job_list,
+            job_stop,
             project_refresh,
             project_set_policy,
             project_set_edit_mode,
@@ -1266,6 +1292,8 @@ mod authz_tests {
         "provider_revoke",
         "project_pick",
         "project_list",
+        "job_list",
+        "job_stop",
         "project_refresh",
         "project_set_policy",
         "project_set_edit_mode",

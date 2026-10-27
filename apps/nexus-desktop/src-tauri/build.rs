@@ -38,6 +38,8 @@ const COMMANDS: &[&str] = &[
     "provider_revoke",
     "project_pick",
     "project_list",
+    "job_list",
+    "job_stop",
     "project_refresh",
     "project_set_policy",
     "project_set_edit_mode",
