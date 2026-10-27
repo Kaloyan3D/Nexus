@@ -54,7 +54,8 @@ impl FsScope {
 
     /// Scopes the code can execute today.
     pub fn is_implemented(self) -> bool {
-        !matches!(self, FsScope::Full)
+        // M8: `Full` is implemented by the separate host backend (caps-checked there).
+        true
     }
 }
 
@@ -73,10 +74,8 @@ pub enum NetScope {
 
 impl NetScope {
     pub fn is_implemented(self) -> bool {
-        matches!(
-            self,
-            NetScope::Offline | NetScope::Install | NetScope::Controlled
-        )
+        // M8: `Full` network is implemented only by the host backend with fs=Full.
+        true
     }
 
     pub fn as_str(self) -> &'static str {
@@ -314,6 +313,41 @@ impl ExecBackend for LinuxBwrapBackend {
         control: &mut dyn SandboxControl,
     ) -> Result<SandboxOutcome, ToolError> {
         crate::sandbox::run_sandboxed(spec, control)
+    }
+}
+
+/// M8 host backend (ADR Rev 2 §7.4): no sandbox at all. It never runs a
+/// `SandboxSpec`; `nexus_tools::host_exec::run_host` is its execution path,
+/// reached only under the sealed `FsScope::Full`. Its caps exist so
+/// `check_grant` can refuse every other scope combination for it.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct HostBackend;
+
+impl ExecBackend for HostBackend {
+    fn caps(&self) -> BackendCaps {
+        BackendCaps {
+            id: "host/1",
+            fs_scopes: vec![FsScope::Full],
+            net_scopes: vec![NetScope::Full],
+            pinned_root_mount: false,
+            subpath_readonly: false,
+            hide_existing_entries: false,
+            kernel_resource_limits: false,
+            kill_tree: KillGuarantee::ProcessGroupBestEffort,
+            landlock_abi: None,
+            launch_gate: false,
+        }
+    }
+
+    fn run(
+        &self,
+        _spec: &SandboxSpec,
+        _control: &mut dyn SandboxControl,
+    ) -> Result<SandboxOutcome, ToolError> {
+        Err(ToolError::new(
+            ToolErrorCode::SandboxUnavailable,
+            "the host backend does not run sandbox specs; nothing was run and no other scope was substituted",
+        ))
     }
 }
 

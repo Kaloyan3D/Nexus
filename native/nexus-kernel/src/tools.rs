@@ -97,6 +97,8 @@ pub const NET_SCOPE_OFFLINE: &str = "offline";
 pub const NET_SCOPE_INSTALL: &str = "install";
 /// Controlled Internet (M5): connections only through the egress service, to the destinations of the grant.
 pub const NET_SCOPE_CONTROLLED: &str = "controlled";
+/// Full Network (M8): the host network, sealable only together with `full` filesystem scope.
+pub const NET_SCOPE_FULL: &str = "full";
 /// Approval behaviours a process scope can seal.
 pub const APPROVAL_ASK: &str = "ask";
 pub const APPROVAL_AUTO: &str = "auto";
@@ -158,6 +160,7 @@ impl DeclaredScope {
                 if net != NET_SCOPE_OFFLINE
                     && net != NET_SCOPE_INSTALL
                     && net != NET_SCOPE_CONTROLLED
+                    && net != NET_SCOPE_FULL
                 {
                     return Err("unsupported network scope in a grant".into());
                 }
@@ -173,15 +176,40 @@ impl DeclaredScope {
                 })
             }
         };
-        if fs_scope != FS_SCOPE_SCRATCH && fs_scope != FS_SCOPE_WORKSPACE {
+        if fs_scope != FS_SCOPE_SCRATCH
+            && fs_scope != FS_SCOPE_WORKSPACE
+            && fs_scope != FS_SCOPE_FULL
+        {
             return Err("unsupported filesystem scope for a process scope".into());
+        }
+        // M8: Full Access seals only as fs=full with net=full under a grant; any
+        // other combination would claim an enforcement that does not exist.
+        if let Some(g) = &grant {
+            if g.net == NET_SCOPE_FULL && fs_scope != FS_SCOPE_FULL {
+                return Err(
+                    "network scope `full` is sealable only with filesystem scope `full`".into(),
+                );
+            }
+        }
+        if fs_scope == FS_SCOPE_FULL {
+            match &grant {
+                Some(g) if g.net == NET_SCOPE_FULL => {}
+                _ => {
+                    return Err(
+                        "Full Access must be sealed with a grant whose network scope is `full`"
+                            .into(),
+                    )
+                }
+            }
         }
         Ok(Self { fs_scope, grant })
     }
 }
-/// Filesystem scopes a process scope can seal. `full` is deliberately absent: not implemented.
+/// Filesystem scopes a process scope can seal. `full` (M8) is the host backend: sealable
+/// only under an explicit user grant with network scope `full` (checked above).
 pub const FS_SCOPE_SCRATCH: &str = "scratch";
 pub const FS_SCOPE_WORKSPACE: &str = "workspace";
+pub const FS_SCOPE_FULL: &str = "full";
 
 fn default_fs_scope() -> String {
     FS_SCOPE_SCRATCH.to_owned()
@@ -2188,7 +2216,14 @@ mod process_scope_compat_tests {
             json!({"grantId": "grt_a", "version": 0, "digest": "d".repeat(64), "fsScope": "scratch", "netScope": "offline", "approval": "auto"}),
             None
         ));
+        // M8: `full` without a grant seal of net=full is refused; with it, it seals.
         assert!(DeclaredScope::from_operation(&json!({"execFsScope": "full"})).is_err());
+        let mut full_op = json!({"execFsScope": "full"});
+        full_op["grant"] = json!({
+            "grantId": "grt_1", "digest": "a".repeat(64), "fsScope": "full",
+            "netScope": "full", "approval": "auto", "version": 1,
+        });
+        assert!(DeclaredScope::from_operation(&full_op).is_ok());
         assert!(DeclaredScope::from_operation(&json!({"execFsScope": 3})).is_err());
         assert!(!bad(base("scratch", "offline", "auto"), None));
     }

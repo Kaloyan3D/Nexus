@@ -722,6 +722,15 @@ fn run(args: &[String]) -> i32 {
     // channels coexist; it needs the automated policy, and the approver channel is optional (without it
     // a project whose grant says "ask" is refused at task creation).
     let standing_grants = args.iter().any(|a| a == "--standing-grants");
+    // M8: the host backend is a separate operator switch. It grants nothing by
+    // itself (a per-project `full` grant is still required) and is never
+    // implied by --enable-process.
+    if args.iter().any(|a| a == "--enable-host-exec") && !standing_grants {
+        return fatal(
+            "bad-config",
+            "--enable-host-exec requires --standing-grants: Full Access runs only under an explicit per-project grant (failing closed)",
+        );
+    }
     if standing_grants && !autonomous {
         return fatal(
             "bad-config",
@@ -1286,6 +1295,7 @@ fn run(args: &[String]) -> i32 {
         process_enabled,
         isolated_exec_scope,
         standing_grants,
+        host_exec_enabled: args.iter().any(|a| a == "--enable-host-exec"),
         command_policy: {
             let p = nexus_tools::process::CommandPolicy::standard(
                 nexus_tools::process::Toolchain::discover(),
