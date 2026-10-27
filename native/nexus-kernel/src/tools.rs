@@ -1553,6 +1553,17 @@ impl Kernel {
     ) -> KernelResult<ProcessScopeBinding> {
         {
             let fs_scope = declared.fs_scope.as_str();
+            // M8: `full` seals only under a grant declaring network `full`
+            // (the approval-decision path). A caller-chosen scope without that
+            // grant seal is refused, exactly like an unknown scope name.
+            if fs_scope == FS_SCOPE_FULL
+                && !matches!(&declared.grant, Some(g) if g.net == NET_SCOPE_FULL)
+            {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "Full Access must be sealed under a grant with network scope `full`",
+                ));
+            }
             if fs_scope != FS_SCOPE_SCRATCH
                 && fs_scope != FS_SCOPE_WORKSPACE
                 && fs_scope != FS_SCOPE_FULL
