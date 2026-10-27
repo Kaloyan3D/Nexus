@@ -471,3 +471,44 @@ fn m7_a_dotnet_dev_server_runs_as_a_background_job() {
     });
     mgr.stop(&rec.id).unwrap();
 }
+
+#[test]
+fn m7_manager_death_takes_its_jobs_with_it_and_the_record_says_so() {
+    if !ready("drop") {
+        return;
+    }
+    let w = world(&[("server.js", SERVER), ("msg.txt", "v1\n")]);
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let (id, host_port) = {
+        let mgr = JobManager::open(&state).unwrap();
+        let rec = start(
+            &mgr,
+            &w,
+            "/usr/bin/node",
+            &["server.js"],
+            &[4321],
+            &[(4321, 0)],
+            120_000,
+            1 << 20,
+        )
+        .expect("start");
+        let hp = rec.exposed[0].1;
+        wait_for("server up", || {
+            http_get(hp, "/").is_ok_and(|r| r.contains("v1"))
+        });
+        (rec.id, hp)
+        // mgr dropped here: every job must die with its owner
+    };
+    wait_for("server gone after manager death", || {
+        http_get(host_port, "/").is_err()
+    });
+    // a new owner over the same state dir must not claim the dead job is running
+    let mgr2 = JobManager::open(&state).unwrap();
+    let rec = mgr2.status(&id).unwrap();
+    assert_ne!(rec.state, "running", "{rec:?}");
+    assert!(
+        matches!(rec.state.as_str(), "stopped" | "interrupted" | "exited"),
+        "{rec:?}"
+    );
+}
