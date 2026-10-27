@@ -119,7 +119,14 @@ Performance on this machine: stop latency ≈10 ms; job server reachable within 
 3. Jobs currently run with the offline network class; Controlled-Internet jobs (a watcher that
    also fetches) are a policy decision for later, not a mechanism gap.
 
-## Validation (final code SHA `2876ad4`)
+## Validation
+
+Step 0 source-identity correction (M7.1): `2876ad4` was an intermediate test commit
+("manager death kills its jobs"), ancestral to the final M7 code. The final M7 executable
+source is `f0239cc` (Desktop M7D panel), on top of `ed6dcd1` (broker job verbs/CLI/tools);
+this report was committed as docs-only `52dea0e`. The battery below was re-run in full on
+the final M7.1 source (see the M7.1 closure addendum) rather than relying on the
+intermediate-SHA run.
 
 | Gate | Result |
 |---|---|
