@@ -1,6 +1,6 @@
 # M6 Closure + M7 — Background Jobs & Dev Servers
 
-Branch `feature/rust-native-core`. Final code SHA: `2876ad4` (this report is a docs-only commit on top).
+Branch `feature/rust-native-core`. Final code SHA: `f0239cc` (this report is a docs-only commit on top).
 Local commits only, no push.
 
 ## Part A — M6 closure
@@ -85,24 +85,45 @@ bridge; manager death kills the server and the record never claims `running` aft
 Performance on this machine: stop latency ≈10 ms; job server reachable within the first poll cycles
 (suite of 8 incl. a .NET build completes in ≈3 s); status/logs are file reads (no repo scan).
 
+### M7D — agent tooling and UX (done, `ed6dcd1` + `f0239cc`)
+
+- **Broker verbs** `job-start`/`job-status`/`job-logs`/`job-stop`/`job-list`
+  ([jobs.rs](/home/kaloyan/Projects/Nexus/native/nexus-broker/src/jobs.rs)): the broker owns the
+  JobManager; a job starts only for a Direct project with an active Workspace grant, resolved by
+  the same universal workbench policy, frozen grant digest recorded as the job's authority.
+  Install-class commands are refused as jobs. A per-job watcher (300 ms) stops the job when the
+  grant is revoked, expires, changes digest, or stops covering an exposed port.
+- **Agent tools, versioned:** `job_start`/`job_status`/`job_logs`/`job_stop` are defined as a
+  separate catalog addition (`JOB_TOOLS_V1_DIGEST 289b1d8f…`) in
+  [repo_tools.rs](/home/kaloyan/Projects/Nexus/native/nexus-model/src/repo_tools.rs); the frozen
+  V1 catalogs are byte-identical (baseline check still MATCHes) and `proc_run` is unchanged.
+  Broker-side proposal validation (`validate_tool_call`) is implemented and tested. What remains
+  is engine adoption: an engine profile that offers the job tools and dispatches these four
+  broker-handled calls in its run loop — schema and validation are ready for it.
+- **CLI:** `nexus job start|status|logs|stop|list` (start takes `--expose PORT` and `-- <program>…`).
+- **Desktop:** Tauri `job_list`/`job_stop` commands (registered in the handler list, build
+  manifest and capabilities) and a Background jobs panel on the Projects page (state badge,
+  loopback URLs, stop) polling every 3 s. No credentials cross this surface.
+- **M7E revocation + restart evidence** ([jobs_m7.rs](/home/kaloyan/Projects/Nexus/native/nexus-broker/tests/jobs_m7.rs)):
+  broker-level test starts a Node server through the verb, refuses an unauthorized port, then
+  **revokes the grant while the server runs — the watcher stops it and the bridge URL dies**;
+  new starts under the revoked grant are refused. Owner-restart: after dropping and reopening
+  the manager over the same state dir, no record claims `running`.
+
 ### Remaining gaps (stated, not hidden)
 
-1. **M7D wiring is not done:** `JobManager` is a library subsystem with grant/CLI support for
-   `devPorts`, but it is not yet exposed through the daemon protocol, the broker, provider tools
-   (`job_start` etc.), or Desktop. Adding provider tools must be a versioned catalog change against
-   the A2 baseline. This is the next task, and it is wiring, not new mechanism.
-2. Daemon-crash recovery is proven at manager/record level; a full daemon-restart integration test
-   belongs with the M7D daemon wiring.
-3. Revocation mid-job is enforced by `stop`/`stop_all` (mechanism tested); automatic triggering on
-   grant narrowing awaits the same daemon wiring.
-4. ASP.NET proper (Kestrel) was not used; the .NET test uses a raw `TcpListener` server under the
+1. Engine adoption of the job tools (a profile offering them and dispatching the broker-handled
+   calls) — the schema, digests and validation are versioned and ready.
+2. ASP.NET proper (Kestrel) was not used; the .NET test uses a raw `TcpListener` server under the
    SDK 10 runtime. `dotnet watch`, `cargo watch`, `next dev` are the same job shape but untested.
+3. Jobs currently run with the offline network class; Controlled-Internet jobs (a watcher that
+   also fetches) are a policy decision for later, not a mechanism gap.
 
 ## Validation (final code SHA `2876ad4`)
 
 | Gate | Result |
 |---|---|
-| Full native battery (`NEXUS_REQUIRE_SANDBOX=1`) | **1483 passed, 0 failed, 64 ignored** |
+| Full native battery (`NEXUS_REQUIRE_SANDBOX=1`) | **1486 passed, 0 failed, 64 ignored** (incl. broker jobs_m7 and M7D validation tests) |
 | fmt + strict clippy (native, Tauri) | clean |
 | Tauri tests | 31 passed, 0 failed |
 | Desktop tsc / eslint / vitest | clean / clean / **188/188** |
@@ -112,7 +133,6 @@ Performance on this machine: stop latency ≈10 ms; job server reachable within 
 
 ## Verdict
 
-**Conditional GO for M8 — Full Access.** The M7 mechanisms (lifecycle, limits, bridge, recovery
-honesty) are implemented and verified; the condition is completing the M7D daemon/broker/tool wiring
-first or as M8's first substage, since an agent that cannot start a job through its own tools does
-not yet have the user-facing feature. No push, merge or deployment.
+**GO for M8 — Full Access.** M7D is wired through broker, CLI and Desktop; the agent-tool
+schemas are versioned against the A2 baseline with only engine-profile adoption outstanding.
+No push, merge or deployment.
