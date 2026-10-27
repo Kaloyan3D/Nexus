@@ -1932,6 +1932,7 @@ fn job_call(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn signal_call(
     sh: &Shared<'_>,
     ls: &mut LoopState,

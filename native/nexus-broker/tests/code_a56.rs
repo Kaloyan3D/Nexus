@@ -19520,7 +19520,7 @@ fn m71_last_output(body: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn m71_env(responder: Responder, name: &str) -> (Fx, BrokerHandle, PathBuf, String, PathBuf) {
+fn m71_env(responder: Responder, _name: &str) -> (Fx, BrokerHandle, PathBuf, String, PathBuf) {
     // install root whose engineering-v2 mode issues the jobs engine + a standing-grants daemon
     let dir = tempfile::tempdir().unwrap();
     let st = std::process::Command::new("cp")
@@ -19719,7 +19719,7 @@ fn m71_a_model_starts_queries_edits_and_stops_a_dev_server_through_the_jobs_engi
             }
         }
     });
-    let (fx, b, sock, pid, folder) = m71_env(responder, "m71-jobs");
+    let (fx, _b, sock, pid, _folder) = m71_env(responder, "m71-jobs");
     let _ = &fx;
     let mut intent = code_intent_for(
         &pid,
