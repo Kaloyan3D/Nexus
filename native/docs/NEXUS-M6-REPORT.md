@@ -1,8 +1,9 @@
-# M6 — Universal Developer Toolchains & Git (PARTIAL — wrap-up handoff)
+# M6 — Universal Developer Toolchains & Git
 
 Branch `feature/rust-native-core`. Baseline `8e4e42f` (M5 report on `134cf4d`).
-Status at wrap-up: **M6A, M6B, M6C implemented and committed. Final VERIFY is incomplete —
-two gate items remain open (see §7). This is not a final GO.**
+Final source SHA (code): `eaa5f81` (this report is a docs-only commit on top). Local commits only, no push.
+Live Internet acceptance was **not run**: no owner-approved destinations exist yet (§4) — that item
+remains open and is a stated condition below, not a silent pass.
 
 ## 1. Commits (local only, no push)
 
@@ -12,7 +13,9 @@ two gate items remain open (see §7). This is not a final GO.**
 | `2e70ac7` | M6B explicit Git write grant |
 | `ddf6848` | M6C end-to-end developer acceptance test |
 | `d2fc2f4` | M6 perf probe + clippy fix |
-| `126207d` | A614 request-size guard fix + catalog re-pin (current code HEAD) |
+| `126207d` | A614 request-size guard fix + catalog re-pin |
+| `c07a6f8` | daemon strictest-fallback ExecPolicy `git_write: false` (was in tree during M6B builds; committed separately) |
+| `eaa5f81` | prodgate signals-catalog prefix pin follows the re-pin (**final code SHA**) |
 
 ## 2. M6A — Universal execution (implemented, verified)
 
@@ -88,30 +91,32 @@ two gate items remain open (see §7). This is not a final GO.**
 |---|---|
 | `cargo fmt --all --check` (native + Tauri) | PASS |
 | `cargo clippy --workspace --all-targets -D warnings` (native + Tauri) | PASS |
-| Full native battery (on pre-`126207d` tree) | 2 failures, both A614/catalog-size, **fixed in `126207d`** and the 2 tests re-run PASS (max request 449,951 B < 450,000 B) |
-| `code_a56` full run on current tree (body dump) | **214 passed, 0 failed** |
+| Full native battery on final code SHA `eaa5f81` (`NEXUS_REQUIRE_SANDBOX=1 cargo test --workspace`) | **1473 passed, 0 failed, 64 ignored** (M5: 1466/0/63; +7 = new M6 tests). One earlier run had a single timing-flake failure in the known egress cancellation test (fails identically on the untouched M5 baseline here; passed in the final full run) |
+| `code_a56` full run on final tree (body dump) | **214 passed, 0 failed** |
 | Tauri tests | PASS (27 lib + permissions/runtime suites) |
 | Desktop `tsc`, `eslint` | PASS |
 | Desktop `vitest` | **188/188 PASS** on idle re-run (2 transient failures under parallel load earlier) |
 | Release gate sections | registry-js 22/22 PASS; engines 148 PASS; e2e 36 PASS; release-binaries PASS (5 executables); desktop-binary PASS |
-| Release gate `bodies` | **FAIL — classified**: all 1,681 differing bodies differ only in `tools[5]` (`proc_run` description, program enum removed, program description added) = the intentional M6A schema change; 5 crash-timing tests differ in request count and 1 (`a71…`) in concurrent task-text ordering — same artifact classes as M4/M5. Deep-diff script: `/tmp/m6_bodies_diff.py`; dumps: `/tmp/m6-bodies-base`, `/tmp/m6-bodies-new` |
-| Release gate `production` (prodgate) | **FAIL — UNINVESTIGATED**: `5 passed, 1 failed < required minimum 14`. Direct prodgate re-run was started and stopped at wrap-up before results. |
+| Release gate `bodies` (vs baseline `8e4e42f`, regenerated dumps, 186 tests / 1,688 bodies) | **FAIL by design — fully classified**: every content difference is in `tools[5]` only (`proc_run` description; `program` enum removed; `program` description added) = the intentional M6A schema change. Remaining diffs: 5 crash-timing tests with request-count differences (baseline sample carries one extra request; same class as M4's `s8` finding). No other body field differs |
+| Release gate `production` (prodgate) | **PASS** 14/14 after `eaa5f81` (the failure was a missed digest-prefix pin `5f7d19e2`→`7c7c9bc1` from the M6A re-pin; negative control still detected) |
+| Release gate (final run) | registry-js PASS, engines PASS, e2e PASS, production PASS, release-binaries PASS, desktop-binary PASS; bodies FAIL (classified above) → gate overall FAIL solely on the intentional schema change |
 
-## 6. Exact remaining steps (resume here)
+## 6. Remaining gaps
 
-1. Diagnose prodgate: `cd native && cargo test --manifest-path tools/prodgate/Cargo.toml`
-   (release gate used `--prodgate-target native/target/prodgate`). Identify the 1 failure;
-   check whether it also fails on `8e4e42f` (baseline) before treating it as an M6 regression.
-2. Re-run the full native battery once on the final code SHA (`126207d` + any prodgate fix):
-   `cd native && NEXUS_REQUIRE_SANDBOX=1 cargo test --workspace`.
-3. Re-run the release gate end-to-end on that SHA; bodies will still FAIL by design — decide
-   with the owner whether the intentional M6A schema change is accepted as the new baseline
-   (regenerate the baseline dump from the M6 tree) or must be gated differently.
-4. Live Internet acceptance (needs owner-approved hosts, §4) — do not run before approval.
-5. Then finalize: update this report's verdicts, final source SHA, and the M7 GO/NO-GO.
+1. **Live Internet acceptance not run** — needs owner-approved destinations (§4 exact hosts).
+   Local-fixture Controlled Internet evidence (M5 + this milestone's regressions passing) stands.
+2. **Provider-body baseline**: the gate compares against M5 bytes, so the intentional M6A
+   schema change reports FAIL there. Accepting M6 means regenerating the accepted baseline
+   dump from `eaa5f81`; until the owner accepts, this stays an explicit, classified difference.
+3. Desktop Permissions panel does not offer Git write yet (CLI/broker only), matching the
+   existing checkpoint/hard-link options' status.
+4. Git limitations (by design): no writable external metadata (linked worktrees/submodules
+   stores), hooks/config immutable from commands, `.git` outside checkpoint coverage, and
+   `pnpm`/`yarn` not installed on this host (untested live; same proxy path as npm).
 
 ## 7. Verdict
 
-**NO-GO (provisional) for M7** until steps 1–3 above close. M6A/M6B/M6C functionality is
-implemented and its focused tests pass; the milestone cannot be called PASS while the
-production gate failure is uninvestigated and the full battery has not run on the final SHA.
+**GO for M7 — Background Jobs & Dev Servers**, conditional on the owner accepting the two
+items in §6.1–6.2 (live-destination approval and the new provider-body baseline). All other
+gates pass on the final source SHA `eaa5f81`: full battery 1473/0, Tauri, Desktop, and every
+release-gate section except the classified bodies difference. No-push, local commits only.
