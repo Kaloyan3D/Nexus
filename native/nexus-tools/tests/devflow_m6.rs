@@ -237,3 +237,49 @@ fn m6c_a_disposable_project_is_built_tested_and_committed_in_place() {
     assert!(!t.contains(common::OUTSIDE_SECRET), "{t}");
     assert!(!t.contains("outside-rc=0"), "{t}");
 }
+
+/// M6 performance probe (manual): universal-resolution overhead, in-place command startup,
+/// and Git operation latency on a small project. Run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn perf_m6_measurements() {
+    if !ready("perf") {
+        return;
+    }
+    // resolution is pure and runs once per command
+    let pol = policy();
+    let t = std::time::Instant::now();
+    for _ in 0..1000 {
+        let a = nexus_tools::contract::ProcessArgs {
+            program: "git".into(),
+            args: vec!["status".into()],
+            cwd: ".".into(),
+        };
+        std::hint::black_box(pol.resolve(&a).unwrap());
+    }
+    println!("resolve git status: {:?} per call", t.elapsed() / 1000);
+
+    let mut fx = fixture("m6c-perf");
+    fx.write("a.txt", b"one\n");
+    let mut times = vec![];
+    for _ in 0..5 {
+        let t = std::time::Instant::now();
+        let o = run(&mut fx, "true", json!([]), None);
+        assert_eq!(out(&o)["verification"], "pass");
+        times.push(t.elapsed().as_millis());
+    }
+    println!("in-place `true` per command (ms): {times:?}");
+    let o = run(
+        &mut fx,
+        "sh",
+        json!(["-c", "export GIT_AUTHOR_NAME=m6 GIT_AUTHOR_EMAIL=m6@example.invalid GIT_COMMITTER_NAME=m6 GIT_COMMITTER_EMAIL=m6@example.invalid; git init -q && git add -A && git commit -q -m first"]),
+        gw(),
+    );
+    assert_eq!(out(&o)["verification"], "pass", "{}", text(&out(&o)));
+    for name in ["status", "log"] {
+        let t = std::time::Instant::now();
+        let o = run(&mut fx, "git", json!([name]), gw());
+        assert_eq!(out(&o)["verification"], "pass", "{}", text(&out(&o)));
+        println!("git {name} in place: {} ms", t.elapsed().as_millis());
+    }
+}
