@@ -20095,3 +20095,211 @@ fn thread_submission_stores_each_messages_read_only_decision_independently() {
     assert!(!r3.read_only, "{r3:?}");
     b.shutdown();
 }
+
+// ---- Evidence-grounded completion: a refused command is not a passed demo ----
+
+const TODO_PY: &str = r#"import json, sys
+def load(p):
+    try:
+        return json.load(open(p))
+    except Exception:
+        return []
+def save(p, t):
+    json.dump(t, open(p, "w"))
+def add(p, text):
+    t = load(p); t.append(text); save(p, t)
+def main():
+    f = sys.argv[sys.argv.index("--file") + 1]
+    if sys.argv[1] == "add":
+        add(f, sys.argv[2]); print("added:", sys.argv[2])
+    else:
+        for x in load(f):
+            print("-", x)
+if __name__ == "__main__":
+    main()
+"#;
+
+const TEST_TODO_PY: &str = r#"import os, tempfile, unittest
+import todo
+class TodoTests(unittest.TestCase):
+    def test_add_and_list(self):
+        p = os.path.join(tempfile.mkdtemp(), "t.json")
+        todo.add(p, "buy milk")
+        self.assertEqual(todo.load(p), ["buy milk"])
+if __name__ == "__main__":
+    unittest.main()
+"#;
+
+#[test]
+fn demo_a_refused_command_is_never_laundered_into_a_passed_demonstration() {
+    if !sandbox_ready() {
+        return;
+    }
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let call = |id: &str, name: &str, args: &str| {
+            Answer::Frames(call_frames(&resp, n, id, name, args))
+        };
+        match tool_calls_done(body) {
+            0 => call(
+                "d0",
+                "fs_write",
+                &json!({"path": "todo.py", "mode": "create", "content": TODO_PY}).to_string(),
+            ),
+            1 => call(
+                "d1",
+                "fs_write",
+                &json!({"path": "test_todo.py", "mode": "create", "content": TEST_TODO_PY})
+                    .to_string(),
+            ),
+            // the unit tests genuinely run and pass: valid evidence, for THEM
+            2 => call(
+                "d2",
+                "proc_run",
+                r#"{"program":"python3","args":["-m","unittest","-v"]}"#,
+            ),
+            // the requested CLI demonstration is refused (an absolute program
+            // path is not an authorized way to run anything)
+            3 => call(
+                "d3",
+                "proc_run",
+                r#"{"program":"/tmp/demo-todo.sh","args":["add","buy milk"]}"#,
+            ),
+            // ... and the model claims it passed anyway
+            _ => Answer::Frames(text_frames(
+                &resp,
+                "All done. Unit tests pass and the CLI demonstration passed: 'buy milk' was added and listed.",
+            )),
+        }
+    });
+    let (fx, b, sock, pid, _folder) = m8_env(responder, "demo-refused", false);
+    let _ = &fx;
+    // confined Workspace grant for this project
+    let pv =
+        ic::project_grant_preview_with(&sock, &pid, "workspace", "offline", "auto", None, None)
+            .expect("preview");
+    let digest = pv["textSha256"].as_str().unwrap().to_owned();
+    ic::project_grant_set_with(
+        &sock,
+        &pid,
+        "workspace",
+        "offline",
+        "auto",
+        None,
+        &digest,
+        "cli",
+        None,
+    )
+    .expect("grant");
+    let run = submit_wait(
+        &sock,
+        &code_intent_for(
+            &pid,
+            "Build the todo CLI, run its unit tests, and demonstrate adding and listing a task.",
+            "demo-refused-0001",
+            |_| {},
+        ),
+        300,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    // the unittest evidence stands on its own...
+    assert_eq!(
+        run.last_test_verification.as_deref(),
+        Some("pass"),
+        "{run:?}"
+    );
+    // ...but the run is NOT a verified success: the demonstration never ran
+    assert_eq!(
+        run.completion.as_deref(),
+        Some("unexecuted-claims"),
+        "{run:?}"
+    );
+    let note = run.completion_note.clone().unwrap_or_default();
+    assert!(note.contains("never executed"), "{note}");
+    let acts = &run.tool_activity;
+    assert!(
+        acts.iter()
+            .any(|a| a.tool == "proc_run" && a.status == "refused"),
+        "{acts:?}"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn demo_b_an_authorized_retry_of_the_demonstration_is_recorded_executed() {
+    if !sandbox_ready() {
+        return;
+    }
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let call = |id: &str, name: &str, args: &str| {
+            Answer::Frames(call_frames(&resp, n, id, name, args))
+        };
+        match tool_calls_done(body) {
+            0 => call(
+                "e0",
+                "fs_write",
+                &json!({"path": "todo.py", "mode": "create", "content": TODO_PY}).to_string(),
+            ),
+            // refused absolute-path form first...
+            1 => call(
+                "e1",
+                "proc_run",
+                r#"{"program":"/tmp/demo-todo.sh","args":["add","buy milk"]}"#,
+            ),
+            // ...then the authorized retry: workspace-relative data file
+            2 => call(
+                "e2",
+                "proc_run",
+                r#"{"program":"sh","args":["-c","python3 todo.py add 'buy milk' --file demo-todo.json && python3 todo.py list --file demo-todo.json"]}"#,
+            ),
+            _ => Answer::Frames(text_frames(&resp, "Demonstration complete.")),
+        }
+    });
+    let (fx, b, sock, pid, folder) = m8_env(responder, "demo-retry", false);
+    let _ = &fx;
+    let pv =
+        ic::project_grant_preview_with(&sock, &pid, "workspace", "offline", "auto", None, None)
+            .expect("preview");
+    let digest = pv["textSha256"].as_str().unwrap().to_owned();
+    ic::project_grant_set_with(
+        &sock,
+        &pid,
+        "workspace",
+        "offline",
+        "auto",
+        None,
+        &digest,
+        "cli",
+        None,
+    )
+    .expect("grant");
+    let run = submit_wait(
+        &sock,
+        &code_intent_for(
+            &pid,
+            "Build the todo CLI and demonstrate adding and listing a task.",
+            "demo-retry-0001",
+            |_| {},
+        ),
+        300,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_ne!(
+        run.completion.as_deref(),
+        Some("unexecuted-claims"),
+        "{run:?}"
+    );
+    // the demonstration really executed against the real project file
+    let data = std::fs::read_to_string(folder.join("demo-todo.json"))
+        .expect("the retry wrote the workspace data file");
+    assert!(data.contains("buy milk"), "{data}");
+    assert!(
+        run.tool_activity
+            .iter()
+            .any(|a| a.tool == "proc_run" && a.status == "executed" && a.exit_code == Some(0)),
+        "{:?}",
+        run.tool_activity
+    );
+    b.shutdown();
+}

@@ -357,6 +357,10 @@ pub enum Completion {
     /// Files were changed, but verification commands failed and were never re-run successfully.
     /// Not a success: the receipts, not the model's closing text, say the work is unverified.
     FailingChecks,
+    /// A command the run proposed was refused, failed or never executed and was
+    /// never re-run successfully. Its claimed result is not evidence, whatever
+    /// the model's closing text (or an unrelated passing check) says.
+    Unexecuted,
 }
 
 impl Completion {
@@ -367,6 +371,7 @@ impl Completion {
             Self::NoChangeReported => "no-change-reported",
             Self::Incomplete => "incomplete",
             Self::FailingChecks => "failing-checks",
+            Self::Unexecuted => "unexecuted-claims",
         }
     }
 }
@@ -408,6 +413,7 @@ pub fn decide_run(
     last_test: Option<&str>,
     final_text: &str,
     unresolved_failed_checks: u32,
+    unresolved_unexecuted: u32,
 ) -> Completion {
     let c = decide(expects_change, applied_edits, last_test, final_text);
     if c == Completion::Fulfilled
@@ -417,7 +423,30 @@ pub fn decide_run(
     {
         return Completion::FailingChecks;
     }
+    // A refused, failed or never-executed command is not execution evidence.
+    // It blocks every success classification (fulfilled and the verified
+    // no-op alike): a passing UNRELATED check cannot launder a demonstration
+    // that never ran into "checks passed".
+    if expects_change
+        && unresolved_unexecuted > 0
+        && matches!(c, Completion::Fulfilled | Completion::NoChangeVerified)
+    {
+        return Completion::Unexecuted;
+    }
     c
+}
+
+/// Why an `unexecuted-claims` run is not accepted as done, in plain words.
+pub fn unexecuted_note(n: u32, first: &str) -> String {
+    if n == 1 {
+        format!(
+            "1 command in this run was refused, failed or never executed ({first}), so its claimed result is not execution evidence. Re-run it in an allowed form before relying on it. Successful checks elsewhere in the run do not cover it."
+        )
+    } else {
+        format!(
+            "{n} commands in this run were refused, failed or never executed (first: {first}), so their claimed results are not execution evidence. Re-run them in an allowed form before relying on them. Successful checks elsewhere in the run do not cover them."
+        )
+    }
 }
 
 /// Why a `failing-checks` run is not accepted as done. Plain words for the Desktop; blocked or
@@ -579,12 +608,12 @@ mod tests {
         );
         // with the run's receipts it is not fulfilled
         assert_eq!(
-            decide_run(true, 41, Some("pass"), RUN14_TERMINAL, 5),
+            decide_run(true, 41, Some("pass"), RUN14_TERMINAL, 5, 0),
             Completion::FailingChecks
         );
         // and the failure of one check that was genuinely re-run (nothing unresolved) is unchanged
         assert_eq!(
-            decide_run(true, 41, Some("pass"), "Done.", 0),
+            decide_run(true, 41, Some("pass"), "Done.", 0, 0),
             Completion::Fulfilled
         );
     }
@@ -615,25 +644,38 @@ mod tests {
             "the text-only decision is blind to it"
         );
         assert_eq!(
-            decide_run(true, 41, Some("pass"), &long, 5),
+            decide_run(true, 41, Some("pass"), &long, 5, 0),
             Completion::FailingChecks
         );
         assert_eq!(
-            decide_run(true, 41, Some("pass"), "Done; all checks pass.", 1),
+            decide_run(true, 41, Some("pass"), "Done; all checks pass.", 1, 0),
             Completion::FailingChecks
         );
         // nothing unresolved: unchanged
         assert_eq!(
-            decide_run(true, 41, Some("pass"), "Done; all checks pass.", 0),
+            decide_run(true, 41, Some("pass"), "Done; all checks pass.", 0, 0),
             Completion::Fulfilled
         );
+        // a refused/never-executed command blocks success even with edits
+        // applied and an unrelated check passing
+        assert_eq!(
+            decide_run(true, 41, Some("pass"), "Done; all checks pass.", 0, 1),
+            Completion::Unexecuted
+        );
+        // ... and it blocks the verified no-op: a passing unittest cannot
+        // launder a demonstration command that never ran
+        assert_eq!(
+            decide_run(true, 0, Some("pass"), "Nothing to change.", 0, 1),
+            Completion::Unexecuted
+        );
+        assert_eq!(Completion::Unexecuted.as_str(), "unexecuted-claims");
         // not an implementation task / no change: unchanged
         assert_eq!(
-            decide_run(false, 0, None, "Review.", 3),
+            decide_run(false, 0, None, "Review.", 3, 0),
             Completion::Fulfilled
         );
         assert_eq!(
-            decide_run(true, 0, Some("pass"), "Nothing to change.", 2),
+            decide_run(true, 0, Some("pass"), "Nothing to change.", 2, 0),
             Completion::NoChangeVerified
         );
         assert_eq!(Completion::FailingChecks.as_str(), "failing-checks");

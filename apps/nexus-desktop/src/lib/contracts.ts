@@ -440,7 +440,7 @@ export interface IntentRun {
   /** The earlier run whose working copy this run started from. */
   seedFrom?: string | null;
   /** Derived from the request and the receipts: fulfilled | no-change-verified | no-change-reported | incomplete. */
-  /** fulfilled | no-change-verified | no-change-reported | incomplete | failing-checks */
+  /** fulfilled | no-change-verified | no-change-reported | incomplete | failing-checks | unexecuted-claims */
   completion?: string | null;
   completionNote?: string | null;
   /** Verification commands whose latest result is a failure (counted over the whole run). */

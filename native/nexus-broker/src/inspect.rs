@@ -1537,6 +1537,11 @@ struct LoopState {
     /// command line for the model's feedback. A later pass of the SAME check clears it (the same command, or
     /// one differing only in output flags); a pass of a different or narrower command does not.
     failed_checks: std::collections::BTreeMap<String, String>,
+    /// Commands (by `completion::check_identity`) whose latest disposition is
+    /// refused, failed (non-verification) or never executed, with the command
+    /// line. A later successful execution of the SAME command clears it.
+    /// These are execution claims the receipts do not support.
+    unexecuted: std::collections::BTreeMap<String, UnexecutedClaim>,
     /// Distinct checks (identity -> command line) that passed since the last file change.
     passed_checks: std::collections::BTreeMap<String, String>,
     /// Failures resolved so far: a pass whose identity matched a recorded failure.
@@ -2810,6 +2815,7 @@ fn turn_loop(
                 ls.last_test.as_deref(),
                 &out.text,
                 ls.failed_checks.len() as u32,
+                ls.unexecuted.len() as u32,
             );
             ls.completion = Some(c.as_str());
             if c == crate::completion::Completion::Incomplete {
@@ -3299,6 +3305,7 @@ fn turn_loop(
                 output: rendered.text.clone(),
             });
             ls.observations.extend(pending_observation);
+            track_execution_claim(ls, &act, &call);
             ls.activity.push(act);
             ctx.progress(ls, "tool-running");
             if refusals_in_a_row
@@ -3468,6 +3475,163 @@ fn exec_with_cancel(
     done.store(true, Ordering::SeqCst);
     let _ = watcher.join();
     r
+}
+
+/// Ground execution claims in receipts: a `proc_run` whose latest
+/// disposition is not an executed exit-0 is remembered as an unverified
+/// claim until the SAME command executes successfully. Verification-command
+/// failures keep their existing ledger (`failed_checks`); this ledger covers
+/// every other command — demonstrations included — so a passing unrelated
+/// check can never launder a command that never ran into verified evidence.
+/// The subject a command acts on: for an interpreter/shell call, the first
+/// non-flag argument (the script or module); for `sh -c`, the first
+/// file-like token of the script; otherwise the program itself. Two calls
+/// about the same subject are the same claim retried, whatever path or
+/// interpreter spelling the retry needed.
+fn claim_subject(args: &serde_json::Value) -> String {
+    let prog = args.get("program").and_then(|v| v.as_str()).unwrap_or("");
+    let argv: Vec<&str> = args
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+    if matches!(prog, "sh" | "bash" | "zsh") && argv.first() == Some(&"-c") {
+        if let Some(script) = argv.get(1) {
+            for tok in script.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&')) {
+                if !tok.starts_with('-') && (tok.contains('.') || tok.contains('/')) {
+                    return tok.trim_matches(|c| c == '"' || c == '\'').to_owned();
+                }
+            }
+        }
+        return prog.to_owned();
+    }
+    argv.iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| prog.to_owned())
+}
+
+/// Program spelling family: `python3` is a retry spelling of `python`,
+/// `node20` of `node`. Trailing version digits are not part of the family.
+fn program_stem(prog: &str) -> &str {
+    prog.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')
+}
+
+fn track_execution_claim(
+    ls: &mut LoopState,
+    act: &ToolActivity,
+    call: &nexus_model::AssembledToolCall,
+) {
+    if call.name != "proc_run" {
+        return;
+    }
+    let key = crate::completion::check_identity(
+        &call.arguments,
+        act.args_digest.as_deref().unwrap_or(""),
+    );
+    match act.status.as_str() {
+        "executed" if act.exit_code == Some(0) => {
+            ls.unexecuted.remove(&key);
+            if is_verification_command(&call.arguments) {
+                return;
+            }
+            // A successful non-check execution clears the claims it retries.
+            // A REFUSED claim (it never ran) is cleared by a real execution
+            // sharing its vocabulary — the authorized form of the same
+            // demonstration (a workspace-relative data file, an interpreter
+            // spelling the runtime has). A claim that EXECUTED AND FAILED
+            // clears only for the same subject under the same program
+            // family. An unrelated pass clears nothing, and a verification
+            // pass never clears any of this (handled above).
+            let subject = claim_subject(&call.arguments);
+            let prog = call
+                .arguments
+                .get("program")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let stem = program_stem(prog);
+            let tokens = claim_tokens(&call.arguments);
+            ls.unexecuted.retain(|_, c| {
+                if c.was_refused {
+                    tokens.is_disjoint(&c.tokens)
+                } else {
+                    !(c.subject == subject && program_stem(&c.prog) == stem)
+                }
+            });
+        }
+        "executed" => {
+            if !is_verification_command(&call.arguments) {
+                ls.unexecuted.insert(
+                    key,
+                    UnexecutedClaim {
+                        line: act.args_summary.trim().to_owned(),
+                        subject: claim_subject(&call.arguments),
+                        prog: call
+                            .arguments
+                            .get("program")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_owned(),
+                        was_refused: false,
+                        tokens: claim_tokens(&call.arguments),
+                    },
+                );
+            }
+        }
+        "refused" | "failed" | "cancelled" => {
+            ls.unexecuted.insert(
+                key,
+                UnexecutedClaim {
+                    line: act.args_summary.trim().to_owned(),
+                    subject: claim_subject(&call.arguments),
+                    prog: call
+                        .arguments
+                        .get("program")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    was_refused: true,
+                    tokens: claim_tokens(&call.arguments),
+                },
+            );
+        }
+        _ => {}
+    }
+}
+
+/// One unverified execution claim: what was proposed, how it ended, and the
+/// vocabulary a later successful retry must share to clear it.
+struct UnexecutedClaim {
+    line: String,
+    subject: String,
+    prog: String,
+    was_refused: bool,
+    tokens: std::collections::BTreeSet<String>,
+}
+
+/// Significant words of a command (program + arguments), for retry matching.
+fn claim_tokens(args: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    const STOP: &[&str] = &[
+        "the", "and", "for", "with", "run", "sh", "bash", "-c", "python3", "python",
+    ];
+    let mut out = std::collections::BTreeSet::new();
+    let mut collect = |s: &str| {
+        for tok in s.split(|c: char| !(c.is_alphanumeric() || matches!(c, '.' | '_' | '-'))) {
+            let tok = tok.to_lowercase();
+            if tok.len() >= 3 && !STOP.contains(&tok.as_str()) {
+                out.insert(tok);
+            }
+        }
+    };
+    if let Some(p) = args.get("program").and_then(|v| v.as_str()) {
+        collect(p);
+    }
+    if let Some(a) = args.get("args").and_then(|v| v.as_array()) {
+        for x in a.iter().filter_map(|v| v.as_str()) {
+            collect(x);
+        }
+    }
+    out
 }
 
 /// Receipts and evidence from a finished tool call (authoritative values
@@ -3924,6 +4088,7 @@ fn finalize(
     let completion = ls.completion;
     let (edits_used, tests_used, last_test) = (ls.edits_used, ls.tests_used, ls.last_test.clone());
     let unresolved_failed_checks = ls.failed_checks.len() as u32;
+    let unexecuted_snapshot: Vec<String> = ls.unexecuted.values().map(|c| c.line.clone()).collect();
     let verified = ls.citations_verified.clone();
     let unverified = ls.citations_unverified.clone();
     let activity = ls.activity.clone();
@@ -3959,6 +4124,15 @@ fn finalize(
         if r.completion.as_deref() == Some("failing-checks") {
             r.completion_note = Some(crate::completion::failing_checks_note(
                 unresolved_failed_checks,
+            ));
+        }
+        if r.completion.as_deref() == Some("unexecuted-claims") {
+            r.completion_note = Some(crate::completion::unexecuted_note(
+                unexecuted_snapshot.len() as u32,
+                unexecuted_snapshot
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("unknown command"),
             ));
         }
         if r.completion.as_deref() == Some("incomplete") {
