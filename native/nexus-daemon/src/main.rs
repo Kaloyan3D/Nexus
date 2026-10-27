@@ -1274,6 +1274,19 @@ fn run(args: &[String]) -> i32 {
     if autonomous {
         nexus_tools::workspace::enable_workbench_names();
     }
+    // M8.1: host executions of a previous daemon incarnation cannot still be
+    // supervised; their cgroup leaves (only ever named `nexus-host-*`) are
+    // killed and removed so a crash cannot leave Full Access trees running.
+    if let Some(base) = nexus_tools::sandbox::cgroup_base() {
+        if let Ok(rd) = std::fs::read_dir(&base) {
+            for e in rd.flatten() {
+                let name = e.file_name();
+                if name.to_string_lossy().starts_with("nexus-host-") {
+                    nexus_tools::sandbox::kill_and_remove_cgroup(&e.path());
+                }
+            }
+        }
+    }
     let daemon = Arc::new(Daemon {
         kernel: Mutex::new(kernel),
         trust_mode,

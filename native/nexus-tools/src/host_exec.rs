@@ -104,6 +104,25 @@ pub struct HostRun<'a> {
 pub fn run_host(run: HostRun<'_>) -> Result<SandboxOutcome, ToolError> {
     use std::os::unix::process::CommandExt;
     let started = Instant::now();
+    // M8.1: supervise through a dedicated cgroup v2 leaf when the machine
+    // offers one (the same infrastructure as the sandbox, but membership and
+    // kill only — no limits, no confinement). `setsid`/daemonized descendants
+    // stay in the cgroup, so `cgroup.kill` reaches what a process-group kill
+    // cannot. Without a writable cgroup the run honestly falls back to
+    // process-group supervision and says so in its outcome.
+    let leaf_name = format!(
+        "nexus-host-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let cgroup: Option<PathBuf> = crate::sandbox::cgroup_base().and_then(|base| {
+        let leaf = base.join(&leaf_name);
+        std::fs::create_dir(&leaf).ok().map(|_| leaf)
+    });
+
     let mut cmd = Command::new(&run.program);
     cmd.args(&run.argv[1.min(run.argv.len())..])
         .current_dir(&run.cwd)
@@ -112,12 +131,23 @@ pub fn run_host(run: HostRun<'_>) -> Result<SandboxOutcome, ToolError> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let leaf_for_child = cgroup
+        .as_ref()
+        .map(|l| l.join("cgroup.procs").to_string_lossy().into_owned());
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            // Join the supervision cgroup BEFORE exec: a post-spawn write by
+            // the supervisor races the workload's first fork, and a descendant
+            // forked in that window would keep the parent cgroup and escape
+            // `cgroup.kill`. A failure here is not fatal to the spawn; the
+            // supervisor verifies membership and degrades honestly.
+            if let Some(procs) = &leaf_for_child {
+                let _ = std::fs::write(procs, std::process::id().to_string());
+            }
             Ok(())
         });
     }
@@ -128,6 +158,19 @@ pub fn run_host(run: HostRun<'_>) -> Result<SandboxOutcome, ToolError> {
         )
     })?;
     let pid = child.id();
+    // Verify the child actually joined the leaf (its pre-exec write is the
+    // race-free path; this write is a second chance). Without membership the
+    // run degrades to process-group supervision and reports that honestly.
+    let cgroup: Option<PathBuf> = cgroup.and_then(|leaf| {
+        let member = std::fs::read_to_string(leaf.join("cgroup.procs"))
+            .is_ok_and(|s| s.lines().any(|l| l.trim() == pid.to_string()));
+        if member || std::fs::write(leaf.join("cgroup.procs"), pid.to_string()).is_ok() {
+            Some(leaf)
+        } else {
+            let _ = std::fs::remove_dir(&leaf);
+            None
+        }
+    });
     let cap = run.tail_bytes;
     let mut out_pipe = child.stdout.take();
     let mut err_pipe = child.stderr.take();
@@ -145,7 +188,7 @@ pub fn run_host(run: HostRun<'_>) -> Result<SandboxOutcome, ToolError> {
             }
         }
         if started.elapsed() > Duration::from_millis(run.wall_ms.max(1)) {
-            kill_group(pid);
+            kill_tree(&cgroup, pid);
             let _ = child.wait();
             break ExitKind::Timeout;
         }
@@ -154,12 +197,20 @@ pub fn run_host(run: HostRun<'_>) -> Result<SandboxOutcome, ToolError> {
                 "revoked" => ExitKind::Revoked("grant revoked".into()),
                 _ => ExitKind::Cancelled,
             };
-            kill_group(pid);
+            kill_tree(&cgroup, pid);
             let _ = child.wait();
             break kind;
         }
         std::thread::sleep(Duration::from_millis(25));
     };
+    // Nothing the command detached may outlive it under Nexus supervision:
+    // when a cgroup leaf is in use it is killed and removed here, on every
+    // terminal path, so daemonized descendants end with the execution. This
+    // must happen BEFORE joining the pipe readers: a detached descendant
+    // inherits the pipes and would otherwise hold them open forever.
+    let cgroup_reaped = cgroup
+        .as_ref()
+        .is_some_and(|cg| crate::sandbox::kill_and_remove_cgroup(cg));
     let (stdout, stdout_bytes, stdout_truncated) = t_out.join().unwrap_or_default();
     let (stderr, stderr_bytes, stderr_truncated) = t_err.join().unwrap_or_default();
     Ok(SandboxOutcome {
@@ -177,8 +228,16 @@ pub fn run_host(run: HostRun<'_>) -> Result<SandboxOutcome, ToolError> {
         signal_hint: None,
         peak_rss_bytes: 0,
         peak_procs: 0,
-        cgroup: format!("host-process-group:{pid}"),
-        resource_enforcement: "process-group-polling",
+        cgroup: match &cgroup {
+            Some(cg) if cgroup_reaped => format!("{} (killed and removed)", cg.display()),
+            Some(cg) => format!("{} (removal unconfirmed)", cg.display()),
+            None => format!("host-process-group:{pid}"),
+        },
+        resource_enforcement: if cgroup.is_some() {
+            "kernel-cgroup"
+        } else {
+            "process-group-polling"
+        },
         oom_killed: false,
         pids_limit_hit: false,
     })
@@ -192,6 +251,17 @@ fn exit_kind(status: std::process::ExitStatus) -> ExitKind {
         ExitKind::Signaled(sig)
     } else {
         ExitKind::Exited(-1)
+    }
+}
+
+/// Kill the whole supervised tree: by cgroup when supervised that way
+/// (reaches `setsid` escapees), else by process group (best effort).
+fn kill_tree(cgroup: &Option<PathBuf>, pid: u32) {
+    match cgroup {
+        Some(cg) => {
+            crate::sandbox::kill_and_remove_cgroup(cg);
+        }
+        None => kill_group(pid),
     }
 }
 
