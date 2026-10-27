@@ -1412,6 +1412,7 @@ pub(crate) fn run(
             expected: expected.clone(),
             ctx_budget,
             signals: signals_run,
+            jobs: catalog_profile == nexus_model::ToolProfile::RepoCodeJobsV1,
             profile: catalog_profile,
         },
         &mut loop_state,
@@ -1468,6 +1469,9 @@ struct Shared<'a> {
     /// EM-04B: the run's engine takes reasoning signals (the experimental `muse-v1-signals`
     /// engine in a coding run); its catalog then carries the signals tool.
     signals: bool,
+    /// M7D: the run's catalog carries the broker-handled background-job tools
+    /// (the `muse-v0-jobs` engine in a coding run).
+    jobs: bool,
     /// The tool catalog every request of this run offers.
     profile: nexus_model::ToolProfile,
 }
@@ -1860,6 +1864,74 @@ fn engine_snapshot(
 /// the historical path, the host validates the transition and the new state is committed DURABLY
 /// before the acknowledgement is returned to the model. A failed acceptance fails the run closed.
 #[allow(clippy::too_many_arguments)]
+/// M7D: one background-job tool call, answered by the broker's JobManager (never the tool
+/// daemon, never a Kernel tool id). Authority comes from the project's standing grant, frozen
+/// by the job verbs themselves; the run's identity only names the project and task.
+fn job_call(
+    ctx: &Ctx<'_>,
+    sh: &Shared<'_>,
+    act: &mut ToolActivity,
+    name: &str,
+    args: &Value,
+) -> Rendered {
+    act.tool = name.to_owned();
+    if let Err((code, message)) = crate::jobs::validate_tool_call(name, args) {
+        act.status = "refused".into();
+        return render_error(name, code, &message);
+    }
+    let Some(env) = ctx.b.cfg.registry_env() else {
+        act.status = "refused".into();
+        return render_error(
+            name,
+            "not-available",
+            "background jobs are not available in this profile",
+        );
+    };
+    let mgr = match ctx.b.job_manager() {
+        Ok(m) => m,
+        Err((code, message)) => {
+            act.status = "refused".into();
+            return render_error(name, code, &message);
+        }
+    };
+    let result = match name {
+        "job_start" => {
+            let Some(project_id) = sh.intent.workspace_id.as_deref() else {
+                act.status = "refused".into();
+                return render_error(
+                    name,
+                    "invalid-arguments",
+                    "this run is not bound to a project workspace",
+                );
+            };
+            let mut params = args.clone();
+            params["projectId"] = Value::String(project_id.to_owned());
+            params["task"] = Value::String(sh.task_id.to_owned());
+            crate::jobs::job_start(&mgr, &env, &ctx.b.cfg.state_dir, &params)
+        }
+        "job_status" => crate::jobs::job_status(&mgr, args),
+        "job_logs" => crate::jobs::job_logs(&mgr, args),
+        "job_stop" => crate::jobs::job_stop(&mgr, args),
+        _ => unreachable!("validated above"),
+    };
+    match result {
+        Ok(v) => {
+            act.status = "executed".into();
+            let text = nexus_contracts::canonical_json(&v);
+            Rendered {
+                digest: digest_of(&text),
+                text,
+                is_error: false,
+                truncated: false,
+            }
+        }
+        Err((code, message)) => {
+            act.status = "refused".into();
+            render_error(name, code, &message)
+        }
+    }
+}
+
 fn signal_call(
     sh: &Shared<'_>,
     ls: &mut LoopState,
@@ -2804,9 +2876,21 @@ fn turn_loop(
                 args_summary: fallback_summary(&call.name, &call.arguments),
                 ..Default::default()
             };
-            // EM-04B: the reasoning-signals tool is answered by the broker (experimental engine only)
-            let signals_call = sh.signals && call.name == crate::signals::TOOL;
-            let rendered = if signals_call {
+            // M7D: the background-job tools are answered by the broker's JobManager
+            let jobs_call =
+                sh.jobs && nexus_model::repo_tools::JOB_TOOLS.contains(&call.name.as_str());
+            let rendered = if jobs_call {
+                let r = job_call(ctx, sh, &mut act, &call.name, &call.arguments);
+                let _ = session.tool_call(
+                    idx,
+                    &call_id,
+                    &call.name,
+                    &args_echo,
+                    if r.is_error { "refused" } else { "executed" },
+                    r.is_error,
+                );
+                r
+            } else if sh.signals && call.name == crate::signals::TOOL {
                 match signal_call(
                     sh,
                     ls,

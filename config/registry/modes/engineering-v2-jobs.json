@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "engineering-v2-jobs",
+  "displayName": "Engineering Mode v2 (Background jobs)",
+  "status": "active",
+  "orchestrationEngineId": "muse-v0-jobs",
+  "selectable": true,
+  "runnable": true,
+  "slots": [
+    {
+      "id": "main",
+      "label": "Main Engineer",
+      "required": true,
+      "internalRoles": [
+        "muse_main"
+      ],
+      "requirements": {
+        "toolCalling": true,
+        "adaptiveReasoningContract": "muse-v0",
+        "singleAgent": true
+      }
+    }
+  ],
+  "internalRoles": [
+    "muse_main"
+  ],
+  "optionalCapabilities": [],
+  "requestBudgetBytes": 440000
+}

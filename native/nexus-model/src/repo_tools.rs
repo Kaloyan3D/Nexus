@@ -81,13 +81,14 @@ pub fn tool_id_for_profile(
     use crate::request::ToolProfile as P;
     match profile {
         P::RepoInspectV1 => tool_id_for(model_name),
-        // the signals tool is broker-handled control-plane input: it has no Kernel tool id
-        P::RepoCodeV1 | P::RepoCodeMuseSignalsV1 => tool_id_for(model_name).or_else(|| {
-            CODE_EXTRA
-                .iter()
-                .find(|t| t.model_name == model_name)
-                .map(|t| t.tool_id)
-        }),
+        // the signals and job tools are broker-handled: they have no Kernel tool id
+        P::RepoCodeV1 | P::RepoCodeMuseSignalsV1 | P::RepoCodeJobsV1 => tool_id_for(model_name)
+            .or_else(|| {
+                CODE_EXTRA
+                    .iter()
+                    .find(|t| t.model_name == model_name)
+                    .map(|t| t.tool_id)
+            }),
     }
 }
 
@@ -154,11 +155,22 @@ pub fn definitions() -> Vec<Value> {
 pub fn definitions_for(profile: crate::request::ToolProfile) -> Vec<Value> {
     use crate::request::ToolProfile as P;
     let mut v = definitions();
-    if matches!(profile, P::RepoCodeV1 | P::RepoCodeMuseSignalsV1) {
+    if matches!(
+        profile,
+        P::RepoCodeV1 | P::RepoCodeMuseSignalsV1 | P::RepoCodeJobsV1
+    ) {
         v.extend(code_definitions());
     }
     if profile == P::RepoCodeMuseSignalsV1 {
         v.push(muse_signals_definition());
+    }
+    if profile == P::RepoCodeJobsV1 {
+        v.extend(
+            job_tool_definitions()
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+        );
     }
     v
 }
@@ -317,6 +329,9 @@ pub const REPO_CODE_V1_CATALOG_DIGEST: &str =
     "e464de5c5a534aac38c7c50d36a7c1c081bf3d4584f825a8e617be9c24ae0c4c";
 pub const REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST: &str =
     "7c7c9bc17ad4f849840c4d733d98126234dbfba075e7adf6c95775b4c81d28e8";
+/// M7D: `RepoCodeV1` plus the four broker-handled job tools, for the `muse-v0-jobs` engine.
+pub const REPO_CODE_JOBS_V1_CATALOG_DIGEST: &str =
+    "18168580698f1ef02b59c7f808da8ed0a709f0c50e7f3ea36d27961c2dc77bfc";
 
 /// The frozen digest of `profile`'s catalog.
 pub fn frozen_catalog_digest(profile: crate::request::ToolProfile) -> &'static str {
@@ -325,6 +340,7 @@ pub fn frozen_catalog_digest(profile: crate::request::ToolProfile) -> &'static s
         P::RepoInspectV1 => REPO_INSPECT_V1_CATALOG_DIGEST,
         P::RepoCodeV1 => REPO_CODE_V1_CATALOG_DIGEST,
         P::RepoCodeMuseSignalsV1 => REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST,
+        P::RepoCodeJobsV1 => REPO_CODE_JOBS_V1_CATALOG_DIGEST,
     }
 }
 

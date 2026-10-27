@@ -79,7 +79,7 @@ fn only_the_experimental_engine_takes_signals() {
         .iter()
         .map(|e| e.descriptor().engine_id)
         .collect();
-    assert_eq!(prod, ["muse-v0", "nexus-adaptive-v1"]);
+    assert_eq!(prod, ["muse-v0", "muse-v0-jobs", "nexus-adaptive-v1"]);
     assert!(!prod.contains(&"muse-v1-signals"));
 }
 

@@ -1540,6 +1540,6 @@ fn the_adaptive_identity_resolves_in_one_pair_and_nothing_resembling_it_resolves
         .iter()
         .map(|x| x.descriptor().engine_id)
         .collect();
-    assert_eq!(prod, ["muse-v0", current]);
+    assert_eq!(prod, ["muse-v0", "muse-v0-jobs", current]);
     assert!(!prod.contains(&"muse-v1"));
 }

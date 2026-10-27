@@ -47,6 +47,22 @@ pub struct MuseV0 {
     descriptor: EngineDescriptor,
 }
 
+/// M7D: the jobs variant of `muse-v0` — identical run logic, a catalog that additionally
+/// carries the four broker-handled background-job tools (`RepoCodeJobsV1`).
+pub const JOBS_ENGINE_ID: &str = "muse-v0-jobs";
+pub static MUSE_V0_JOBS: MuseV0 = MuseV0 {
+    descriptor: EngineDescriptor {
+        engine_id: JOBS_ENGINE_ID,
+        contract_version: super::ENGINE_CONTRACT_VERSION,
+        mode_ids: &["engineering-v2-jobs"],
+        roles: &["muse_main"],
+        state_schema: 1,
+        may_propose_effort: false,
+        inherits_state: false,
+        request_reserve_bytes: 0,
+    },
+};
+
 /// Engine state: the stall budgets and the narration window. Nothing else.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MuseV0State {

@@ -87,6 +87,7 @@ pub fn tool_catalog_profile(engine_id: &str, code_run: bool) -> nexus_model::Too
     match (code_run, engine_id) {
         (false, _) => P::RepoInspectV1,
         (true, muse_v1::SIGNALS_ENGINE_ID | muse_v1::ACTIVE_ENGINE_ID) => P::RepoCodeMuseSignalsV1,
+        (true, muse_v0::JOBS_ENGINE_ID) => P::RepoCodeJobsV1,
         (true, _) => P::RepoCodeV1,
     }
 }
@@ -490,7 +491,7 @@ fn engines(test_build: bool) -> Vec<&'static dyn EngineExtension> {
 /// `engines` with the production gate as a parameter, so that the day the gate is opened (S10) is
 /// already proven by a test: opening it registers ONLY the active `nexus-adaptive-v1`.
 fn engines_with(test_build: bool, muse_v1_enabled: bool) -> Vec<&'static dyn EngineExtension> {
-    let mut v: Vec<&'static dyn EngineExtension> = vec![&muse_v0::MUSE_V0];
+    let mut v: Vec<&'static dyn EngineExtension> = vec![&muse_v0::MUSE_V0, &muse_v0::MUSE_V0_JOBS];
     if muse_v1_enabled || test_build {
         v.push(&muse_v1::MUSE_V1_ACTIVE);
     }

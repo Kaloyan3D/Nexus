@@ -1333,7 +1333,9 @@ impl Broker {
         }
     }
 
-    fn job_manager(&self) -> Result<Arc<nexus_tools::jobs::JobManager>, (&'static str, String)> {
+    pub(crate) fn job_manager(
+        &self,
+    ) -> Result<Arc<nexus_tools::jobs::JobManager>, (&'static str, String)> {
         let mut g = self.jobs.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(m) = &*g {
             return Ok(m.clone());
