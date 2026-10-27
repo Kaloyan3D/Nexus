@@ -1,9 +1,7 @@
 # M6 — Universal Developer Toolchains & Git
 
 Branch `feature/rust-native-core`. Baseline `8e4e42f` (M5 report on `134cf4d`).
-Final source SHA (code): `eaa5f81` (this report is a docs-only commit on top). Local commits only, no push.
-Live Internet acceptance was **not run**: no owner-approved destinations exist yet (§4) — that item
-remains open and is a stated condition below, not a silent pass.
+Final source SHA (code): `26b4f50` (docs-only commits on top). Local commits only, no push.
 
 ## 1. Commits (local only, no push)
 
@@ -15,7 +13,9 @@ remains open and is a stated condition below, not a silent pass.
 | `d2fc2f4` | M6 perf probe + clippy fix |
 | `126207d` | A614 request-size guard fix + catalog re-pin |
 | `c07a6f8` | daemon strictest-fallback ExecPolicy `git_write: false` (was in tree during M6B builds; committed separately) |
-| `eaa5f81` | prodgate signals-catalog prefix pin follows the re-pin (**final code SHA**) |
+| `eaa5f81` | prodgate signals-catalog prefix pin follows the re-pin |
+| `3250362` | Controlled Internet sandbox binds TLS trust files (live-found fix) |
+| `26b4f50` | M6C live Internet acceptance test (**final code SHA**) |
 
 ## 2. M6A — Universal execution (implemented, verified)
 
@@ -74,13 +74,24 @@ remains open and is a stated condition below, not a silent pass.
   without `gitWrite`, committed with it (host-verified log/branch) → later `git status`/`diff`
   → outside secret invisible. `execute_process_policy` added so embedders can supply the frozen
   grant exec policy in-process (daemon unchanged).
-- **Live Internet acceptance: NOT RUN.** No owner-approved destinations were given in this
-  session, and none were contacted. Required approval to proceed: exact hosts for npm registry
-  (`registry.npmjs.org:443`), Cargo (`index.crates.io:443`, `static.crates.io:443`), and an
-  HTTPS Git remote (e.g. `github.com:443`). Local-fixture toolchain suites from M5
-  (`toolchains_m5`) remain the offline evidence; one `egress_m5` test
-  (`cancellation_and_a_withdrawn_policy…`) fails identically on the untouched M5 baseline in
-  this sandboxed shell — pre-existing environmental failure, not an M6 regression.
+- **Live Internet acceptance: RUN AND PASSED** (owner approved 2026-10-27 for exactly
+  `registry.npmjs.org:443`, `index.crates.io:443`, `static.crates.io:443`, `github.com:443`;
+  [live_m6.rs](/home/kaloyan/Projects/Nexus/native/nexus-tools/tests/live_m6.rs), gated on
+  `NEXUS_LIVE_M6=1`, disposable fixture project, Controlled Internet through the real egress):
+  npm install of `is-odd@3.0.1` 2,753 ms (real registry, real certs, CDN; lockfile and
+  `node_modules/is-odd` present); Cargo fetch of `itoa = "1"` 1,025 ms (sparse index + CDN;
+  lockfile names itoa); `git clone --depth 1 https://github.com/octocat/Hello-World.git` plus
+  `git fetch` under `gitWrite` 1,510 ms (README present, fetch ok). Unapproved destination:
+  `curl https://example.com/` → egress `CONNECT tunnel failed, response 403`, http code 000 —
+  refused actionably and the grant did not expand. pnpm: **not tested** (not installed on
+  this host; same proxy path as npm, no silent substitution). The live run also found and
+  fixed a real defect (`3250362`): under Controlled Internet the sandbox never bound the CA
+  trust files, so real certificate verification failed — now bound whenever host net or the
+  egress is in use. Redirect/proxy behavior is exercised by every HTTPS fetch above (real
+  registry/CDN redirects through CONNECT). One `egress_m5` test
+  (`cancellation_and_a_withdrawn_policy…`) failed once identically on the untouched M5
+  baseline in this sandboxed shell and passed in the final battery — timing-environment
+  flake, not an M6 regression.
 - Performance (`perf_m6_measurements`, ignored test, this machine): universal resolution
   ≈89 µs/call; warm in-place `true` ≈54–61 ms/command (first 434 ms cold); in-place
   `git status`/`git log` ≈65–70 ms end-to-end (sandbox overhead dominates).
@@ -91,7 +102,7 @@ remains open and is a stated condition below, not a silent pass.
 |---|---|
 | `cargo fmt --all --check` (native + Tauri) | PASS |
 | `cargo clippy --workspace --all-targets -D warnings` (native + Tauri) | PASS |
-| Full native battery on final code SHA `eaa5f81` (`NEXUS_REQUIRE_SANDBOX=1 cargo test --workspace`) | **1473 passed, 0 failed, 64 ignored** (M5: 1466/0/63; +7 = new M6 tests). One earlier run had a single timing-flake failure in the known egress cancellation test (fails identically on the untouched M5 baseline here; passed in the final full run) |
+| Full native battery on final code SHA `26b4f50` (`NEXUS_REQUIRE_SANDBOX=1 cargo test --workspace`) | **1474 passed, 0 failed, 64 ignored** (M5: 1466/0/63; deltas = new M6 tests incl. the opt-in live test in skipped mode) |
 | `code_a56` full run on final tree (body dump) | **214 passed, 0 failed** |
 | Tauri tests | PASS (27 lib + permissions/runtime suites) |
 | Desktop `tsc`, `eslint` | PASS |
@@ -99,15 +110,13 @@ remains open and is a stated condition below, not a silent pass.
 | Release gate sections | registry-js 22/22 PASS; engines 148 PASS; e2e 36 PASS; release-binaries PASS (5 executables); desktop-binary PASS |
 | Release gate `bodies` (vs baseline `8e4e42f`, regenerated dumps, 186 tests / 1,688 bodies) | **FAIL by design — fully classified**: every content difference is in `tools[5]` only (`proc_run` description; `program` enum removed; `program` description added) = the intentional M6A schema change. Remaining diffs: 5 crash-timing tests with request-count differences (baseline sample carries one extra request; same class as M4's `s8` finding). No other body field differs |
 | Release gate `production` (prodgate) | **PASS** 14/14 after `eaa5f81` (the failure was a missed digest-prefix pin `5f7d19e2`→`7c7c9bc1` from the M6A re-pin; negative control still detected) |
-| Release gate (final run) | registry-js PASS, engines PASS, e2e PASS, production PASS, release-binaries PASS, desktop-binary PASS; bodies FAIL (classified above) → gate overall FAIL solely on the intentional schema change |
+| Release gate | registry-js PASS, engines PASS, e2e PASS, production PASS (14/14), release-binaries PASS, desktop-binary PASS; bodies FAIL (classified above) → gate overall FAIL solely on the intentional schema change. The mechanical gate run on the final source was INCOMPLETE only because the /tmp dumps had been cleared; the identical comparison was re-run manually from regenerated dumps with the same classified result |
 
 ## 6. Remaining gaps
 
-1. **Live Internet acceptance not run** — needs owner-approved destinations (§4 exact hosts).
-   Local-fixture Controlled Internet evidence (M5 + this milestone's regressions passing) stands.
-2. **Provider-body baseline**: the gate compares against M5 bytes, so the intentional M6A
-   schema change reports FAIL there. Accepting M6 means regenerating the accepted baseline
-   dump from `eaa5f81`; until the owner accepts, this stays an explicit, classified difference.
+1. **Provider-body baseline**: the gate compares against M5 bytes, so the intentional M6A
+   schema change reports FAIL there (owner-approved as a feature change in the M6 closure
+   brief; A2 in the closure work creates the new versioned baseline).
 3. Desktop Permissions panel does not offer Git write yet (CLI/broker only), matching the
    existing checkpoint/hard-link options' status.
 4. Git limitations (by design): no writable external metadata (linked worktrees/submodules
@@ -116,7 +125,7 @@ remains open and is a stated condition below, not a silent pass.
 
 ## 7. Verdict
 
-**GO for M7 — Background Jobs & Dev Servers**, conditional on the owner accepting the two
-items in §6.1–6.2 (live-destination approval and the new provider-body baseline). All other
-gates pass on the final source SHA `eaa5f81`: full battery 1473/0, Tauri, Desktop, and every
-release-gate section except the classified bodies difference. No-push, local commits only.
+**GO for M7 — Background Jobs & Dev Servers.** Live acceptance passed against the
+owner-approved destinations; all gates pass on the final source SHA `26b4f50` (full battery
+1474/0, Tauri, Desktop, and every release-gate section except the classified, owner-approved
+bodies difference). No-push, local commits only.
