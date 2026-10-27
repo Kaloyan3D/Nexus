@@ -823,6 +823,44 @@ pub fn execute_process_policy(
     Ok(ToolExecutionOutcome { result, journal })
 }
 
+/// As [`execute_process_net`], additionally carrying the task's frozen grant execution policy
+/// (M6B Git write etc.) — the combination a Direct project with Controlled Internet needs.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_process_full(
+    kernel: &mut Kernel,
+    call: &AuthorizedToolCall,
+    cancel: &CancellationToken,
+    policy: &crate::process::CommandPolicy,
+    run_root: &std::path::Path,
+    scope_max_wall_ms: u64,
+    env: Option<&crate::process::ProjectEnv>,
+    net: Option<crate::netpolicy::NetPolicy>,
+    exec: Option<crate::grant::ExecPolicy>,
+) -> Result<ToolExecutionOutcome, ToolError> {
+    let started = begin(kernel, call, cancel)?;
+    let mut hooks = KernelProcessHooks {
+        kernel,
+        verified: &started.verified,
+        last: None,
+        net,
+        narrow: None,
+        exec,
+    };
+    let result = run_process_call(
+        call,
+        cancel,
+        policy,
+        run_root,
+        scope_max_wall_ms,
+        env,
+        &mut hooks,
+    )?;
+    let journal = hooks.last.ok_or_else(|| {
+        ToolError::new(ToolErrorCode::IoError, "process produced no journal record")
+    })?;
+    Ok(ToolExecutionOutcome { result, journal })
+}
+
 /// Startup reconciliation for process requests with `prepared` and no
 /// terminal record: kill any leftover cgroup, remove run directories, and
 /// record `interrupted`. Never restarts a process.

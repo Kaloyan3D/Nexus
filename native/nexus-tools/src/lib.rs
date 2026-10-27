@@ -52,10 +52,11 @@ pub mod workspace;
 pub mod write;
 
 pub use authorization::{
-    authorize, begin, execute, execute_process, execute_process_in, execute_process_net,
-    execute_process_policy, execute_write, finish, prepare, prepare_process, prepare_write,
-    reconcile_processes, reconcile_writes, run_process_call, run_started, run_write_call,
-    AuthorizedToolCall, GrantRef, PreparedToolRequest, StartedToolCall, ToolExecutionOutcome,
+    authorize, begin, execute, execute_process, execute_process_full, execute_process_in,
+    execute_process_net, execute_process_policy, execute_write, finish, prepare, prepare_process,
+    prepare_write, reconcile_processes, reconcile_writes, run_process_call, run_started,
+    run_write_call, AuthorizedToolCall, GrantRef, PreparedToolRequest, StartedToolCall,
+    ToolExecutionOutcome,
 };
 pub use contract::{
     descriptor_for, descriptors, ListArgs, ProcessArgs, ReadArgs, SearchArgs, ToolArgs,
