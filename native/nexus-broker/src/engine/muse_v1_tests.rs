@@ -95,7 +95,7 @@ fn the_shadow_engine_is_not_selectable_in_a_production_build() {
         .collect();
     assert_eq!(
         prod,
-        ["muse-v0", "nexus-adaptive-v1"],
+        ["muse-v0", "muse-v0-jobs", "nexus-adaptive-v1"],
         "production builds register the default engine and the opt-in adaptive engine, never an experimental one"
     );
     assert!(engines(true)

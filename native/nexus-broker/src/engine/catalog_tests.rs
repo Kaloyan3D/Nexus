@@ -94,7 +94,12 @@ fn the_signals_catalog_is_reached_in_production_only_through_the_sealed_adaptive
         .iter()
         .map(|e| e.descriptor().engine_id)
         .collect();
-    assert_eq!(prod, ["muse-v0", "nexus-adaptive-v1"]);
+    assert_eq!(prod, ["muse-v0", "muse-v0-jobs", "nexus-adaptive-v1"]);
+    // M7D: the jobs engine is production-registered with its own catalog row
+    assert_eq!(
+        tool_catalog_profile(crate::engine::muse_v0::JOBS_ENGINE_ID, true),
+        P::RepoCodeJobsV1
+    );
     assert_eq!(tool_catalog_profile("muse-v0", true), P::RepoCodeV1);
     assert_eq!(
         tool_catalog_profile(muse_v1::ACTIVE_ENGINE_ID, true),
@@ -112,10 +117,24 @@ fn only_the_sealed_signals_capable_engine_descriptors_carry_the_signals_catalog(
         .map(|e| e.descriptor().engine_id)
         .filter(|id| tool_catalog_profile(id, true) != P::RepoCodeV1)
         .collect();
+    // M7D added one more non-baseline profile: the jobs engine. Signals-capable is unchanged.
     assert_eq!(
         special,
-        [muse_v1::ACTIVE_ENGINE_ID, muse_v1::SIGNALS_ENGINE_ID],
-        "the two Muse signals-capable engines, and no other"
+        [
+            crate::engine::muse_v0::JOBS_ENGINE_ID,
+            muse_v1::ACTIVE_ENGINE_ID,
+            muse_v1::SIGNALS_ENGINE_ID
+        ],
+        "the jobs engine plus the two Muse signals-capable engines, and no other"
+    );
+    let signals_capable: Vec<&str> = engines(true)
+        .iter()
+        .map(|e| e.descriptor().engine_id)
+        .filter(|id| tool_catalog_profile(id, true) == P::RepoCodeMuseSignalsV1)
+        .collect();
+    assert_eq!(
+        signals_capable,
+        [muse_v1::ACTIVE_ENGINE_ID, muse_v1::SIGNALS_ENGINE_ID]
     );
     // its descriptor reserves nothing: the tool's real bytes are in every measured request
     assert_eq!(MUSE_V1_SIGNALS.descriptor().request_reserve_bytes, 0);

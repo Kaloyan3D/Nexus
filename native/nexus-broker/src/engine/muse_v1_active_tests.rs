@@ -301,11 +301,15 @@ fn the_production_gate_registers_only_muse_v1_and_only_when_opened() {
     // the production build since S10-A: exactly these two, never an experimental engine
     assert_eq!(
         ids(false, MUSE_V1_PRODUCTION_ENABLED),
-        ["muse-v0", "nexus-adaptive-v1"]
+        ["muse-v0", "muse-v0-jobs", "nexus-adaptive-v1"]
     );
-    // with the gate closed (the rollback state) only the default engine remains
-    assert_eq!(ids(false, false), ["muse-v0"]);
-    assert_eq!(ids(false, true), ["muse-v0", "nexus-adaptive-v1"]);
+    // with the gate closed (the rollback state) the default pair remains (M7D's jobs engine
+    // is not part of the adaptive gate)
+    assert_eq!(ids(false, false), ["muse-v0", "muse-v0-jobs"]);
+    assert_eq!(
+        ids(false, true),
+        ["muse-v0", "muse-v0-jobs", "nexus-adaptive-v1"]
+    );
     // test builds also carry the experimental engines
     let t = ids(true, false);
     for want in [

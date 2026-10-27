@@ -76,6 +76,10 @@ pub enum ToolProfile {
     /// tool, no effect outside engine state). Offered only to the isolated `muse-v1-signals` engine;
     /// `RepoCodeV1` stays byte-identical.
     RepoCodeMuseSignalsV1,
+    /// M7D: `RepoCodeV1` plus the four broker-handled background-job tools
+    /// (`job_start`/`job_status`/`job_logs`/`job_stop`, no Kernel tool ids). Offered only to
+    /// the `muse-v0-jobs` engine; `RepoCodeV1` stays byte-identical.
+    RepoCodeJobsV1,
 }
 
 /// Bounds for a tool-capable conversation.
