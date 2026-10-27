@@ -60,6 +60,13 @@ const NATIVE_SCOPES = Object.freeze({
     role: SUPPORTED_ROLE,
     requiresSavedConfiguration: false,
   }),
+  // M7.1: the jobs mode keeps the MUSE_V0 loop and adds the four background-job tools.
+  'engineering-v2-jobs': Object.freeze({
+    engineId: 'muse-v0-jobs',
+    experimentalEngineIds: Object.freeze([]),
+    role: SUPPORTED_ROLE,
+    requiresSavedConfiguration: false,
+  }),
   'engineering-v2-adaptive': Object.freeze({
     engineId: 'nexus-adaptive-v1',
     experimentalEngineIds: Object.freeze([]),

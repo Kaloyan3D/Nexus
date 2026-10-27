@@ -38,6 +38,14 @@ const REQUIRED_MODE_IDS = ['engineering-v1', 'engineering-v2', 'engineering-v3']
 // treated as ABSENT: it can neither break the three legacy modes nor become listable or importable.
 // No other file in the modes directory is ever read (there is no directory scan).
 const OPTIONAL_MODE = Object.freeze({ file: 'engineering-v2-adaptive.json', id: 'engineering-v2-adaptive', engineId: 'nexus-adaptive-v1' })
+// M7.1: the jobs definition is OPTIONAL under the same closed identity (fixed file, id, engine).
+const OPTIONAL_JOBS_MODE = Object.freeze({ file: 'engineering-v2-jobs.json', id: 'engineering-v2-jobs', engineId: 'muse-v0-jobs' })
+function isOptionalJobsModeDefinition(doc) {
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return false
+  if (doc.id !== OPTIONAL_JOBS_MODE.id || doc.orchestrationEngineId !== OPTIONAL_JOBS_MODE.engineId) return false
+  return schemas.validateModeDefinition(doc, 'mode').length === 0
+}
+
 function isOptionalModeDefinition(doc) {
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return false
   if (doc.id !== OPTIONAL_MODE.id || doc.orchestrationEngineId !== OPTIONAL_MODE.engineId) return false
@@ -47,10 +55,11 @@ function isOptionalModeDefinition(doc) {
 function loadModeDefinitions() {
   const dir = path.join(__dirname, 'modes')
   const modes = []
-  for (const file of ['engineering-v1.json', 'engineering-v2.json', OPTIONAL_MODE.file, 'engineering-v3.json']) {
+  for (const file of ['engineering-v1.json', 'engineering-v2.json', OPTIONAL_MODE.file, OPTIONAL_JOBS_MODE.file, 'engineering-v3.json']) {
     const doc = readJson(path.join(dir, file))
     if (!doc) continue
     if (file === OPTIONAL_MODE.file && !isOptionalModeDefinition(doc)) continue
+    if (file === OPTIONAL_JOBS_MODE.file && !isOptionalJobsModeDefinition(doc)) continue
     modes.push(doc)
   }
   return modes

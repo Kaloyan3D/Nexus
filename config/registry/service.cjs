@@ -37,7 +37,7 @@ const runtimeProjection = require('./runtime-projection.cjs')
 const subscriptions = require('./subscription-connections.cjs')
 
 const SERVICE_SCHEMA_VERSION = 1
-const SUPPORTED_MODES = ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v3']
+const SUPPORTED_MODES = ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v2-jobs', 'engineering-v3']
 // EM-04C2: the dormant adaptive definition is OPTIONAL: listed (as planned, unselectable, non-executable)
 // when a valid definition exists, never invented when it does not
 const OPTIONAL_MODE_ID = legacyImport.OPTIONAL_MODE_ID
@@ -105,7 +105,7 @@ function createService(options) {
         const fs = require('node:fs')
         const p = require('node:path')
         defs = []
-        for (const f of ['engineering-v1.json', 'engineering-v2.json', 'engineering-v2-adaptive.json', 'engineering-v3.json']) {
+        for (const f of ['engineering-v1.json', 'engineering-v2.json', 'engineering-v2-adaptive.json', 'engineering-v2-jobs.json', 'engineering-v3.json']) {
           try {
             const doc = JSON.parse(fs.readFileSync(p.join(installRoot, 'config', 'registry', 'modes', f), 'utf8'))
             // the optional adaptive definition counts only through its closed identity (legacy-import)
