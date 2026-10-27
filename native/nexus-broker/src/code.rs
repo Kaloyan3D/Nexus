@@ -191,13 +191,20 @@ pub fn validate_code_proposal_in(
     }
     let (kind, path, bytes, summary) = if tool.is_process() {
         let program = obj.get("program").and_then(|v| v.as_str()).unwrap_or("");
-        if !rt::MODEL_PROGRAMS.contains(&program)
-            || (!workbench && !STRICT_PROGRAMS.contains(&program))
-        {
+        // M6A: under the workbench (Workspace-authorized) profile there is no executable-name
+        // allowlist — any syntactically valid program name or project-relative path passes here;
+        // the daemon's resolver and the sandbox decide what actually exists and may run. The
+        // strict profile keeps its exact program set.
+        let program_ok = if workbench {
+            nexus_tools::workbench::program_syntax_ok(program)
+        } else {
+            rt::MODEL_PROGRAMS.contains(&program) && STRICT_PROGRAMS.contains(&program)
+        };
+        if !program_ok {
             return Err(refusal(
                 "invalid-arguments",
                 if workbench {
-                    "program is not one of the available development programs"
+                    "program must be the name of a program installed in the runtime, or a workspace-relative path to a project-local executable (no absolute paths, no '..')"
                 } else {
                     "program must be one of cargo, npm, tsc, python3, node"
                 },

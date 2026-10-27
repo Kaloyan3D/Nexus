@@ -65,7 +65,9 @@ pub const CODE_EXTRA: [RepoTool; 3] = [
 pub const MODEL_MAX_WRITE_CHARS: usize = 96 * 1024;
 /// Largest number of edit operations in one `fs_edit`.
 pub const MODEL_MAX_EDITS: usize = 16;
-/// Commands the model may name (the sandbox command policy still decides).
+/// Programs the STRICT profile may name. The workbench (Workspace-authorized) profile has no
+/// name allowlist since M6A: `program` is a free string there, validated syntactically by the
+/// broker and resolved by the daemon's command policy inside the sandbox.
 pub const MODEL_PROGRAMS: [&str; 13] = [
     "cargo", "npm", "npx", "pnpm", "yarn", "node", "tsc", "python3", "pip", "go", "dotnet", "sh",
     "make",
@@ -270,11 +272,11 @@ fn code_definitions() -> Vec<Value> {
         json!({
             "type": "function",
             "name": "proc_run",
-            "description": "Run a development command in an isolated sandbox over a throw-away copy of the working copy. No network except dependency installation (`npm ci`/`npm install`, `pip install`, `go mod download`, `dotnet restore`, `cargo fetch`, which are allowed when the project permits installs; installed dependencies stay available to later commands). Run installs (npm ci, cargo fetch) DIRECTLY as their own command, never inside `sh -c` (no network there). Files a command writes (build output, caches) are discarded; change files with fs_write/fs_edit. Available: cargo (check/test/build/fmt/clippy/doc/run/bench/fetch), npm/pnpm/yarn (install forms, test, run <script>, exec), npx <local-bin> (tsc, vitest, jest, eslint, ...), node, tsc, python3 (-m pytest/unittest/pip, scripts), pip, go, dotnet, make, and `sh -c \"<script>\"` for pipelines and && chains (a pipeline fails if any stage fails; one cut off by `head` is `unverified`). A failing command is information: read its output, fix the cause and run it again. Output is bounded.",
+            "description": "Run a development command in an isolated sandbox over a throw-away copy of the working copy. No network except dependency installation (`npm ci`/`npm install`, `pip install`, `go mod download`, `dotnet restore`, `cargo fetch`, which are allowed when the project permits installs; installed dependencies stay available to later commands). Run installs (npm ci, cargo fetch) DIRECTLY as their own command, never inside `sh -c` (no network there). Files a command writes (build output, caches) are discarded; change files with fs_write/fs_edit. Name ANY program installed in the runtime (cargo, rustc, rustfmt, git, bash, node, python3, npm/pnpm/yarn, npx, go, dotnet, make, formatters, linters, test runners) or a project-local executable by relative path (./node_modules/.bin/<tool>, scripts/<script>); a program that is not installed fails with an explanation. Use `sh -c \"<script>\"` or `bash -c \"<script>\"` for pipelines and && chains (a pipeline fails if any stage fails; one cut off by `head` is `unverified`). A failing command is information: read its output, fix the cause and run it again. Output is bounded.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "program": {"type": "string", "enum": MODEL_PROGRAMS},
+                    "program": {"type": "string", "description": "Name of a program installed in the runtime, or a workspace-relative path to a project-local executable."},
                     "args": {"type": "array", "items": {"type": "string"}, "maxItems": 64},
                     "cwd": {"type": "string", "description": "Directory relative to the repository root. Default \".\"."}
                 },
@@ -305,13 +307,16 @@ pub fn catalog_digest_of(definitions: &[Value]) -> String {
 /// tools (a description, a parameter, one more tool) is caught by a test and by the run-start
 /// guard (`verify_catalog`) instead of silently reaching a provider. `RepoCodeV1` is the
 /// production `muse-v0` catalog and must never change here; the signals catalog is the future Muse
-/// engine's and has its own, distinct identity.
+/// engine's and has its own, distinct identity. The two code catalogs changed exactly once, in
+/// M6A: `proc_run`'s `program` went from a 13-name enum to a free string so any installed
+/// program (or project-local path) can be named — an intentional, classified provider-schema
+/// difference, not parity drift. `RepoInspectV1` is byte-identical to before.
 pub const REPO_INSPECT_V1_CATALOG_DIGEST: &str =
     "b06d9c9f542b2e3fcc3d2a289f89c2ea201ff9b4ffec4af7d327ba62b4592ff6";
 pub const REPO_CODE_V1_CATALOG_DIGEST: &str =
-    "58f513de4ac7097e2d2c44999180ec74295aaaf590d585ff15787b784db8d90b";
+    "913244e7801c4b59236385699c4c8b4daf30e92ac36ca9ad0c7da4ae469e7215";
 pub const REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST: &str =
-    "5f7d19e2e0cce856e0f1dd1cf245a7906dfdcabdf64b9f02413d6f039f424510";
+    "c81212d6c16790f960a4ecfc67287a57319015d0e3cabb871b549643cc31e650";
 
 /// The frozen digest of `profile`'s catalog.
 pub fn frozen_catalog_digest(profile: crate::request::ToolProfile) -> &'static str {
@@ -498,11 +503,11 @@ mod tests {
         );
         assert_eq!(
             REPO_CODE_V1_CATALOG_DIGEST,
-            "58f513de4ac7097e2d2c44999180ec74295aaaf590d585ff15787b784db8d90b"
+            "913244e7801c4b59236385699c4c8b4daf30e92ac36ca9ad0c7da4ae469e7215"
         );
         assert_eq!(
             REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST,
-            "5f7d19e2e0cce856e0f1dd1cf245a7906dfdcabdf64b9f02413d6f039f424510"
+            "c81212d6c16790f960a4ecfc67287a57319015d0e3cabb871b549643cc31e650"
         );
         let all = [P::RepoInspectV1, P::RepoCodeV1, P::RepoCodeMuseSignalsV1];
         for p in all {

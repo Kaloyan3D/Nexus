@@ -3,19 +3,32 @@
 //! The strict policy in `process.rs` names a handful of exact argv shapes. That is the
 //! right shape for an independently approved environment and the wrong one for ordinary
 //! development: real projects need their own scripts, test runners, type checkers,
-//! package managers and interpreters. The workbench policy therefore allows the usual
-//! development programs with ordinary arguments, and relies on what actually bounds a
-//! command instead of on guessing which argument strings are harmless:
+//! package managers and interpreters.
 //!
-//! * the sandbox: no host filesystem, no secrets, no network (except the one install
-//!   class below), no write-back, resource and wall-clock limits, cgroup supervision;
+//! M6A — universal execution: there is NO executable-name allowlist here. Any program
+//! installed inside the authorized runtime may be named — interpreters (`bash`, `python`,
+//! `node`, …), Rust tools (`cargo`, `rustc`, `rustfmt`, `cargo-clippy`, …), package managers
+//! (`npm`, `npx`, `pnpm`, `yarn`, `git`, …), formatters, linters, test runners, build systems —
+//! and project-local executables may be named by workspace-relative path
+//! (`./node_modules/.bin/vitest`, `scripts/build.sh`). What bounds a command is not its name:
+//!
+//! * command AUTHORIZATION (a Kernel-sealed grant for this project and task) is decided before
+//!   this resolver runs and cannot be influenced by the program name or arguments;
+//! * the sandbox: no host filesystem, no secrets, no network (except the classes below),
+//!   resource and wall-clock limits, cgroup supervision;
 //! * a project-scoped environment directory (`/work/env`) for dependencies and caches;
-//! * one explicit capability, dependency INSTALLATION, which is the only thing that
-//!   gets the network, only for the package-manager forms that install, and only for
-//!   projects that allow it.
+//! * one explicit legacy capability, dependency INSTALLATION, which is the only thing that
+//!   gets the host network, only for the package-manager forms that install, and only for
+//!   projects that allow it. Under Controlled Internet (M5) every command instead reaches
+//!   only the grant's destinations through the gatekeeper, whatever its name.
 //!
-//! There is no host shell. `sh -c` exists only inside the sandbox, over the same
-//! throw-away snapshot, so pipelines and `&&` chains work without widening anything.
+//! A program that does not exist inside the runtime fails here with an actionable message;
+//! there is no fallback to host execution. The model cannot set environment variables,
+//! a grant, a backend or a network destination through its arguments: `ProcessArgs` carries
+//! only `program`, `args` and `cwd`, and the environment is built here, from the policy.
+//!
+//! There is no host shell. `sh -c` / `bash -c` exist only inside the sandbox, so pipelines
+//! and `&&` chains work without widening anything.
 
 use crate::contract::ProcessArgs;
 use crate::process::{CommandPolicy, ResolvedCommand};
@@ -23,11 +36,24 @@ use crate::result::{ToolError, ToolErrorCode};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Programs the model may name. The enum in the tool catalog is derived from this list.
-pub const PROGRAMS: [&str; 13] = [
-    "cargo", "npm", "npx", "pnpm", "yarn", "node", "tsc", "python3", "pip", "go", "dotnet", "sh",
-    "make",
-];
+/// Is `s` a syntactically valid program name for the workbench (a bare installed-program
+/// name, or a workspace-relative path to a project-local executable)? Shared with the
+/// broker, which pre-validates model proposals with exactly this rule.
+pub fn program_syntax_ok(s: &str) -> bool {
+    if s.is_empty() || s.len() > 128 || s.contains('\0') || s.contains('\\') {
+        return false;
+    }
+    if s.contains('/') {
+        // project-local: relative, inside the workspace, no parent traversal
+        !s.starts_with('/')
+            && !s.split('/').any(|c| c == ".." || c.is_empty())
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._/@:=+-".contains(c))
+    } else {
+        s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c))
+    }
+}
 
 const MAX_ARGS: usize = 64;
 const MAX_ARG_BYTES: usize = 1024;
@@ -46,19 +72,20 @@ fn find(candidates: &[&str]) -> Option<String> {
         .map(|s| (*s).to_owned())
 }
 
-fn script_name_ok(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 80
-        && !s.starts_with('-')
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || ":_.-/@".contains(c))
-}
-
 fn first_positional(args: &[String]) -> Option<(usize, &str)> {
     args.iter()
         .enumerate()
         .find(|(_, a)| !a.starts_with('-'))
         .map(|(i, a)| (i, a.as_str()))
+}
+
+/// A shell flag cluster that runs a command string (`-c`, `-ec`, `-euc`, `-lc`, …).
+fn is_dash_c(f: &str) -> bool {
+    f.len() >= 2
+        && f.starts_with('-')
+        && !f.starts_with("--")
+        && f[1..].contains('c')
+        && f[1..].chars().all(|c| c.is_ascii_alphabetic())
 }
 
 pub(crate) fn resolve(pol: &CommandPolicy, a: &ProcessArgs) -> Result<ResolvedCommand, ToolError> {
@@ -70,7 +97,8 @@ pub(crate) fn resolve(pol: &CommandPolicy, a: &ProcessArgs) -> Result<ResolvedCo
         format!("/work/src/{}", cwd_rel.components().join("/"))
     };
     let name = a.program.as_str();
-    let limit = if name == "sh" {
+    let is_shell_name = matches!(name, "sh" | "bash");
+    let limit = if is_shell_name {
         MAX_SCRIPT_BYTES
     } else {
         MAX_ARG_BYTES
@@ -78,7 +106,7 @@ pub(crate) fn resolve(pol: &CommandPolicy, a: &ProcessArgs) -> Result<ResolvedCo
     if a.args.len() > MAX_ARGS
         || a.args
             .iter()
-            .any(|x| x.len() > limit || x.contains('\0') || (name != "sh" && x.contains('\n')))
+            .any(|x| x.len() > limit || x.contains('\0') || (!is_shell_name && x.contains('\n')))
     {
         return Err(refuse("too many or too long arguments"));
     }
@@ -129,230 +157,149 @@ pub(crate) fn resolve(pol: &CommandPolicy, a: &ProcessArgs) -> Result<ResolvedCo
     ] {
         env.insert(k.to_owned(), v.to_owned());
     }
+    // Git must never block on a credential prompt: there are no credentials in the sandbox.
+    env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     let mut install = false;
     let args = &a.args;
     let sub = first_positional(args).map(|(_, s)| s).unwrap_or("");
     let program: String;
     let mut argv = args.clone();
-    match name {
-        "cargo" => {
-            program = "/toolchain/cargo/bin/cargo".to_owned();
-            if !pol.toolchain_has_cargo() {
-                return Err(refuse("cargo toolchain is not available on this host"));
-            }
-            if !matches!(
-                sub,
-                "check"
-                    | "test"
-                    | "build"
-                    | "fmt"
-                    | "clippy"
-                    | "doc"
-                    | "run"
-                    | "bench"
-                    | "tree"
-                    | "metadata"
-                    | "fetch"
-                    | "nextest"
-                    | "clean"
-                    | "version"
-            ) {
-                return Err(refuse(format!(
-                    "cargo: '{sub}' is not available (check, test, build, fmt, clippy, doc, run, bench, tree, metadata, fetch)"
-                )));
-            }
-            install = sub == "fetch";
-            if !install {
-                env.insert("CARGO_NET_OFFLINE".into(), "true".into());
-            }
-        }
-        "npm" | "pnpm" | "yarn" => {
-            program = find(&[
-                &format!("/usr/bin/{name}"),
-                &format!("/usr/local/bin/{name}"),
-            ])
-            .ok_or_else(|| refuse(format!("{name} is not available on this host")))?;
-            let is_install = match (name, sub) {
-                ("npm", "ci" | "install" | "i" | "add" | "update" | "up") => true,
-                ("pnpm", "install" | "i" | "add" | "update" | "up") => true,
-                ("yarn", "install" | "add" | "up" | "upgrade") => true,
-                ("yarn", "") => true, // bare `yarn` installs
-                _ => false,
-            };
-            let ok_sub = is_install
-                || matches!(
-                    sub,
-                    "test"
-                        | "t"
-                        | "run"
-                        | "run-script"
-                        | "start"
-                        | "exec"
-                        | "x"
-                        | "ls"
-                        | "list"
-                        | "outdated"
-                        | "why"
-                        | "rebuild"
-                        | "build"
-                        | "lint"
-                        | "dlx_never"
-                );
-            if !ok_sub {
-                return Err(refuse(format!(
-                    "{name}: '{sub}' is not available (install forms, test, run <script>, exec, ls, build, lint)"
-                )));
-            }
-            if matches!(sub, "run" | "run-script") {
-                match args.iter().skip_while(|x| x.as_str() != sub).nth(1) {
-                    Some(s) if script_name_ok(s) => {}
-                    _ => return Err(refuse(format!("{name} run: a script name is required"))),
+    let is_shell = matches!(name, "sh" | "bash");
+    if !program_syntax_ok(name) {
+        return Err(refuse(format!(
+            "program '{name}' is not a valid program name: use the name of a program installed \
+             in the runtime (cargo, git, node, ...) or a workspace-relative path to a project-local \
+             executable (./node_modules/.bin/<tool>, scripts/<script>); absolute host paths and \
+             '..' are refused"
+        )));
+    }
+    if name.contains('/') {
+        // Project-local executable: bound inside the workspace at /work/src (or the staged copy).
+        let rel = name.strip_prefix("./").unwrap_or(name);
+        program = format!("/work/src/{rel}");
+    } else if is_shell {
+        program = find(&[&format!("/usr/bin/{name}"), &format!("/bin/{name}")])
+            .ok_or_else(|| refuse(format!("{name} is not available inside the authorized runtime (no {name} in /usr/bin or /bin); Nexus does not fall back to host execution")))?;
+        match args.first().map(String::as_str) {
+            Some(f) if is_dash_c(f) => {
+                if args.len() < 2 {
+                    return Err(refuse(format!("{name}: `-c` needs a command string")));
                 }
             }
-            install = is_install;
-            if !install {
+            // a project script file, run with the shell as interpreter
+            Some(f) if !f.starts_with('-') => {}
+            _ => {
+                return Err(refuse(format!(
+                "{name}: only `-c <script>` or a project script file exists (no interactive shell)"
+            )))
+            }
+        }
+    } else {
+        match name {
+            "cargo" | "rustc" | "rustfmt" | "cargo-clippy" | "clippy-driver" | "cargo-fmt"
+            | "cargo-nextest"
+                if pol.toolchain_has_cargo() =>
+            {
+                program = format!("/toolchain/cargo/bin/{name}");
+            }
+            "tsc" => {
+                // the project's own compiler (installed into its environment)
+                program = find(&["/usr/bin/npx", "/usr/local/bin/npx"]).ok_or_else(|| {
+                    refuse("tsc needs npx, which is not available inside the authorized runtime")
+                })?;
+                argv.insert(0, "tsc".to_owned());
+                argv.insert(0, "--no-install".to_owned());
                 env.insert("npm_config_offline".into(), "true".into());
-            } else {
-                // Packages ship build steps (esbuild's binary, native addons). npm 11+
-                // blocks them unless allowed; inside this network-confined install sandbox,
-                // for a project the user opened and allowed to install, they must run.
+            }
+            "pip" | "pip3" => {
+                program = find(&["/usr/bin/python3", "/usr/local/bin/python3"]).ok_or_else(|| {
+                    refuse("pip needs python3, which is not available inside the authorized runtime")
+                })?;
+                argv.insert(0, "pip".to_owned());
+                argv.insert(0, "-m".to_owned());
+            }
+            "python" => {
+                program = find(&[
+                    "/usr/bin/python3",
+                    "/usr/local/bin/python3",
+                    "/usr/bin/python",
+                ])
+                .ok_or_else(|| refuse("python is not available inside the authorized runtime"))?;
+            }
+            _ => {
+                program = find(&[
+                    &format!("/usr/local/bin/{name}"),
+                    &format!("/usr/bin/{name}"),
+                    &format!("/bin/{name}"),
+                ])
+                .ok_or_else(|| refuse(format!(
+                    "program '{name}' is not available inside the authorized runtime: no '{name}' in \
+                     /usr/local/bin, /usr/bin, /bin or the Rust toolchain. Install it on this machine, \
+                     install it into the project and name it by path (./node_modules/.bin/{name}), or \
+                     use an available program. Nexus does not fall back to host execution"
+                )))?;
+            }
+        }
+        // Legacy dependency-installation classification: ONLY the install forms of known package
+        // managers get the host-network install class. Every other command - known or not - is
+        // offline unless the task's grant says Controlled Internet (handled outside this resolver).
+        install = match name {
+            "cargo" => sub == "fetch",
+            "npm" => matches!(sub, "ci" | "install" | "i" | "add" | "update" | "up"),
+            "pnpm" => matches!(sub, "install" | "i" | "add" | "update" | "up"),
+            "yarn" => matches!(sub, "install" | "add" | "up" | "upgrade") || sub.is_empty(),
+            "pip" | "pip3" | "python3" | "python" => {
+                // the verb after `-m pip` (or after the inserted `-m pip` for pip itself)
+                let pos: Vec<&str> = argv.iter().map(String::as_str).collect();
+                let verb = pos
+                    .windows(2)
+                    .position(|w| w == ["-m", "pip"])
+                    .and_then(|i| pos.get(i + 2).copied())
+                    .unwrap_or("");
+                matches!(verb, "install" | "download")
+            }
+            "go" => {
+                let mod_sub = args
+                    .iter()
+                    .skip_while(|x| x.as_str() != "mod")
+                    .nth(1)
+                    .map(String::as_str);
+                sub == "get"
+                    || (sub == "mod" && matches!(mod_sub, Some("download" | "tidy" | "vendor")))
+            }
+            "dotnet" => sub == "restore" || (sub == "add" && args.iter().any(|x| x == "package")),
+            _ => false,
+        };
+        if name == "npx" && !args.iter().any(|x| x == "--no-install") {
+            // local binaries only on the offline path: never silently download a package
+            argv.insert(0, "--no-install".to_owned());
+        }
+        if install {
+            if matches!(name, "pip" | "pip3" | "python3" | "python") {
+                env.insert("PIP_TARGET".into(), "/work/env/pylib".into());
+            }
+            if matches!(name, "npm" | "pnpm" | "yarn") {
                 env.insert(
                     "npm_config_dangerously_allow_all_scripts".into(),
                     "true".into(),
                 );
             }
-        }
-        "npx" => {
-            program = find(&["/usr/bin/npx", "/usr/local/bin/npx"])
-                .ok_or_else(|| refuse("npx is not available on this host"))?;
-            // local binaries only: never download and run a package
-            if !args.iter().any(|x| x == "--no-install") {
-                argv.insert(0, "--no-install".to_owned());
-            }
-            env.insert("npm_config_offline".into(), "true".into());
-        }
-        "node" => {
-            program = find(&["/usr/bin/node", "/usr/local/bin/node"])
-                .ok_or_else(|| refuse("node is not available on this host"))?;
-            if args.iter().any(|x| x.starts_with("--inspect")) {
-                return Err(refuse("node: the inspector is not available"));
-            }
-        }
-        "tsc" => {
-            // the project's own compiler (installed into its environment)
-            program = find(&["/usr/bin/npx", "/usr/local/bin/npx"])
-                .ok_or_else(|| refuse("npx is not available on this host"))?;
-            argv.insert(0, "tsc".to_owned());
-            argv.insert(0, "--no-install".to_owned());
-            env.insert("npm_config_offline".into(), "true".into());
-        }
-        "python3" | "pip" => {
-            program = find(&["/usr/bin/python3", "/usr/local/bin/python3"])
-                .ok_or_else(|| refuse("python3 is not available on this host"))?;
-            if name == "pip" {
-                argv.insert(0, "pip".to_owned());
-                argv.insert(0, "-m".to_owned());
-            }
-            let pos: Vec<&str> = argv.iter().map(String::as_str).collect();
-            if let Some(i) = pos.iter().position(|x| *x == "-m") {
-                if pos.get(i + 1) == Some(&"pip") {
-                    let verb = pos.get(i + 2).copied().unwrap_or("");
-                    match verb {
-                        "install" | "download" => {
-                            install = true;
-                            env.insert("PIP_TARGET".into(), "/work/env/pylib".into());
-                        }
-                        "list" | "freeze" | "show" | "check" | "--version" | "" => {}
-                        _ => return Err(refuse(format!("pip: '{verb}' is not available"))),
-                    }
+        } else {
+            match name {
+                "cargo" => {
+                    env.insert("CARGO_NET_OFFLINE".into(), "true".into());
                 }
+                "npm" | "pnpm" | "yarn" | "npx" => {
+                    env.insert("npm_config_offline".into(), "true".into());
+                }
+                "go" => {
+                    env.insert("GOPROXY".into(), "off".into());
+                }
+                _ => {}
             }
-        }
-        "go" => {
-            program = find(&["/usr/bin/go", "/usr/local/go/bin/go", "/usr/lib/go/bin/go"])
-                .ok_or_else(|| refuse("go is not available on this host"))?;
-            if !matches!(
-                sub,
-                "build"
-                    | "test"
-                    | "vet"
-                    | "fmt"
-                    | "run"
-                    | "mod"
-                    | "list"
-                    | "env"
-                    | "version"
-                    | "get"
-                    | "install"
-                    | "generate"
-                    | "tool"
-            ) {
-                return Err(refuse(format!("go: '{sub}' is not available")));
-            }
-            let mod_sub = args
-                .iter()
-                .skip_while(|x| x.as_str() != "mod")
-                .nth(1)
-                .map(String::as_str);
-            install = sub == "get"
-                || (sub == "mod" && matches!(mod_sub, Some("download" | "tidy" | "vendor")));
-            if !install {
-                env.insert("GOPROXY".into(), "off".into());
-            }
-        }
-        "dotnet" => {
-            program = find(&["/usr/bin/dotnet", "/usr/local/bin/dotnet"])
-                .ok_or_else(|| refuse("dotnet is not available on this host"))?;
-            // `dotnet --version` has no positional: the first argument is the verb
-            let sub = if sub.is_empty() {
-                args.first().map(String::as_str).unwrap_or("")
-            } else {
-                sub
-            };
-            if !matches!(
-                sub,
-                "build"
-                    | "test"
-                    | "run"
-                    | "restore"
-                    | "format"
-                    | "clean"
-                    | "publish"
-                    | "pack"
-                    | "--info"
-                    | "--version"
-                    | "--list-sdks"
-                    | "--list-runtimes"
-                    | "add"
-                    | "list"
-                    | "msbuild"
-                    | "new"
-            ) {
-                return Err(refuse(format!("dotnet: '{sub}' is not available")));
-            }
-            install = sub == "restore" || (sub == "add" && args.iter().any(|x| x == "package"));
-        }
-        "make" => {
-            program = find(&["/usr/bin/make"]).ok_or_else(|| refuse("make is not available"))?;
-        }
-        "sh" => {
-            program =
-                find(&["/usr/bin/sh", "/bin/sh"]).ok_or_else(|| refuse("sh is not available"))?;
-            if !(a.args.len() == 2 && matches!(a.args[0].as_str(), "-c" | "-ec" | "-eu" | "-lc")) {
-                return Err(refuse(
-                    "sh: only `-c <script>` exists (no interactive shell)",
-                ));
-            }
-        }
-        other => {
-            return Err(refuse(format!(
-                "program '{}' is not available; use one of {}",
-                other.chars().take(40).collect::<String>(),
-                PROGRAMS.join(", ")
-            )))
         }
     }
-    let pipeline = name == "sh"
+    let pipeline = is_shell_name
         && argv
             .get(1)
             .is_some_and(|s| crate::process::script_has_pipeline(s));
@@ -457,26 +404,102 @@ mod tests {
     }
 
     #[test]
-    fn the_workbench_refuses_what_is_not_development() {
+    fn m6a_any_installed_program_resolves_and_missing_ones_fail_actionably() {
+        let p = pol();
+        // Programs that exist on this host resolve with no name allowlist (M6A). Their
+        // confinement comes from the sandbox, not from their name or argv shape.
+        for (prog, a) in [
+            ("git", &["status"][..]),
+            ("git", &["commit", "-m", "x"]),
+            ("bash", &["-c", "echo hi"]),
+            ("rustc", &["--version"]),
+            ("env", &["true"]),
+            ("ls", &["-la"]),
+        ] {
+            if prog == "rustc" && !p.toolchain_has_cargo() {
+                continue;
+            }
+            if (prog == "git" || prog == "bash" || prog == "env" || prog == "ls")
+                && !host(&format!("/usr/bin/{prog}"))
+                && !host(&format!("/bin/{prog}"))
+            {
+                continue;
+            }
+            let r = p
+                .resolve(&args(prog, a))
+                .unwrap_or_else(|e| panic!("{prog} {a:?} must resolve: {}", e.message));
+            assert!(r.program.starts_with('/'), "{prog}: {}", r.program);
+            assert!(
+                !r.install,
+                "{prog} {a:?} must not get the install network class"
+            );
+        }
+        // project-local executables by workspace-relative path
+        let r = p
+            .resolve(&args("./node_modules/.bin/vitest", &["run"]))
+            .expect("project-local tool resolves");
+        assert_eq!(r.program, "/work/src/node_modules/.bin/vitest");
+        let r = p
+            .resolve(&args("scripts/build.sh", &[]))
+            .expect("project script resolves");
+        assert_eq!(r.program, "/work/src/scripts/build.sh");
+        // not installed anywhere: actionable refusal, no host fallback
+        let e = p
+            .resolve(&args("nexus-no-such-tool-m6a", &[]))
+            .expect_err("a missing program must be refused");
+        assert!(
+            e.message
+                .contains("not available inside the authorized runtime"),
+            "{}",
+            e.message
+        );
+        assert!(
+            e.message.contains("does not fall back to host execution"),
+            "{}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn m6a_program_names_cannot_escape_the_runtime() {
+        let p = pol();
+        for prog in [
+            "/usr/bin/git",
+            "../bin/sh",
+            "a/../b",
+            "a//b",
+            "",
+            "git;rm",
+            "git rm",
+            "a\\b",
+        ] {
+            assert!(
+                p.resolve(&args(prog, &[])).is_err(),
+                "program {prog:?} must be refused"
+            );
+        }
+        assert!(program_syntax_ok("cargo"));
+        assert!(program_syntax_ok("./scripts/x.sh"));
+        assert!(!program_syntax_ok("/etc/passwd"));
+    }
+
+    #[test]
+    fn the_workbench_still_refuses_malformed_invocations() {
         let p = pol();
         for (prog, a) in [
-            ("git", &["push"][..]),
-            ("curl", &["http://example.com"]),
-            ("rm", &["-rf", "/"]),
-            ("sudo", &["id"]),
-            ("sh", &["-i"]),
-            ("sh", &["script.sh"]),
-            ("npm", &["publish"]),
-            ("npm", &["config", "set", "x", "y"]),
-            ("cargo", &["publish"]),
-            ("cargo", &["install", "x"]),
-            ("dotnet", &["nuget", "push"]),
-            ("node", &["--inspect=0.0.0.0:9229", "x.js"]),
+            ("sh", &["-i"][..]),
+            ("sh", &["-x"]),
+            ("bash", &["-i"]),
+            ("sh", &["-c"]),
         ] {
             assert!(
                 p.resolve(&args(prog, a)).is_err(),
                 "{prog} {a:?} must be refused"
             );
+        }
+        // a shell running a project script file is ordinary development work
+        if host("/usr/bin/sh") || host("/bin/sh") {
+            assert!(p.resolve(&args("sh", &["script.sh"])).is_ok());
         }
         // bounded argument vectors
         let many: Vec<String> = (0..100).map(|i| i.to_string()).collect();
