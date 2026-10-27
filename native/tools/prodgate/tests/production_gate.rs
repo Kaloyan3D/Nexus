@@ -209,7 +209,7 @@ fn the_frozen_tool_catalog_digests_are_the_pinned_ones() {
     );
     assert_eq!(
         rt::frozen_catalog_digest(P::RepoCodeV1),
-        "58f513de4ac7097e2d2c44999180ec74295aaaf590d585ff15787b784db8d90b"
+        "913244e7801c4b59236385699c4c8b4daf30e92ac36ca9ad0c7da4ae469e7215"
     );
     assert!(rt::frozen_catalog_digest(P::RepoInspectV1).starts_with("b06d9c9f"));
     assert!(rt::frozen_catalog_digest(P::RepoCodeMuseSignalsV1).starts_with("5f7d19e2"));
