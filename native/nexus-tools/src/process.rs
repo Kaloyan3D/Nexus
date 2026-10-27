@@ -1243,6 +1243,7 @@ pub fn run_process(
                 git_worktree: exec_override
                     .as_ref()
                     .is_some_and(|x| x.git_worktree == "read-only"),
+                git_write: exec_override.as_ref().is_some_and(|x| x.git_write),
                 forbidden: ctx.policy.forbidden_paths().to_vec(),
                 ..Default::default()
             },

@@ -1144,12 +1144,14 @@ pub fn project_grant_set_with(
 }
 
 /// Destinations of a Controlled Internet grant (`net: controlled`): presets, `host[:port,port]` rules and
-/// ports of services on the user's own machine.
+/// ports of services on the user's own machine. `git_write` rides along (M6B): the owner's explicit
+/// Git-write choice, carried to the broker as `gitWrite` and sealed into the grant digest there.
 #[derive(Debug, Clone, Default)]
 pub struct NetChoice {
     pub presets: Vec<String>,
     pub hosts: Vec<String>,
     pub local_ports: Vec<u16>,
+    pub git_write: bool,
 }
 
 impl NetChoice {
@@ -1162,6 +1164,9 @@ impl NetChoice {
         }
         if !self.local_ports.is_empty() {
             p["allowLocalPorts"] = serde_json::json!(self.local_ports);
+        }
+        if self.git_write {
+            p["gitWrite"] = serde_json::json!(true);
         }
     }
 }
