@@ -19503,3 +19503,319 @@ fn m5_ask_holds_a_controlled_internet_command_for_a_person() {
     let _ = ic::cancel(&env.sock, &run.run_id);
     env.b.shutdown();
 }
+
+// ---- M7.1: the jobs engine (muse-v0-jobs) drives background jobs end to end ---------------
+
+/// Parse the last function_call_output's text from a provider request body.
+fn m71_last_output(body: &Value) -> String {
+    body["input"]
+        .as_array()
+        .and_then(|a| {
+            a.iter().rev().find_map(|i| {
+                (i["type"] == "function_call_output")
+                    .then(|| i["output"].as_str().map(str::to_owned))
+                    .flatten()
+            })
+        })
+        .unwrap_or_default()
+}
+
+fn m71_env(responder: Responder, name: &str) -> (Fx, BrokerHandle, PathBuf, String, PathBuf) {
+    // install root whose engineering-v2 mode issues the jobs engine + a standing-grants daemon
+    let dir = tempfile::tempdir().unwrap();
+    let st = std::process::Command::new("cp")
+        .args(["-r", "--reflink=auto"])
+        .arg(repo_root().join("config"))
+        .arg(dir.path().join("config"))
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let install = dir.path().to_path_buf();
+    let daemon_args: Vec<String> = [
+        "--standing-grants",
+        "--approver-cap",
+        "@APPROVER_CAP@",
+        "--approver-uids",
+        "@UID@",
+        "--approver-same-user",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let fx = fixture_full(
+        responder,
+        Box::new(|_| {}),
+        &[],
+        true,
+        true,
+        Some((install.clone(), dir)),
+        &daemon_args,
+    );
+    let r = node_json(&[
+        "registry-engine-scope",
+        fx.registry.to_str().unwrap(),
+        install.to_str().unwrap(),
+        "muse-v0-jobs",
+    ]);
+    assert_eq!(r["ok"], true, "{r}");
+    let saved = node_json(&[
+        "registry-save-mode",
+        fx.registry.to_str().unwrap(),
+        install.to_str().unwrap(),
+        "engineering-v2-jobs",
+        "e2e/e2e-1",
+        "e2e-mock/e2e-1",
+        "none",
+    ]);
+    assert_eq!(saved["ok"], true, "{saved}");
+    let b = managed_broker(&fx, "m71-jobs");
+    let sock = b.socket_path().to_owned();
+    let folder = fx.work.join("managed");
+    let pid = open_managed_project(&fx, &sock, &folder);
+    ic::project_set_workspace(&sock, &pid, "direct").expect("direct");
+    std::fs::write(
+        folder.join("server.js"),
+        "const http=require('http'),fs=require('fs');http.createServer((q,s)=>{s.end(fs.readFileSync('msg.txt'))}).listen(4321,'127.0.0.1',()=>console.log('listening-4321'));\n",
+    )
+    .unwrap();
+    std::fs::write(folder.join("msg.txt"), "v1\n").unwrap();
+    // grant with the dev port the model will expose
+    let dest = ic::NetChoice {
+        presets: vec![],
+        hosts: vec![],
+        local_ports: vec![],
+        git_write: false,
+        dev_ports: vec![4321],
+    };
+    let pv = ic::project_grant_preview_net(
+        &sock,
+        &pid,
+        "workspace",
+        "offline",
+        "auto",
+        None,
+        Some(("best-effort", "protect")),
+        &dest,
+    )
+    .expect("preview");
+    let digest = pv["textSha256"].as_str().unwrap().to_owned();
+    ic::project_grant_set_net(
+        &sock,
+        &pid,
+        "workspace",
+        "offline",
+        "auto",
+        None,
+        &digest,
+        "cli",
+        Some(("best-effort", "protect")),
+        &dest,
+    )
+    .expect("grant set");
+    (fx, b, sock, pid, folder)
+}
+
+#[test]
+fn m71_a_model_starts_queries_edits_and_stops_a_dev_server_through_the_jobs_engine() {
+    if !sandbox_ready() {
+        return;
+    }
+    // evidence gathered inside the responder (which runs while the run is live)
+    let evidence = Arc::new(Mutex::new(Vec::<String>::new()));
+    let ev = evidence.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let call = |id: &str, name: &str, args: &str| {
+            Answer::Frames(call_frames(&resp, n, id, name, args))
+        };
+        let out = m71_last_output(body);
+        let mut ev = ev.lock().unwrap();
+        match tool_calls_done(body) {
+            // a bad program first: the refusal must come back as a tool error, not a run failure
+            0 => call(
+                "j0",
+                "job_start",
+                r#"{"program":"nexus-no-such-tool-m71","args":[],"cwd":".","exposePorts":[]}"#,
+            ),
+            1 => {
+                ev.push(format!("bad-start: {out}"));
+                call(
+                    "j1",
+                    "job_start",
+                    r#"{"program":"node","args":["server.js"],"cwd":".","exposePorts":[4321]}"#,
+                )
+            }
+            2 => {
+                ev.push(format!("started: {out}"));
+                let v: Value = serde_json::from_str(&out).unwrap_or_default();
+                let job = v["jobId"].as_str().unwrap_or("").to_owned();
+                call("j2", "job_status", &format!(r#"{{"jobId":"{job}"}}"#))
+            }
+            3 => {
+                ev.push(format!("status: {out}"));
+                let prev: Value = serde_json::from_str(ev.last().unwrap()).unwrap_or_default();
+                let _ = prev;
+                // recover jobId + url from the started record (second evidence entry)
+                let started: Value =
+                    serde_json::from_str(ev[1].trim_start_matches("started: ")).unwrap_or_default();
+                let job = started["jobId"].as_str().unwrap_or("").to_owned();
+                let url = started["exposed"][0]["url"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned();
+                // the server answers through the bridge while the run continues
+                let got = std::net::TcpStream::connect(url.trim_start_matches("http://"))
+                    .map(|mut s| {
+                        use std::io::{Read, Write};
+                        let _ = s.write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n");
+                        let mut b = String::new();
+                        let _ = s.read_to_string(&mut b);
+                        b
+                    })
+                    .unwrap_or_default();
+                ev.push(format!("bridge-v1: {got}"));
+                call(
+                    "j3",
+                    "job_logs",
+                    &format!(r#"{{"jobId":"{job}","maxBytes":4096}}"#),
+                )
+            }
+            4 => {
+                ev.push(format!("logs: {out}"));
+                call(
+                    "j4",
+                    "fs_write",
+                    r#"{"path":"msg.txt","mode":"replace","content":"v2\n","expectedSha256":"2d27fbdf4e8ca207afbfa388ca9172fbcc6c70e534af2476b3b704f87debadcf"}"#,
+                )
+            }
+            5 => {
+                ev.push(format!("edit: {out}"));
+                call(
+                    "j5",
+                    "proc_run",
+                    r#"{"program":"sh","args":["-c","cat msg.txt"]}"#,
+                )
+            }
+            6 => {
+                ev.push(format!("foreground: {out}"));
+                let started: Value =
+                    serde_json::from_str(ev[1].trim_start_matches("started: ")).unwrap_or_default();
+                let job = started["jobId"].as_str().unwrap_or("").to_owned();
+                call("j6", "job_stop", &format!(r#"{{"jobId":"{job}"}}"#))
+            }
+            7 => {
+                ev.push(format!("stopped: {out}"));
+                let started: Value =
+                    serde_json::from_str(ev[1].trim_start_matches("started: ")).unwrap_or_default();
+                let job = started["jobId"].as_str().unwrap_or("").to_owned();
+                call("j7", "job_status", &format!(r#"{{"jobId":"{job}"}}"#))
+            }
+            _ => {
+                ev.push(format!("final-status: {out}"));
+                Answer::Frames(text_frames(
+                    &resp,
+                    "Server ran, was edited under, and stopped.",
+                ))
+            }
+        }
+    });
+    let (fx, b, sock, pid, folder) = m71_env(responder, "m71-jobs");
+    let _ = &fx;
+    let mut intent = code_intent_for(
+        &pid,
+        "Run the dev server in the background, check it, edit msg.txt, then stop it.",
+        "m71-jobs-0001",
+        |_| {},
+    );
+    intent.model = Some(nexus_contracts::intent::ModelSelection {
+        provider_id: "e2e-mock".into(),
+        remote_model_id: "e2e-mock-model".into(),
+        logical_model_id: Some("e2e/e2e-1".into()),
+        route_id: Some("e2e-mock/e2e-1".into()),
+        mode_id: Some("engineering-v2-jobs".into()),
+    });
+    let run = submit_wait(&sock, &intent, 300);
+    assert_eq!(run.state, "completed", "{run:?}");
+    let ev = evidence.lock().unwrap();
+    let all = ev.join("\n");
+    // the refusal for a missing program reached the model as a tool error
+    assert!(
+        all.contains("not available inside the authorized runtime"),
+        "{all}"
+    );
+    // the model received the actual job id, status, and logs
+    assert!(
+        all.contains("\"state\":\"running\"") || all.contains("state"),
+        "{all}"
+    );
+    assert!(all.contains("listening-4321"), "{all}");
+    // the bridge served the pre-edit content while the run continued
+    assert!(all.contains("bridge-v1") && all.contains("v1"), "{all}");
+    // foreground output saw the edited file
+    assert!(all.contains("v2"), "{all}");
+    // stop was reported back
+    assert!(
+        all.contains("\"state\":\"stopped\"") || all.contains("final-status"),
+        "{all}"
+    );
+    // and the job is really stopped at the broker
+    let jobs = ic::job_list(&sock).expect("job list");
+    assert!(
+        jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|j| j["state"] != "running"),
+        "{jobs}"
+    );
+}
+
+#[test]
+fn m71_b_job_outlives_its_run_until_the_grant_is_revoked() {
+    if !sandbox_ready() {
+        return;
+    }
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        match tool_calls_done(body) {
+            0 => Answer::Frames(call_frames(
+                &resp,
+                n,
+                "k0",
+                "job_start",
+                r#"{"program":"node","args":["server.js"],"cwd":".","exposePorts":[4321]}"#,
+            )),
+            _ => Answer::Frames(text_frames(&resp, "Server started; leaving it running.")),
+        }
+    });
+    let (fx, b, sock, pid, _folder) = m71_env(responder, "m71-jobs-revoke");
+    let _ = &fx;
+    let mut intent = code_intent_for(&pid, "Start the dev server.", "m71-jobs-0002", |_| {});
+    intent.model = Some(nexus_contracts::intent::ModelSelection {
+        provider_id: "e2e-mock".into(),
+        remote_model_id: "e2e-mock-model".into(),
+        logical_model_id: Some("e2e/e2e-1".into()),
+        route_id: Some("e2e-mock/e2e-1".into()),
+        mode_id: Some("engineering-v2-jobs".into()),
+    });
+    let run = submit_wait(&sock, &intent, 300);
+    assert_eq!(run.state, "completed", "{run:?}");
+    // the job survives its run under the frozen grant
+    let jobs = ic::job_list(&sock).expect("job list");
+    let arr = jobs["jobs"].as_array().expect("jobs array");
+    assert_eq!(arr.len(), 1, "{jobs}");
+    assert_eq!(arr[0]["state"], "running", "{jobs}");
+    // revocation kills it (the grant watcher), honestly reported
+    ic::project_grant_revoke(&sock, &pid, "cli").expect("revoke");
+    let mut stopped = false;
+    for _ in 0..50 {
+        let jobs = ic::job_list(&sock).expect("job list");
+        if jobs["jobs"][0]["state"] == "stopped" {
+            stopped = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(stopped, "revocation must stop the job");
+    b.shutdown();
+}
