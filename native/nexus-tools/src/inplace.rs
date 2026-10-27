@@ -141,6 +141,10 @@ pub struct PrepareOptions {
     pub max_protect: usize,
     /// Owner opt-in: bind the verified external git directory of a linked worktree read-only.
     pub git_worktree: bool,
+    /// M6B (grant `gitWrite`): `.git` directories inside the workspace are writable, except their
+    /// `hooks` and `config`, which stay read-only. A `.git` FILE (linked worktree / submodule
+    /// pointer) is never followed for writing: external git metadata stays unwritable.
+    pub git_write: bool,
     /// Directories that are never exposed (Nexus's own data).
     pub forbidden: Vec<std::path::PathBuf>,
 }
@@ -153,6 +157,7 @@ impl Default for PrepareOptions {
             max_ms: 15_000,
             max_protect: 1024,
             git_worktree: false,
+            git_write: false,
             forbidden: Vec::new(),
         }
     }
@@ -166,6 +171,10 @@ struct Dir {
     rel: String,
     fd: OwnedFd,
     in_bulk: bool,
+    /// Inside a `.git` directory that the owner allowed commands to write (M6B): the generic
+    /// sensitive/hard-link/special masking does not apply (Git's own files are legitimate);
+    /// only `hooks` and `config` are protected, read-only, at any depth below the git dir.
+    in_git: bool,
 }
 
 /// `(name, st_mode, dev, ino, nlink)`
@@ -268,6 +277,7 @@ pub fn prepare_with(ws: &Workspace, opts: &PrepareOptions) -> Result<InPlaceMoun
             OwnedFd::from_raw_fd(libc::fcntl(root.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 100))
         },
         in_bulk: false,
+        in_git: false,
     }];
     while let Some(d) = stack.pop() {
         let Some(list) = list_dir(d.fd.as_raw_fd()) else {
@@ -317,7 +327,75 @@ pub fn prepare_with(ws: &Workspace, opts: &PrepareOptions) -> Result<InPlaceMoun
             };
             match kind {
                 libc::S_IFDIR => {
-                    if name == ".git" {
+                    if d.in_git {
+                        // Inside a writable `.git` (M6B): only `hooks` stays read-only; everything
+                        // else is Git's own working state and is simply descended into.
+                        if name == "hooks" {
+                            if let Some(fd) = open_path() {
+                                ro.push(rel.clone());
+                                entries.push((
+                                    Protect {
+                                        rel,
+                                        mode: ProtectMode::ReadOnly,
+                                        fd: None,
+                                        ino,
+                                    },
+                                    Some(fd),
+                                ));
+                            }
+                        } else {
+                            {
+                                let fd = unsafe {
+                                    libc::openat(
+                                        d.fd.as_raw_fd(),
+                                        cname.as_ptr(),
+                                        libc::O_RDONLY
+                                            | libc::O_DIRECTORY
+                                            | libc::O_NOFOLLOW
+                                            | libc::O_CLOEXEC,
+                                    )
+                                };
+                                if fd < 0 {
+                                    unreadable.push(rel);
+                                } else {
+                                    stack.push(Dir {
+                                        in_bulk: d.in_bulk,
+                                        in_git: true,
+                                        rel,
+                                        fd: unsafe { OwnedFd::from_raw_fd(fd) },
+                                    });
+                                }
+                            };
+                        }
+                    } else if name == ".git" && opts.git_write {
+                        // M6B: writable git metadata inside the workspace. No read-only mount over
+                        // the directory itself; `hooks`/`config` below it are protected instead.
+                        if !d.rel.is_empty() {
+                            git_nested += 1;
+                        }
+                        {
+                            let fd = unsafe {
+                                libc::openat(
+                                    d.fd.as_raw_fd(),
+                                    cname.as_ptr(),
+                                    libc::O_RDONLY
+                                        | libc::O_DIRECTORY
+                                        | libc::O_NOFOLLOW
+                                        | libc::O_CLOEXEC,
+                                )
+                            };
+                            if fd < 0 {
+                                unreadable.push(rel);
+                            } else {
+                                stack.push(Dir {
+                                    in_bulk: d.in_bulk,
+                                    in_git: true,
+                                    rel,
+                                    fd: unsafe { OwnedFd::from_raw_fd(fd) },
+                                });
+                            }
+                        };
+                    } else if name == ".git" {
                         let Some(fd) = open_path() else { continue };
                         if !d.rel.is_empty() {
                             git_nested += 1;
@@ -366,13 +444,31 @@ pub fn prepare_with(ws: &Workspace, opts: &PrepareOptions) -> Result<InPlaceMoun
                         }
                         stack.push(Dir {
                             in_bulk: d.in_bulk || is_bulk(&name),
+                            in_git: false,
                             rel,
                             fd: unsafe { OwnedFd::from_raw_fd(fd) },
                         });
                     }
                 }
                 libc::S_IFREG => {
-                    if name == ".git" {
+                    if d.in_git && name == "config" {
+                        // Repository configuration stays read-only even with Git write (M6B):
+                        // no aliases, fsmonitor, sshCommand or hooksPath can be planted.
+                        if let Some(fd) = open_path() {
+                            ro.push(rel.clone());
+                            entries.push((
+                                Protect {
+                                    rel,
+                                    mode: ProtectMode::ReadOnly,
+                                    fd: None,
+                                    ino,
+                                },
+                                Some(fd),
+                            ));
+                        }
+                    } else if d.in_git {
+                        // Git's own writable state (objects, refs, index, logs): nothing to mask.
+                    } else if name == ".git" {
                         // a linked worktree (or submodule): the file only POINTS at a git directory elsewhere
                         let Some(fd) = open_path() else { continue };
                         if !d.rel.is_empty() {
@@ -477,6 +573,7 @@ pub fn prepare_with(ws: &Workspace, opts: &PrepareOptions) -> Result<InPlaceMoun
             "specialFilesMasked": sockets, "nestedGit": git_nested,
             "entriesExamined": examined, "nonUtf8Skipped": non_utf8, "unreadableDirs": unreadable,
             "git": git,
+            "gitWrite": opts.git_write,
             "filesystem": fs_name,
         }),
     })

@@ -19238,6 +19238,7 @@ fn direct_net_env(
         presets: vec![],
         hosts: hosts.iter().map(|s| s.to_string()).collect(),
         local_ports: local_ports.to_vec(),
+        git_write: false,
     };
     let pv = ic::project_grant_preview_net(
         &sock,
@@ -19414,6 +19415,7 @@ fn m5_revocation_ends_a_download_and_widening_never_reaches_a_running_task() {
         presets: vec![],
         hosts: vec!["files.example.org:80".into(), "other.example.org:80".into()],
         local_ports: vec![],
+        git_write: false,
     };
     let pv = ic::project_grant_preview_net(
         &env.sock,

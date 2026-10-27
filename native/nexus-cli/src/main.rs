@@ -2387,7 +2387,7 @@ fn cmd_exec(args: &[String], cfg: &ClientConfig) -> ExitCode {
 /// path to either.
 fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig) -> ExitCode {
     use nexus_client::intent_client as ic;
-    const USAGE: &str = "usage: nexus project grant <id> show | set --fs scratch|workspace --net offline|install|controlled --approval auto|ask [--expires 7d] [--checkpoint off|best-effort|required] [--hard-links protect|allow] [--allow-host H[:ports]]... [--allow-local-port N]... [--net-preset npm|cargo|pip|github|gitlab|go|pnpm|yarn]... [--yes] | revoke [--yes] | clear [--yes]";
+    const USAGE: &str = "usage: nexus project grant <id> show | set --fs scratch|workspace --net offline|install|controlled --approval auto|ask [--expires 7d] [--checkpoint off|best-effort|required] [--hard-links protect|allow] [--git-write] [--allow-host H[:ports]]... [--allow-local-port N]... [--net-preset npm|cargo|pip|github|gitlab|go|pnpm|yarn]... [--yes] | revoke [--yes] | clear [--yes]";
     let sock = flag_value(args, "--broker-socket")
         .map(PathBuf::from)
         .unwrap_or_else(ic::default_broker_socket);
@@ -2407,7 +2407,7 @@ fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig
                             format!("{id}: no standing grant (defaults: scratch, offline, automatic approval)")
                         } else {
                             format!(
-                                "{id}: {} v{} fs={} net={} approval={} checkpoint={} hard-links={} destinations={} expires={}",
+                                "{id}: {} v{} fs={} net={} approval={} checkpoint={} hard-links={} git-write={} destinations={} expires={}",
                                 g["status"].as_str().unwrap_or("?"),
                                 g["version"],
                                 g["fs"].as_str().unwrap_or("?"),
@@ -2415,6 +2415,7 @@ fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig
                                 g["approval"].as_str().unwrap_or("?"),
                                 g["checkpoint"].as_str().unwrap_or("best-effort"),
                                 g["hardLinks"].as_str().unwrap_or("protect"),
+                                g["gitWrite"].as_bool().unwrap_or(false),
                                 {
                                     let n = &g["netPolicy"];
                                     let empty = |k: &str| n[k].as_array().is_none_or(|a| a.is_empty());
@@ -2452,6 +2453,8 @@ fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig
             let exec = Some((checkpoint.as_str(), hard_links.as_str()));
             // Controlled Internet destinations (repeatable flags)
             let mut dest = ic::NetChoice::default();
+            // M6B: explicit Git write capability (sealed into the grant; hooks/config stay read-only)
+            dest.git_write = args.iter().any(|a| a == "--git-write");
             let mut it = args.iter();
             while let Some(a) = it.next() {
                 let next = it.clone().next().cloned();

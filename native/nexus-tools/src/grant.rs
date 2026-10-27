@@ -56,6 +56,13 @@ pub struct ExecPolicy {
     /// `off` (default) | `read-only`: bind the verified main git directory of a linked worktree read-only.
     #[serde(default = "off_str")]
     pub git_worktree: String,
+    /// M6B: the user explicitly allows commands to WRITE this repository's `.git` (commit, branch,
+    /// checkout, …). Default false = `.git` stays read-only. Distinct from ordinary filesystem write
+    /// permission; part of the grant digest when true; `hooks` and `config` inside `.git` stay
+    /// read-only even then. Linked worktrees / submodules whose git directory lives OUTSIDE the
+    /// workspace are never made writable by this flag (explicitly unsupported in M6).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub git_write: bool,
     /// Controlled Internet (M5): the destinations commands may reach. Meaningful only with network scope
     /// `controlled`; part of the grant digest, so the Kernel seals it with the grant.
     #[serde(default, skip_serializing_if = "crate::netpolicy::NetPolicy::is_empty")]
@@ -72,6 +79,7 @@ impl Default for ExecPolicy {
             checkpoint: "best-effort".into(),
             hard_links: "protect".into(),
             git_worktree: "off".into(),
+            git_write: false,
             net: Default::default(),
         }
     }
@@ -235,6 +243,9 @@ impl StandingGrant {
             if self.exec.git_worktree != "off" {
                 v["exec"]["gitWorktree"] = self.exec.git_worktree.clone().into();
             }
+            if self.exec.git_write {
+                v["exec"]["gitWrite"] = true.into();
+            }
             if !self.exec.net.is_empty() {
                 v["exec"]["netPolicy"] =
                     serde_json::to_value(self.exec.net.canonical()).unwrap_or_default();
@@ -367,6 +378,7 @@ pub fn consent_text(project_label: &str, spec: &GrantSpec) -> String {
 /// As [`consent_text`], truthful about a project that edits its REAL folder (`direct`).
 pub fn consent_text_for(project_label: &str, spec: &GrantSpec, direct: bool) -> String {
     let fs = match spec.fs.as_str() {
+        "workspace" if direct && spec.exec.git_write => "Commands Nexus runs for this project (builds, tests, formatters, code generators, dependency installs) run in your REAL project folder, with no copy and no patch to apply: files they create, change or delete are changed on disk immediately, together with the files Nexus edits itself. They cannot see or change anything outside the project. You ALLOW Git writes below, so commands may also change the repository's `.git` (commit, branch, checkout); `.git/hooks` and `.git/config` stay read-only. Secret-shaped files, sockets and similar entries are hidden from commands, and files with several hard links are read-only unless you allow otherwise below.",
         "workspace" if direct => "Commands Nexus runs for this project (builds, tests, formatters, code generators, dependency installs) run in your REAL project folder, with no copy and no patch to apply: files they create, change or delete are changed on disk immediately, together with the files Nexus edits itself. They cannot see or change anything outside the project. `.git` is read-only (Nexus cannot commit, change hooks or configuration), secret-shaped files, sockets and similar entries are hidden from commands, and files with several hard links are read-only unless you allow otherwise below.",
         "workspace" => "Commands Nexus runs for this project (builds, tests, formatters, code generators, dependency installs) change the task's working copy directly: what they create or modify stays there and becomes part of the patch you review. They cannot see or change anything outside the project.",
         _ => "Commands Nexus runs for this project work on a throw-away copy; whatever they write is discarded (edits are made with Nexus's own file tools).",
@@ -435,8 +447,13 @@ pub fn consent_text_for(project_label: &str, spec: &GrantSpec, direct: bool) -> 
         } else {
             ""
         };
+        let gitw = if spec.exec.git_write {
+            "\n• Git writes: commands may write this repository's .git directory (commit, create branches, check out, reset). `.git/hooks` and `.git/config` stay READ-ONLY, so commands cannot plant hooks or change repository configuration; Git metadata outside this folder (linked worktrees, submodule stores) is never made writable. Git history changes are NOT covered by checkpoints and Nexus cannot undo a commit, reset or branch deletion for you. Hooks already present in the repository will run inside the sandbox when Git executes them; if you later run Git yourself outside Nexus, the repository's existing hooks and configuration apply as usual — Nexus did not change them."
+        } else {
+            ""
+        };
         extra = format!(
-            "\n• Recovery: {ck}\n• Hard links: {hl}{gw}\n• Limits you should know: a checkpoint is not an atomic snapshot and does not cover dependency or build folders (node_modules, target, ...), .git, or secret-shaped files; a command's effect on the outside world (network installs, other tools) cannot be undone; restoring is an explicit action you take, and files you changed afterwards are never overwritten."
+            "\n• Recovery: {ck}\n• Hard links: {hl}{gw}{gitw}\n• Limits you should know: a checkpoint is not an atomic snapshot and does not cover dependency or build folders (node_modules, target, ...), .git, or secret-shaped files; a command's effect on the outside world (network installs, other tools) cannot be undone; restoring is an explicit action you take, and files you changed afterwards are never overwritten."
         );
     }
     format!(
@@ -497,6 +514,10 @@ pub fn narrowed(frozen: &Frozen, current: &StandingGrant) -> Frozen {
     }
     if current.exec.git_worktree == "off" {
         f.exec.git_worktree = "off".into();
+    }
+    // Git write (M6B) can only be lost while a task runs, never gained
+    if !current.exec.git_write {
+        f.exec.git_write = false;
     }
     // "ask" is the stricter approval behaviour; an unreadable value counts as ask
     if f.approval != "ask" && current.approval != "auto" {
@@ -789,5 +810,55 @@ mod tests {
         let mut bad = spec("scratch", "offline", "auto", None);
         bad.exec.checkpoint = "required".into();
         assert!(validate_spec(&bad, false, 0).is_err());
+    }
+
+    #[test]
+    fn m6b_git_write_is_a_distinct_sealed_narrowable_capability() {
+        let now = 1_000;
+        // default: read-only, and the default grant keeps its historical digest shape
+        let mut with = spec("workspace", "offline", "auto", None);
+        with.exec.git_write = true;
+        assert!(validate_spec(&with, true, now).is_ok());
+        // it only exists with in-place (workspace) execution
+        let mut bad = spec("scratch", "offline", "auto", None);
+        bad.exec.git_write = true;
+        assert!(validate_spec(&bad, true, now).is_err());
+        // sealed: turning it on changes the digest
+        let g = |w: bool| {
+            let mut s = StandingGrant {
+                grant_id: "g".into(),
+                version: 1,
+                fs: "workspace".into(),
+                net: "offline".into(),
+                approval: "auto".into(),
+                created_at_ms: 0,
+                expires_at_ms: None,
+                created_by: "cli:uid:1".into(),
+                consent_sha256: "x".into(),
+                exec: ExecPolicy::default(),
+            };
+            s.exec.git_write = w;
+            s
+        };
+        assert_ne!(g(true).digest("p"), g(false).digest("p"));
+        // frozen as granted; a grant that no longer allows it narrows a running task; the
+        // reverse never widens one
+        let frozen = g(true).frozen("p");
+        assert!(frozen.exec.git_write);
+        assert!(!narrowed(&frozen, &g(false)).exec.git_write);
+        let frozen_off = g(false).frozen("p");
+        assert!(!narrowed(&frozen_off, &g(true)).exec.git_write);
+        // the consent text says what changes and what does not
+        let t = consent_text_for("proj", &with, true);
+        for must in [
+            "You ALLOW Git writes",
+            "`.git/hooks` and `.git/config` stay READ-ONLY",
+            "NOT covered by checkpoints",
+            "never made writable",
+        ] {
+            assert!(t.contains(must), "{must}: {t}");
+        }
+        let t_off = consent_text_for("proj", &spec("workspace", "offline", "auto", None), true);
+        assert!(t_off.contains("`.git` is read-only"), "{t_off}");
     }
 }
