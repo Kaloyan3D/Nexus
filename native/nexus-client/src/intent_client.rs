@@ -1458,3 +1458,52 @@ pub fn thread_update(
         15_000,
     )
 }
+
+// ---- M7D background jobs (broker-owned JobManager; uid-gated user surface) ------------------
+
+/// Start a background job (dev server, watcher) in a Direct project's real folder.
+pub fn job_start(
+    socket: &Path,
+    project_id: &str,
+    program: &str,
+    args: &[String],
+    expose_ports: &[u16],
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "job-start",
+        serde_json::json!({"projectId": project_id, "program": program, "args": args, "exposePorts": expose_ports}),
+        60_000,
+    )
+}
+
+pub fn job_status(socket: &Path, job_id: &str) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "job-status",
+        serde_json::json!({"jobId": job_id}),
+        15_000,
+    )
+}
+
+pub fn job_logs(socket: &Path, job_id: &str) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "job-logs",
+        serde_json::json!({"jobId": job_id}),
+        15_000,
+    )
+}
+
+pub fn job_stop(socket: &Path, job_id: &str) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "job-stop",
+        serde_json::json!({"jobId": job_id}),
+        30_000,
+    )
+}
+
+pub fn job_list(socket: &Path) -> Result<serde_json::Value, ClientError> {
+    call(socket, "job-list", serde_json::json!({}), 15_000)
+}

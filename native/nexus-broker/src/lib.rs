@@ -25,6 +25,7 @@ pub mod engine_state;
 pub mod guidance;
 pub mod identity;
 pub mod inspect;
+pub mod jobs;
 pub mod live_auth;
 pub mod pipeline;
 pub mod projects;

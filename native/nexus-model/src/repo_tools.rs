@@ -585,3 +585,77 @@ mod tests {
         assert_eq!(catalog_digest().len(), 64);
     }
 }
+
+// -------------------------------------------------------------------------------------------
+// M7D agent job tools (catalog addition, versioned separately). The V1 catalogs above are
+// frozen and byte-identical; these four tools are the background-job surface for engines that
+// adopt them. They are broker-handled (no Kernel tool id): the broker's JobManager runs the
+// job under the project's frozen standing grant. `proc_run` is unchanged and stays synchronous.
+
+pub const JOB_TOOLS: [&str; 4] = ["job_start", "job_status", "job_logs", "job_stop"];
+
+/// The four job tool definitions (same envelope shape as the repository tools).
+pub fn job_tool_definitions() -> serde_json::Value {
+    let proc = |name: &str, description: &str, props: serde_json::Value, required: &[&str]| {
+        serde_json::json!({
+            "type": "function", "name": name, "description": description, "strict": true,
+            "parameters": {"type": "object", "properties": props, "required": required, "additionalProperties": false}
+        })
+    };
+    serde_json::json!([
+        proc("job_start",
+            "Start a long-running background job (development server, watcher) in the project and return immediately with its job id. The job runs sandboxed in the real project folder under the project's permission; only development ports the user authorized for this project can be exposed on their loopback. Dependency installs are foreground proc_run commands, not jobs.",
+            serde_json::json!({
+                "program": {"type": "string", "description": "Installed program name, or workspace-relative path to a project-local executable."},
+                "args": {"type": "array", "items": {"type": "string"}},
+                "cwd": {"type": "string"},
+                "exposePorts": {"type": "array", "items": {"type": "integer"}, "description": "Sandbox ports to expose on the user's loopback; each must be authorized in the project permission."}
+            }), &["program", "args", "cwd", "exposePorts"]),
+        proc("job_status",
+            "Report a background job's state (running, exited, stopped, failed, interrupted), exit code and exposed loopback URLs. `interrupted` means Nexus restarted and the job did not survive; it is never reported as running or completed.",
+            serde_json::json!({"jobId": {"type": "string"}}), &["jobId"]),
+        proc("job_logs",
+            "Read the bounded tail of a background job's combined output.",
+            serde_json::json!({"jobId": {"type": "string"}, "maxBytes": {"type": "integer"}}), &["jobId", "maxBytes"]),
+        proc("job_stop",
+            "Stop a background job and its whole process tree, removing any loopback exposure.",
+            serde_json::json!({"jobId": {"type": "string"}}), &["jobId"]),
+    ])
+}
+
+/// Frozen digest of the job-tool addition (any edit is a new version, never a silent change).
+pub const JOB_TOOLS_V1_DIGEST: &str =
+    "289b1d8fbd15dcce8f5461e7274a669d13e21956581db14988ea91b0646ad077";
+
+pub fn job_tools_digest() -> String {
+    let defs = job_tool_definitions();
+    let arr: Vec<Value> = defs.as_array().cloned().unwrap_or_default();
+    catalog_digest_of(&arr)
+}
+
+#[cfg(test)]
+mod job_tools_tests {
+    use super::*;
+
+    #[test]
+    fn the_job_tools_are_versioned_and_the_v1_catalogs_are_untouched() {
+        assert_eq!(job_tools_digest(), JOB_TOOLS_V1_DIGEST);
+        // the frozen V1 identities did not move when the job tools were added
+        assert_eq!(
+            frozen_catalog_digest(crate::request::ToolProfile::RepoCodeV1),
+            REPO_CODE_V1_CATALOG_DIGEST
+        );
+        let defs = job_tool_definitions();
+        let names: Vec<&str> = defs
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, JOB_TOOLS);
+        // small and well-defined: every parameter is a plain scalar or list of scalars
+        for d in defs.as_array().unwrap() {
+            assert!(d["description"].as_str().unwrap().len() < 700);
+        }
+    }
+}
