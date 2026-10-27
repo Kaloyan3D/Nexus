@@ -308,6 +308,7 @@ fn plan_arguments_round_trip_and_unknown_arguments_are_refused() {
         egress_sock: Some("/nexus/egress.sock".into()),
         bridge_http: Some(3128),
         bridge_forward: vec![5173, 8080],
+        dev_ports: vec![4321],
     };
     let mut a = p.to_args();
     a.push("/usr/bin/true".into());
