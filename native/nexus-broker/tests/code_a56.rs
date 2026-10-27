@@ -9336,7 +9336,7 @@ const EM01_P0_KEYS: &[&str] = &[
     "tools",
 ];
 const EM01_P0_TOOLS_SHA256: &str =
-    "913244e7801c4b59236385699c4c8b4daf30e92ac36ca9ad0c7da4ae469e7215";
+    "e464de5c5a534aac38c7c50d36a7c1c081bf3d4584f825a8e617be9c24ae0c4c";
 
 // ---- EM-02: Registry-authorized per-attempt reasoning -----------------------------------
 
