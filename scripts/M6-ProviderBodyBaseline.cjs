@@ -62,6 +62,10 @@ function skeleton(body) {
 // Named here, never blanket-ignored; their later bodies still must match.
 const NONDETERMINISTIC_SKELETON_TESTS = new Set([
   's8_worker_timeouts_and_cancellation_leave_consistent_durable_state',
+  // Same family: which worker attempt a kill lands in changes the limiter's
+  // reasoning-effort choice in the next requests (low vs medium observed
+  // across dumps of identical intent on the same source).
+  's6_a_worker_killed_repeatedly_cannot_bypass_the_limiter',
   // Concurrent-run tests: the dump order of the two runs' requests is a
   // scheduling artifact (proven by two dumps whose bodies differ only in
   // which run's prompt lands first); content per run is unchanged.
