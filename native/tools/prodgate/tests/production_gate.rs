@@ -212,7 +212,7 @@ fn the_frozen_tool_catalog_digests_are_the_pinned_ones() {
         "e464de5c5a534aac38c7c50d36a7c1c081bf3d4584f825a8e617be9c24ae0c4c"
     );
     assert!(rt::frozen_catalog_digest(P::RepoInspectV1).starts_with("b06d9c9f"));
-    assert!(rt::frozen_catalog_digest(P::RepoCodeMuseSignalsV1).starts_with("5f7d19e2"));
+    assert!(rt::frozen_catalog_digest(P::RepoCodeMuseSignalsV1).starts_with("7c7c9bc1"));
     for p in [P::RepoCodeV1, P::RepoInspectV1, P::RepoCodeMuseSignalsV1] {
         assert!(
             rt::verify_catalog(p),
