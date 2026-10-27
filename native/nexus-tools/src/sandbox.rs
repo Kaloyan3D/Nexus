@@ -134,6 +134,10 @@ pub struct SandboxSpec {
     /// Controlled Internet: the command keeps its own (empty) network namespace; its only way out is the egress
     /// service's unix socket, reached through a bridge the launch gate starts on loopback inside the sandbox.
     pub egress: Option<EgressSpec>,
+    /// M7C development-server bridge: a host directory bound at `/nexus-dev`; the launch gate
+    /// listens there on `dev-<port>.sock` per listed port and relays to that loopback port
+    /// inside the sandbox. Only valid behind the launch gate with an isolated net namespace.
+    pub dev: Option<DevSpec>,
     /// Share the host network namespace (dependency installation only). Everything else
     /// runs in a fresh, empty network namespace.
     pub net: bool,
@@ -160,6 +164,17 @@ pub struct EgressSpec {
 
 /// Where the egress socket appears inside the sandbox.
 pub const SANDBOX_EGRESS_SOCKET: &str = "/nexus/egress.sock";
+
+/// M7C: host directory bound at `/nexus-dev` for development-server bridge sockets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevSpec {
+    pub dir: PathBuf,
+    /// Sandbox loopback ports the gate relays from `dev-<port>.sock`.
+    pub ports: Vec<u16>,
+}
+
+/// Where the development bridge directory appears inside the sandbox.
+pub const SANDBOX_DEV_DIR: &str = "/nexus-dev";
 
 /// The launch gate of an in-place execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +208,10 @@ impl ConfineSpec {
         ro.extend(spec.fd_ro_binds.iter().map(|(_, s)| s.clone()));
         let mut rw: Vec<String> = vec!["/work/src".into(), "/work/out".into(), "/tmp".into()];
         rw.extend(spec.rw_binds.iter().map(|(_, s)| s.clone()));
+        if spec.dev.is_some() {
+            // the gate's dev bridge must create its sockets there
+            rw.push(SANDBOX_DEV_DIR.into());
+        }
         let expect = spec
             .protect
             .iter()
@@ -212,6 +231,11 @@ impl ConfineSpec {
             require_scope: self.require_scope,
             root: Some(self.root),
             expect,
+            dev_ports: spec
+                .dev
+                .as_ref()
+                .map(|d| d.ports.clone())
+                .unwrap_or_default(),
             egress_sock: spec
                 .egress
                 .as_ref()
@@ -622,6 +646,11 @@ pub fn bwrap_argv(spec: &SandboxSpec) -> Vec<String> {
         a.push(e.socket.to_string_lossy().into_owned());
         a.push(SANDBOX_EGRESS_SOCKET.to_owned());
     }
+    if let Some(d) = &spec.dev {
+        a.push("--bind".to_owned());
+        a.push(d.dir.to_string_lossy().into_owned());
+        a.push(SANDBOX_DEV_DIR.to_owned());
+    }
     // The synthetic root itself becomes read-only: only /tmp and /work/out
     // (size-limited tmpfs mounts) remain writable.
     a.push("--remount-ro".to_owned());
@@ -825,6 +854,7 @@ pub fn preflight() -> SandboxCapabilities {
             cgroup_base: cgroup_base().unwrap_or_default(),
             fd_ro_binds: Vec::new(),
             egress: None,
+            dev: None,
             confine: None,
         };
         struct Never;
@@ -1032,6 +1062,9 @@ pub fn run_sandboxed(
     if spec.egress.is_some() && (spec.confine.is_none() || spec.net) {
         // Controlled Internet exists only behind the launch gate and never together with the host network
         return Err(refuse("Controlled Internet needs the launch gate and an isolated network namespace; refusing to run"));
+    }
+    if spec.dev.is_some() && (spec.confine.is_none() || spec.net) {
+        return Err(refuse("the development-server bridge needs the launch gate and an isolated network namespace; refusing to run"));
     }
     if spec.pinned_root.is_none() && !spec.src_dir.is_dir() {
         return Err(refuse("staged snapshot directory is missing"));

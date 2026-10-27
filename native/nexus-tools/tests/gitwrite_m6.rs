@@ -143,6 +143,7 @@ fn launch_with(w: &W, opts: &PrepareOptions, script: &str) -> Result<SandboxOutc
         protect: mount.protect(),
         fd_ro_binds: mount.fd_ro_binds(),
         egress: None,
+        dev: None,
         net: false,
         limits: SandboxLimits {
             wall_ms: 60_000,
