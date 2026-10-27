@@ -23,12 +23,35 @@ function canon(v) {
   return JSON.stringify(v)
 }
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex')
+// Runtime values that legitimately differ between runs of the SAME source:
+// a job's grant-authority digest, host port, job id, pid and timestamps leak
+// into later requests when the engine replays tool results as history text.
+// Only these exact value shapes are normalized; every prompt word, tool
+// schema field and argument stays compared.
+function normalizeVolatile(s) {
+  return s
+    .replace(/"authority":"[0-9a-f]{64}"/g, '"authority":"<authority>"')
+    .replace(/"hostPort":\d+/g, '"hostPort":0')
+    .replace(/"jobId":"job-[^"]+"/g, '"jobId":"<job>"')
+    .replace(/"pid":\d+/g, '"pid":0')
+    .replace(/"(startedAtMs|endedAtMs)":\d+/g, '"$1":0')
+}
+function normalizeDeep(v) {
+  if (typeof v === 'string') return normalizeVolatile(v)
+  if (Array.isArray(v)) return v.map(normalizeDeep)
+  if (v && typeof v === 'object') {
+    const o = {}
+    for (const k of Object.keys(v)) o[k] = normalizeDeep(v[k])
+    return o
+  }
+  return v
+}
 function skeleton(body) {
   const b = JSON.parse(JSON.stringify(body))
   if (Array.isArray(b.input)) {
     for (const item of b.input) if (item && item.type === 'function_call_output') item.output = '<tool-output>'
   }
-  return b
+  return normalizeDeep(b)
 }
 // Request counts of these crash-injection tests depend on where the kill lands; the M4/M5
 // comparisons recorded the same class. They are named, never silently tolerated: a count
@@ -39,6 +62,12 @@ function skeleton(body) {
 // Named here, never blanket-ignored; their later bodies still must match.
 const NONDETERMINISTIC_SKELETON_TESTS = new Set([
   's8_worker_timeouts_and_cancellation_leave_consistent_durable_state',
+  // Concurrent-run tests: the dump order of the two runs' requests is a
+  // scheduling artifact (proven by two dumps whose bodies differ only in
+  // which run's prompt lands first); content per run is unchanged.
+  'a56_two_concurrent_runs_get_separate_working_copies_and_independent_diffs',
+  'a71_two_conversations_running_at_the_same_time_keep_separate_messages_runs_and_workspaces',
+  'direct_cancel_resume_and_concurrent_writers',
 ])
 
 const TIMING_COUNT_TESTS = new Set([
