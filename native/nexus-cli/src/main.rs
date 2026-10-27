@@ -2387,7 +2387,7 @@ fn cmd_exec(args: &[String], cfg: &ClientConfig) -> ExitCode {
 /// path to either.
 fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig) -> ExitCode {
     use nexus_client::intent_client as ic;
-    const USAGE: &str = "usage: nexus project grant <id> show | set --fs scratch|workspace --net offline|install|controlled --approval auto|ask [--expires 7d] [--checkpoint off|best-effort|required] [--hard-links protect|allow] [--git-write] [--allow-host H[:ports]]... [--allow-local-port N]... [--net-preset npm|cargo|pip|github|gitlab|go|pnpm|yarn]... [--yes] | revoke [--yes] | clear [--yes]";
+    const USAGE: &str = "usage: nexus project grant <id> show | set --fs scratch|workspace --net offline|install|controlled --approval auto|ask [--expires 7d] [--checkpoint off|best-effort|required] [--hard-links protect|allow] [--git-write] [--dev-port N]... [--allow-host H[:ports]]... [--allow-local-port N]... [--net-preset npm|cargo|pip|github|gitlab|go|pnpm|yarn]... [--yes] | revoke [--yes] | clear [--yes]";
     let sock = flag_value(args, "--broker-socket")
         .map(PathBuf::from)
         .unwrap_or_else(ic::default_broker_socket);
@@ -2466,6 +2466,10 @@ fn project_grant_cmd(args: &[String], positional: &[&String], cfg: &ClientConfig
                     ("--allow-local-port", Some(v)) => match v.parse::<u16>() {
                         Ok(p) => dest.local_ports.push(p),
                         Err(_) => return fail(cfg, "--allow-local-port needs a port number"),
+                    },
+                    ("--dev-port", Some(v)) => match v.parse::<u16>() {
+                        Ok(p) if p > 0 => dest.dev_ports.push(p),
+                        _ => return fail(cfg, "--dev-port needs a port number (1..=65535)"),
                     },
                     _ => {}
                 }

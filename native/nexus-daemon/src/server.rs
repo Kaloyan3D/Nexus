@@ -2387,6 +2387,7 @@ impl nexus_tools::process::ProcessHooks for DaemonProcessHooks<'_> {
                 hard_links: "protect".into(),
                 git_worktree: "off".into(),
                 git_write: false,
+                dev_ports: Vec::new(),
                 net: Default::default(),
             }),
         }

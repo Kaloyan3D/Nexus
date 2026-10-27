@@ -1152,6 +1152,8 @@ pub struct NetChoice {
     pub hosts: Vec<String>,
     pub local_ports: Vec<u16>,
     pub git_write: bool,
+    /// M7C: development-server ports the owner allows on host loopback (`devPorts`).
+    pub dev_ports: Vec<u16>,
 }
 
 impl NetChoice {
@@ -1167,6 +1169,9 @@ impl NetChoice {
         }
         if self.git_write {
             p["gitWrite"] = serde_json::json!(true);
+        }
+        if !self.dev_ports.is_empty() {
+            p["devPorts"] = serde_json::json!(self.dev_ports);
         }
     }
 }
