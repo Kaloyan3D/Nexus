@@ -316,32 +316,47 @@ pub fn validate_spec(
     now_ms: i64,
 ) -> Result<(FsScope, NetScope, Approval), GrantError> {
     let fs = match FsScope::parse(&spec.fs) {
-        Some(FsScope::Full) => {
-            return Err(gerr(
-                "not-available",
-                "Full Access is not available in this build; it cannot be granted yet",
-            ))
-        }
         Some(f) => f,
         None => {
             return Err(gerr(
                 "bad-grant",
-                "filesystem scope must be scratch or workspace",
+                "filesystem scope must be scratch, workspace or full",
             ))
         }
     };
+    // M8 (ADR Rev 2 §7.4): Full Access is a host process. It cannot claim
+    // Offline or Controlled Internet, Full Network has no confined meaning,
+    // and an isolated working copy promises containment Full Access breaks.
+    if fs == FsScope::Full && spec.net != "full" {
+        return Err(gerr(
+            "bad-grant",
+            "Full Access requires network scope `full`: Nexus cannot enforce Offline or Controlled Internet for an unsandboxed host process. Grant `fs=full` together with `net=full`, or keep the confined Workspace backend",
+        ));
+    }
+    if spec.net == "full" && fs != FsScope::Full {
+        return Err(gerr(
+            "bad-grant",
+            "network scope `full` is only available with filesystem scope `full` (Full Access); the confined backends expose Offline, Install or Controlled Internet instead",
+        ));
+    }
+    if fs == FsScope::Full && !project_is_direct {
+        return Err(gerr(
+            "bad-grant",
+            "Full Access requires a Direct workspace: it runs in the real project folder, and an isolated working copy promises containment that Full Access cannot keep",
+        ));
+    }
     let net = match NetScope::parse(&spec.net) {
         Some(n) if n.is_implemented() => n,
         Some(_) => {
             return Err(gerr(
                 "not-available",
-                "that network scope is not available in this build; use offline or install",
+                "that network scope is not available in this build; use offline, install, controlled or full",
             ))
         }
         None => {
             return Err(gerr(
                 "bad-grant",
-                "network scope must be offline or install",
+                "network scope must be offline, install, controlled or full",
             ))
         }
     };
@@ -399,6 +414,7 @@ pub fn consent_text_for(project_label: &str, spec: &GrantSpec, direct: bool) -> 
         "workspace" if direct && spec.exec.git_write => "Commands Nexus runs for this project (builds, tests, formatters, code generators, dependency installs) run in your REAL project folder, with no copy and no patch to apply: files they create, change or delete are changed on disk immediately, together with the files Nexus edits itself. They cannot see or change anything outside the project. You ALLOW Git writes below, so commands may also change the repository's `.git` (commit, branch, checkout); `.git/hooks` and `.git/config` stay read-only. Secret-shaped files, sockets and similar entries are hidden from commands, and files with several hard links are read-only unless you allow otherwise below.",
         "workspace" if direct => "Commands Nexus runs for this project (builds, tests, formatters, code generators, dependency installs) run in your REAL project folder, with no copy and no patch to apply: files they create, change or delete are changed on disk immediately, together with the files Nexus edits itself. They cannot see or change anything outside the project. `.git` is read-only (Nexus cannot commit, change hooks or configuration), secret-shaped files, sockets and similar entries are hidden from commands, and files with several hard links are read-only unless you allow otherwise below.",
         "workspace" => "Commands Nexus runs for this project (builds, tests, formatters, code generators, dependency installs) change the task's working copy directly: what they create or modify stays there and becomes part of the patch you review. They cannot see or change anything outside the project.",
+        "full" => "FULL ACCESS: commands Nexus runs for this project run as YOU, on your real machine, with no sandbox. They can read, create, change or delete anything you can — this project, your other projects, your keys and credentials, system files you can write — and Nexus cannot confine them to this project or undo what they do outside it. It is NOT administrator/root access: commands have exactly your normal OS permissions. Only grant this to run tools that genuinely cannot work inside the confined workspace.",
         _ => "Commands Nexus runs for this project work on a throw-away copy; whatever they write is discarded (edits are made with Nexus's own file tools).",
     };
     let controlled_text;
@@ -439,6 +455,7 @@ pub fn consent_text_for(project_label: &str, spec: &GrantSpec, direct: bool) -> 
             );
             controlled_text.as_str()
         }
+        "full" => "FULL NETWORK: commands use your machine's network exactly as you do — the internet, your local network, and services running on this machine — with no destination checks by Nexus.",
         _ => "Commands have no network access.",
     };
     let ap = match spec.approval.as_str() {
@@ -494,6 +511,7 @@ fn rank_fs(s: &str) -> u8 {
     match s {
         "scratch" => 0,
         "workspace" => 1,
+        "full" => 2,
         _ => 2, // anything unknown is the widest, so it can only be narrowed away
     }
 }
@@ -596,6 +614,8 @@ mod tests {
     fn unimplemented_capabilities_cannot_be_stored() {
         for (fs, net) in [
             ("full", "offline"),
+            ("full", "controlled"),
+            ("workspace", "full"),
             ("scratch", "controlled"),
             ("scratch", "full"),
             ("host", "offline"),
@@ -607,6 +627,10 @@ mod tests {
             );
         }
         assert!(validate_spec(&spec("workspace", "install", "ask", None), false, 0).is_ok());
+        // M8: Full Access is grantable only as fs=full + net=full on a Direct project
+        assert!(validate_spec(&spec("full", "full", "auto", None), true, 0).is_ok());
+        assert!(validate_spec(&spec("full", "full", "ask", None), true, 0).is_ok());
+        assert!(validate_spec(&spec("full", "full", "auto", None), false, 0).is_err());
         assert!(validate_spec(&spec("scratch", "offline", "maybe", None), false, 0).is_err());
         // in-place commands over a user's real folder do not exist yet
         assert!(validate_spec(&spec("workspace", "offline", "auto", None), true, 0).is_ok());

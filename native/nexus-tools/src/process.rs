@@ -1111,6 +1111,170 @@ pub fn scratch_effects(src: &Path, staged: &crate::stage::StageReport) -> Scratc
     }
 }
 
+/// M8 Full Access branch of `run_process`: the sealed scope is `Full`, so the
+/// command runs on the host under the OS user's authority. Reached only from
+/// the sealed scope — never as a fallback from a failed sandbox run.
+fn run_host_branch(
+    ctx: &ProcessContext<'_>,
+    args: &ProcessArgs,
+    cmd: &ResolvedCommand,
+    cancel: &CancellationToken,
+    hooks: &mut dyn ProcessHooks,
+) -> Result<ToolResultV1, ToolError> {
+    use crate::exec_contract::{
+        check_grant, Approval, ExecBackend, ExecGrant, HostBackend, NetScope,
+    };
+    // Full Access enforces only `full`/`full` (ADR Rev 2 §7): any other network
+    // claim for a host process would be a lie, so it is refused, not emulated.
+    let net_full = ctx.grant.is_some_and(|g| g.net == "full");
+    if !net_full {
+        return Ok(failed_result(
+            ToolErrorCode::CommandRefused,
+            "Full Access requires an explicit `net=full` grant alongside `fs=full`: Nexus does not claim Offline or Controlled Internet for an unsandboxed host process. Ask the user to grant Full Network for this project, or run the command under the confined Workspace backend (nothing was run)".to_owned(),
+        ));
+    }
+    if let Err(r) = check_grant(
+        &HostBackend.caps(),
+        &ExecGrant {
+            fs: crate::exec_contract::FsScope::Full,
+            net: NetScope::Full,
+            approval: Approval::Auto,
+        },
+    ) {
+        let e = r.into_error();
+        return Ok(failed_result(e.code, e.message));
+    }
+    let root = PathBuf::from(ctx.ws.root_path());
+    let program = match crate::host_exec::resolve_host_program(&args.program, &root) {
+        Ok(p) => p,
+        Err(e) => return Ok(failed_result(e.code, e.message)),
+    };
+    let cwd = root.join(&args.cwd);
+    if !cwd.is_dir() {
+        return Ok(failed_result(
+            ToolErrorCode::CommandRefused,
+            format!(
+                "working directory '{}' does not exist in the workspace (nothing was run)",
+                args.cwd
+            ),
+        ));
+    }
+    // `ResolvedCommand.argv` carries the arguments only; the program is separate.
+    let mut argv: Vec<String> = vec![program.to_string_lossy().into_owned()];
+    argv.extend(cmd.argv.iter().cloned());
+    let wall = {
+        let w = cmd.wall_ms.unwrap_or(ctx.scope_max_wall_ms);
+        if w == 0 {
+            600_000
+        } else {
+            w
+        }
+    };
+    let (pre, pre_trunc) = crate::host_exec::project_manifest(&root, 20_000);
+    hooks.journal(
+        PH_PREPARED,
+        serde_json::json!({
+            "backend": "host/1", "fsScope": "full", "netScope": "full",
+            "program": argv[0], "argv": argv, "cwd": cwd.to_string_lossy(),
+            "grant": ctx.grant, "processStarted": false,
+            "note": "Full Access: unsandboxed host execution under the OS user's authority; effects outside the project are not observed and cannot be undone",
+        }),
+    )?;
+    let outcome = {
+        let mut should_stop = || -> Option<&'static str> {
+            if cancel.is_cancelled() {
+                return Some("cancelled");
+            }
+            if hooks.fence().is_err() {
+                return Some("revoked");
+            }
+            None
+        };
+        crate::host_exec::run_host(crate::host_exec::HostRun {
+            program: program.clone(),
+            argv: argv.clone(),
+            cwd: cwd.clone(),
+            env: crate::host_exec::host_env(&cmd.env),
+            wall_ms: wall,
+            tail_bytes: 256 * 1024,
+            should_stop: &mut should_stop,
+        })
+    };
+    let out = match outcome {
+        Ok(o) => o,
+        Err(e) => return Ok(failed_result(e.code, e.message)),
+    };
+    let (post, post_trunc) = crate::host_exec::project_manifest(&root, 20_000);
+    let mut effects = crate::host_exec::manifest_diff(&pre, &post);
+    effects["manifestTruncated"] = serde_json::json!(pre_trunc || post_trunc);
+    let mut red = Redaction::default();
+    let so = redact_stream(&out.stdout, out.stdout_truncated, &mut red);
+    let se = redact_stream(&out.stderr, out.stderr_truncated, &mut red);
+    let (code, signal) = match &out.exit {
+        ExitKind::Exited(c) => (Some(*c), out.signal_hint),
+        ExitKind::Signaled(s) => (None, Some(*s)),
+        _ => (None, None),
+    };
+    let verification = verdict(code.map(i64::from), Pipefail::NotApplicable);
+    let phase = match out.exit {
+        ExitKind::Cancelled | ExitKind::Revoked(_) => PH_CANCELLED,
+        _ => PH_EXITED,
+    };
+    let output_digest = {
+        let mut h = Sha256::new();
+        h.update(so.as_bytes());
+        h.update([0]);
+        h.update(se.as_bytes());
+        hex::encode(h.finalize())
+    };
+    hooks.journal(
+        phase,
+        serde_json::json!({
+            "backend": "host/1", "fsScope": "full", "netScope": "full",
+            "reason": out.exit.reason(), "exitCode": code, "signal": signal,
+            "verification": verification, "wallMs": out.wall_ms,
+            "stdoutBytes": out.stdout_bytes, "stderrBytes": out.stderr_bytes,
+            "stdoutTail": tail(&so, PERSISTED_TAIL_BYTES),
+            "stderrTail": tail(&se, PERSISTED_TAIL_BYTES),
+            "outputDigest": output_digest, "processStarted": true,
+            "effects": effects, "grant": ctx.grant,
+        }),
+    )?;
+    let mut trunc = Truncation::default();
+    if out.stdout_truncated {
+        trunc.add("stdout-cap");
+    }
+    if out.stderr_truncated {
+        trunc.add("stderr-cap");
+    }
+    Ok(ToolResultV1::success(
+        "proc.run",
+        crate::contract::TOOL_VERSION,
+        serde_json::json!({
+            "backend": "host", "fsScope": "full", "network": "full",
+            "reason": out.exit.reason(), "exitCode": code, "signal": signal,
+            "verification": verification, "stdout": so, "stderr": se,
+            "stdoutTruncated": out.stdout_truncated, "stderrTruncated": out.stderr_truncated,
+            "wallMs": out.wall_ms, "resourceEnforcement": out.resource_enforcement,
+            "writeBack": "host-filesystem",
+            "persisted": "the command ran on the real host filesystem under the OS user's authority; Nexus did not copy or adopt anything",
+            "effects": effects,
+        }),
+        trunc,
+        red,
+        ToolStats::default(),
+    ))
+}
+
+fn failed_result(code: ToolErrorCode, message: String) -> ToolResultV1 {
+    ToolResultV1::failure(
+        "proc.run",
+        crate::contract::TOOL_VERSION,
+        ToolError::new(code, message),
+        ToolStats::default(),
+    )
+}
+
 /// Run one process request to a terminal lifecycle state.
 pub fn run_process(
     ctx: &ProcessContext<'_>,
@@ -1123,7 +1287,30 @@ pub fn run_process(
         .join(crate::sandbox::cgroup_leaf_name(ctx.execution_id));
     let mut cmd = match ctx.policy.resolve(args) {
         Ok(c) => c,
-        Err(e) => return failed(hooks, &run_dir, e.code, e.message),
+        Err(e) => {
+            // M8: under a sealed Full scope the HOST resolver is authoritative
+            // (the workbench resolver only knows the sandbox runtime). A host
+            // miss still refuses; nothing falls back to the sandbox.
+            if ctx.fs_scope == crate::exec_contract::FsScope::Full {
+                let root = PathBuf::from(ctx.ws.root_path());
+                match crate::host_exec::resolve_host_program(&args.program, &root) {
+                    Ok(host) => ResolvedCommand {
+                        name: args.program.clone(),
+                        program: host.to_string_lossy().into_owned(),
+                        argv: args.args.clone(),
+                        cwd: args.cwd.clone(),
+                        env: Default::default(),
+                        ro_binds: Vec::new(),
+                        install: false,
+                        wall_ms: None,
+                        shell_pipeline: false,
+                    },
+                    Err(he) => return Ok(failed_result(he.code, he.message)),
+                }
+            } else {
+                return failed(hooks, &run_dir, e.code, e.message);
+            }
+        }
     };
     let pipefail = apply_pipefail(&mut cmd);
     if cancel.is_cancelled() {
@@ -1136,6 +1323,11 @@ pub fn run_process(
     }
     if let Err(e) = hooks.fence() {
         return failed(hooks, &run_dir, ToolErrorCode::Revoked, e.message);
+    }
+    // M8: a sealed `Full` scope runs on the host backend. This branch is taken
+    // only from the sealed scope, never as a fallback from a sandbox failure.
+    if ctx.fs_scope == crate::exec_contract::FsScope::Full {
+        return run_host_branch(ctx, args, &cmd, cancel, hooks);
     }
     // The grant this command runs under must be one the backend can really enforce. A refusal is final:
     // there is no substitution of another scope (ADR rev. 2 section 7.5).

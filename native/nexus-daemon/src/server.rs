@@ -141,6 +141,10 @@ pub struct Daemon {
     /// network, approval behaviour). Without this a project that has a grant is refused, never run with
     /// defaults.
     pub standing_grants: bool,
+    /// M8: the host (Full Access) backend runs only when the operator started
+    /// the daemon with `--enable-host-exec`. A `full` grant alone never turns
+    /// it on, and this flag alone grants nothing.
+    pub host_exec_enabled: bool,
     pub command_policy: nexus_tools::process::CommandPolicy,
     pub run_root: std::path::PathBuf,
     pub sandbox_caps: Option<nexus_tools::sandbox::SandboxCapabilities>,
@@ -1516,6 +1520,11 @@ fn evaluate_autonomous_policy(
                 Some("controlled") => frozen.as_ref().is_some_and(|g| {
                     g.net_scope() == nexus_tools::exec_contract::NetScope::Controlled
                 }),
+                // M8 Full Access: only a task that froze fs=full + net=full
+                Some("full") => frozen.as_ref().is_some_and(|g| {
+                    g.net_scope() == nexus_tools::exec_contract::NetScope::Full
+                        && task_fs_scope(daemon, task) == nexus_tools::exec_contract::FsScope::Full
+                }),
                 _ => false,
             };
             // The scope the operation declares must be the scope of THIS task (the daemon's own record),
@@ -1534,6 +1543,7 @@ fn evaluate_autonomous_policy(
                     "in-place-project-folder"
                 }
                 nexus_tools::exec_contract::FsScope::Workspace => "in-place-task-copy",
+                nexus_tools::exec_contract::FsScope::Full => "host-filesystem",
                 _ => "none",
             };
             if !net_ok
@@ -1822,6 +1832,21 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                 op["sandbox"]["writeBack"] = "in-place-task-copy".into();
                 op["filesystemEffects"] = "files the command creates, changes or deletes persist in this task's working copy (not the user's folder); .git is read-only; secret-shaped top-level entries are hidden".into();
             }
+        }
+        if prepared.fs_scope() == nexus_tools::exec_contract::FsScope::Full {
+            // M8 Full Access: the reviewed operation says exactly what will
+            // happen — no sandbox, the host filesystem and network under the
+            // OS user's authority. The Kernel seals `full`/`full` from this.
+            op["execFsScope"] = "full".into();
+            op["sandbox"] = serde_json::json!({
+                "backend": "host",
+                "network": "full",
+                "workspace": "the real host filesystem under the OS user's authority (no confinement to the project)",
+                "writeBack": "host-filesystem",
+                "env": "allowlist",
+                "shell": resolved.name == "sh",
+            });
+            op["filesystemEffects"] = "FULL ACCESS: the command runs unsandboxed as the OS user; it can read, create, change or delete anything the user can, inside or outside the project; Nexus observes changes inside the project only and cannot undo effects outside it".into();
         }
         if let Some(g) = &frozen {
             op["grant"] = grant_declaration(g);
@@ -2932,6 +2957,7 @@ fn task_fs_scope(daemon: &Daemon, task: &str) -> nexus_tools::exec_contract::FsS
         if meta.get("grant").is_some_and(|g| !g.is_null()) {
             return match grant_may_act(daemon, task) {
                 Ok(Some(g)) if g.fs == "workspace" => FsScope::Workspace,
+                Ok(Some(g)) if g.fs == "full" => FsScope::Full,
                 _ => FsScope::Scratch,
             };
         }
@@ -2943,6 +2969,9 @@ fn task_fs_scope(daemon: &Daemon, task: &str) -> nexus_tools::exec_contract::FsS
     if meta.get("grant").is_some_and(|g| !g.is_null()) {
         return match grant_may_act(daemon, task) {
             Ok(Some(g)) if g.fs == "workspace" => FsScope::Workspace,
+            // Full Access never applies to an isolated working copy (ADR §7):
+            // the sealed scope stays scratch and the operation is refused
+            // against its declaration, never silently downgraded.
             _ => FsScope::Scratch,
         };
     }
@@ -4244,6 +4273,18 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     let (call, started, is_write, is_proc, proc_wall) = (call.0, call.1, call.2, call.3, call.4);
 
     if is_proc {
+        if call.prepared().fs_scope() == nexus_tools::exec_contract::FsScope::Full
+            && !daemon.host_exec_enabled
+        {
+            return tool_fail(
+                daemon,
+                &req.id,
+                &nexus_tools::ToolError::new(
+                    nexus_tools::ToolErrorCode::SandboxUnavailable,
+                    "Full Access is not enabled on this daemon (the operator must start it with --enable-host-exec); nothing was run and no confined backend was substituted",
+                ),
+            );
+        }
         let mut hooks = DaemonProcessHooks {
             daemon,
             verified: started.verified(),
@@ -5257,6 +5298,7 @@ mod isolation_tests {
             process_enabled: false,
             isolated_exec_scope: nexus_tools::exec_contract::FsScope::Scratch,
             standing_grants: false,
+            host_exec_enabled: false,
             command_policy: nexus_tools::process::CommandPolicy::standard(
                 nexus_tools::process::Toolchain::discover(),
             ),

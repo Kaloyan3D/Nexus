@@ -31,6 +31,7 @@ pub mod exec;
 pub mod exec_contract;
 pub mod gitwt;
 pub mod grant;
+pub mod host_exec;
 pub mod inplace;
 pub mod jobs;
 pub mod list;
