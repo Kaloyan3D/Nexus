@@ -272,11 +272,11 @@ fn code_definitions() -> Vec<Value> {
         json!({
             "type": "function",
             "name": "proc_run",
-            "description": "Run a development command in an isolated sandbox over a throw-away copy of the working copy. No network except dependency installation (`npm ci`/`npm install`, `pip install`, `go mod download`, `dotnet restore`, `cargo fetch`, which are allowed when the project permits installs; installed dependencies stay available to later commands). Run installs (npm ci, cargo fetch) DIRECTLY as their own command, never inside `sh -c` (no network there). Files a command writes (build output, caches) are discarded; change files with fs_write/fs_edit. Name ANY program installed in the runtime (cargo, rustc, rustfmt, git, bash, node, python3, npm/pnpm/yarn, npx, go, dotnet, make, formatters, linters, test runners) or a project-local executable by relative path (./node_modules/.bin/<tool>, scripts/<script>); a program that is not installed fails with an explanation. Use `sh -c \"<script>\"` or `bash -c \"<script>\"` for pipelines and && chains (a pipeline fails if any stage fails; one cut off by `head` is `unverified`). A failing command is information: read its output, fix the cause and run it again. Output is bounded.",
+            "description": "Run a development command in an isolated sandbox over a throw-away copy of the working copy. No network except dependency installation (`npm ci`/`npm install`, `pip install`, `go mod download`, `dotnet restore`, `cargo fetch`, when the project permits installs; installed dependencies stay available later). Run installs (npm ci, cargo fetch) DIRECTLY as their own command, never inside `sh -c` (no network there). Files a command writes (build output, caches) are discarded; change files with fs_write/fs_edit. Name ANY installed program (cargo, rustc, git, bash, node, python3, npm, go, make, formatters, linters, test runners) or a project-local executable by relative path (./node_modules/.bin/<tool>, scripts/<script>); an uninstalled program fails with an explanation. Use `sh -c \"<script>\"` or `bash -c \"<script>\"` for pipelines and && chains (a pipeline fails if any stage fails; one cut off by `head` is `unverified`). A failing command is information: read its output, fix the cause and run it again. Output is bounded.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "program": {"type": "string", "description": "Name of a program installed in the runtime, or a workspace-relative path to a project-local executable."},
+                    "program": {"type": "string", "description": "Installed program name, or workspace-relative path to a project-local executable."},
                     "args": {"type": "array", "items": {"type": "string"}, "maxItems": 64},
                     "cwd": {"type": "string", "description": "Directory relative to the repository root. Default \".\"."}
                 },
@@ -314,9 +314,9 @@ pub fn catalog_digest_of(definitions: &[Value]) -> String {
 pub const REPO_INSPECT_V1_CATALOG_DIGEST: &str =
     "b06d9c9f542b2e3fcc3d2a289f89c2ea201ff9b4ffec4af7d327ba62b4592ff6";
 pub const REPO_CODE_V1_CATALOG_DIGEST: &str =
-    "913244e7801c4b59236385699c4c8b4daf30e92ac36ca9ad0c7da4ae469e7215";
+    "e464de5c5a534aac38c7c50d36a7c1c081bf3d4584f825a8e617be9c24ae0c4c";
 pub const REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST: &str =
-    "c81212d6c16790f960a4ecfc67287a57319015d0e3cabb871b549643cc31e650";
+    "7c7c9bc17ad4f849840c4d733d98126234dbfba075e7adf6c95775b4c81d28e8";
 
 /// The frozen digest of `profile`'s catalog.
 pub fn frozen_catalog_digest(profile: crate::request::ToolProfile) -> &'static str {
@@ -503,11 +503,11 @@ mod tests {
         );
         assert_eq!(
             REPO_CODE_V1_CATALOG_DIGEST,
-            "913244e7801c4b59236385699c4c8b4daf30e92ac36ca9ad0c7da4ae469e7215"
+            "e464de5c5a534aac38c7c50d36a7c1c081bf3d4584f825a8e617be9c24ae0c4c"
         );
         assert_eq!(
             REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST,
-            "c81212d6c16790f960a4ecfc67287a57319015d0e3cabb871b549643cc31e650"
+            "7c7c9bc17ad4f849840c4d733d98126234dbfba075e7adf6c95775b4c81d28e8"
         );
         let all = [P::RepoInspectV1, P::RepoCodeV1, P::RepoCodeMuseSignalsV1];
         for p in all {

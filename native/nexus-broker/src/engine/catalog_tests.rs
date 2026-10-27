@@ -66,7 +66,7 @@ fn production_muse_v0_offers_the_frozen_baseline_catalog() {
     assert!(rt::verify_catalog(p));
     assert_eq!(
         rt::catalog_digest_for(p),
-        "913244e7801c4b59236385699c4c8b4daf30e92ac36ca9ad0c7da4ae469e7215",
+        "e464de5c5a534aac38c7c50d36a7c1c081bf3d4584f825a8e617be9c24ae0c4c",
         "the digest of the production catalog at baseline 49026e8"
     );
     // the future Muse engine's catalog is another identity
