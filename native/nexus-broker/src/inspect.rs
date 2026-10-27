@@ -984,7 +984,7 @@ pub(crate) fn run(
         let exec_scope = d
             .pointer("/direct/execFsScope")
             .and_then(|v| v.as_str())
-            .filter(|s| *s == "workspace")
+            .filter(|s| *s == "workspace" || *s == "full")
             .map(str::to_owned);
         b.update(run_id, |r| {
             r.workspace_relation = Some("direct".into());
@@ -1021,7 +1021,7 @@ pub(crate) fn run(
         let exec_scope = wt
             .pointer("/worktree/execFsScope")
             .and_then(|v| v.as_str())
-            .filter(|s| *s == "workspace")
+            .filter(|s| *s == "workspace" || *s == "full")
             .map(str::to_owned);
         b.update(run_id, |r| {
             r.worktree_commit = commit;
@@ -3053,7 +3053,7 @@ fn turn_loop(
                                             ls.activity.push(act);
                                             return Ok(LoopEnd::Failed(
                                             "tool-authority-refused".into(),
-                                            format!("the daemon refused to create the approval ({code}); the run was stopped (fail closed)"),
+                                            format!("the daemon refused to create the approval ({code}: {message}); the run was stopped (fail closed)"),
                                         ));
                                         }
                                         act.status = "refused".into();
@@ -3204,7 +3204,7 @@ fn turn_loop(
                                             ls.activity.push(act);
                                             return Ok(LoopEnd::Failed(
                                             "tool-authority-refused".into(),
-                                            format!("the Kernel refused the tool call ({code}); the run was stopped (fail closed)"),
+                                            format!("the Kernel refused the tool call ({code}: {}); the run was stopped (fail closed)", e.message),
                                         ));
                                         }
                                         // An ordinary tool failure (not-found, sensitive
@@ -3704,6 +3704,18 @@ pub fn render_process(result: &Value, cap: usize) -> Rendered {
             "stderrTail": tail(out.get("stderr").and_then(|v| v.as_str()).unwrap_or(""), keep),
         });
         let mut env = env;
+        // M8: a Full Access (host) result must be identifiable as such by the
+        // model and in run records — never presented as a confined run.
+        if out.get("backend").and_then(|v| v.as_str()) == Some("host") {
+            if let Some(o) = env.as_object_mut() {
+                o.insert("backend".into(), serde_json::json!("host"));
+                o.insert("fsScope".into(), serde_json::json!("full"));
+                o.insert(
+                    "effects".into(),
+                    out.get("effects").cloned().unwrap_or(Value::Null),
+                );
+            }
+        }
         // what the command did to ITS scratch copy: shown to the model so a pass over files that exist only
         // there is never taken for a pass of the project
         if let (Some(se), Some(o)) = (out.get("scratchEffects"), env.as_object_mut()) {

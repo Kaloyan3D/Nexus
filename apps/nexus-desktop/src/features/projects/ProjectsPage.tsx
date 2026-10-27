@@ -13,8 +13,9 @@ import { Alert, Badge, Button, EmptyState } from "../../components/ui/primitives
 const FS_LABEL: Record<string, string> = {
   scratch: "Commands work on a throw-away copy",
   workspace: "Commands change the task's working copy",
+  full: "FULL ACCESS: commands run as me, unsandboxed, anywhere I can reach",
 };
-const NET_LABEL: Record<string, string> = { offline: "No network", controlled: "Only the internet destinations I list", install: "Network for dependency installs" };
+const NET_LABEL: Record<string, string> = { offline: "No network", controlled: "Only the internet destinations I list", install: "Network for dependency installs", full: "FULL NETWORK: my machine's network, no destination checks" };
 const PRESET_CHOICES = ["npm", "pnpm", "yarn", "cargo", "pip", "github", "gitlab", "go"];
 
 /** `host` or `host:443,8443` lines (comma/space/newline separated) -> entries for the consent dialog; the broker validates every one. */
@@ -45,6 +46,7 @@ export function grantSummary(p: ProjectView): string {
   const g = p.grant;
   if (!g) return "Default permissions";
   const s = g.status === "active" ? "" : ` · ${g.status}`;
+  if (g.fs === "full") return `FULL ACCESS (unsandboxed, runs as you) · full network · ${g.approval === "ask" ? "asks" : "automatic"}${s}`;
   return `${g.fs === "workspace" ? "In-place commands" : "Copy only"} · ${g.net === "install" ? "installs online" : g.net === "controlled" ? `internet: ${destinationSummary(g)}` : "offline"} · ${g.approval === "ask" ? "asks" : "automatic"}${s}`;
 }
 
@@ -71,6 +73,8 @@ function PermissionsEditor({ p }: { p: ProjectView }) {
   const inPlaceWhy = permissionSupport?.inPlaceReason ?? "this machine cannot confine them";
   const direct = p.workspaceMode === "direct";
   // Controlled Internet needs the network gatekeeper on this machine and commands that run in place
+  const fullBlocked = !direct || (permissionSupport?.known === true && permissionSupport.hostExecAvailable !== true);
+  const fullWhy = !direct ? "needs a Direct workspace project" : (permissionSupport?.hostExecReason ?? "the host backend is not enabled on this installation");
   const controlledBlocked = permissionSupport?.known === true && permissionSupport.controlledAvailable === false;
   const controlledWhy = permissionSupport?.controlledReason ?? "this machine cannot run the network gatekeeper";
   // what this installation can really do (asked of the runtime): never offer an "ask" nobody can answer
@@ -89,17 +93,24 @@ function PermissionsEditor({ p }: { p: ProjectView }) {
         <div className="nv-stack" style={{ gap: 6, marginTop: 6 }} role="group" aria-label={`Permissions for ${p.label}`}>
           <label className="nv-note">
             Commands{" "}
-            <select className="nv-select nv-select--quiet" aria-label={`Command filesystem scope for ${p.label}`} value={fs} onChange={(e) => setFs(e.target.value)}>
+            <select className="nv-select nv-select--quiet" aria-label={`Command filesystem scope for ${p.label}`} value={fs} onChange={(e) => { setFs(e.target.value); if (e.target.value === "full") setNet("full"); else if (net === "full") setNet("offline"); }}>
               <option value="scratch">{FS_LABEL.scratch}</option>
               <option value="workspace" disabled={inPlaceBlocked}>{direct ? "Commands change my real project files directly" : FS_LABEL.workspace}{inPlaceBlocked ? ` (not available: ${inPlaceWhy})` : ""}</option>
+              <option value="full" disabled={fullBlocked}>{FS_LABEL.full}{fullBlocked ? ` (not available: ${fullWhy})` : ""}</option>
             </select>
           </label>
+          {fs === "full" && (
+            <Alert tone="error" title="Full Access is not the confined workspace">
+              Commands run as you, with no sandbox: they can read, change or delete anything you can — other projects, keys, system files you can write — and use your network without destination checks. Nexus observes changes inside this project only and cannot undo effects outside it. The confined Workspace stays the recommended mode.
+            </Alert>
+          )}
           <label className="nv-note">
             Network{" "}
             <select className="nv-select nv-select--quiet" aria-label={`Network scope for ${p.label}`} value={net} onChange={(e) => setNet(e.target.value)}>
               <option value="offline">{NET_LABEL.offline}</option>
               <option value="controlled" disabled={controlledBlocked || fs !== "workspace"}>{NET_LABEL.controlled}{controlledBlocked ? ` (not available: ${controlledWhy})` : fs !== "workspace" ? " (needs commands that change the project in place)" : ""}</option>
               <option value="install">{NET_LABEL.install}</option>
+              <option value="full" disabled={fs !== "full"}>{NET_LABEL.full}{fs !== "full" ? " (only with Full Access commands)" : ""}</option>
             </select>
           </label>
           {net === "controlled" && (

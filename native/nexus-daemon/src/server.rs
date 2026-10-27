@@ -1076,11 +1076,18 @@ fn do_process_scope_approve(
     let fs_scope = match req.params.get("fsScope") {
         None | Some(serde_json::Value::Null) => nexus_kernel::FS_SCOPE_SCRATCH.to_owned(),
         Some(serde_json::Value::String(v))
-            if v == nexus_kernel::FS_SCOPE_SCRATCH || v == nexus_kernel::FS_SCOPE_WORKSPACE =>
+            if v == nexus_kernel::FS_SCOPE_SCRATCH
+                || v == nexus_kernel::FS_SCOPE_WORKSPACE
+                || v == nexus_kernel::FS_SCOPE_FULL =>
         {
             v.clone()
         }
-        Some(_) => return refuse("scope-refused", "fsScope must be 'scratch' or 'workspace'"),
+        Some(_) => {
+            return refuse(
+                "scope-refused",
+                "fsScope must be 'scratch', 'workspace' or 'full'",
+            )
+        }
     };
     let command_id = match get_string(&req.params, "commandId") {
         Ok(v) => v,
@@ -1372,6 +1379,14 @@ fn check_within_grant(
                     return Err(
                         "the operation's network destinations are not the ones this task holds"
                             .into(),
+                    );
+                }
+            }
+            // M8: Full Network is permitted only under a frozen full/full grant
+            Some("full") => {
+                if f.net_scope() != nexus_tools::exec_contract::NetScope::Full || f.fs != "full" {
+                    return Err(
+                        "Full Network is permitted only by a Full Access (fs=full) grant".into(),
                     );
                 }
             }
@@ -3011,12 +3026,13 @@ fn resolve_task_permissions(
         Err(e) => return Err(("grant-refused", e.message)),
     };
     // belt and braces: values this build cannot enforce are refused even if a registry carries them
-    if !matches!(frozen.fs_scope(), FsScope::Scratch | FsScope::Workspace)
-        || !matches!(
-            frozen.net_scope(),
-            NetScope::Offline | NetScope::Install | NetScope::Controlled
-        )
-        || nexus_tools::exec_contract::Approval::parse(&frozen.approval).is_none()
+    if !matches!(
+        frozen.fs_scope(),
+        FsScope::Scratch | FsScope::Workspace | FsScope::Full
+    ) || !matches!(
+        frozen.net_scope(),
+        NetScope::Offline | NetScope::Install | NetScope::Controlled | NetScope::Full
+    ) || nexus_tools::exec_contract::Approval::parse(&frozen.approval).is_none()
     {
         return Err((
             "scope-refused",
@@ -3041,6 +3057,20 @@ fn resolve_task_permissions(
                 ),
             ));
         }
+    }
+    // M8: Full Access tasks need the operator-enabled host backend; without
+    // it the task refuses here rather than starting confined (no downgrade).
+    if frozen.fs_scope() == FsScope::Full && !daemon.host_exec_enabled {
+        return Err((
+            "scope-refused",
+            "the project's permissions grant Full Access, but this daemon was not started with --enable-host-exec; nothing was started and no confined backend was substituted".into(),
+        ));
+    }
+    if frozen.fs_scope() == FsScope::Full && frozen.net_scope() != NetScope::Full {
+        return Err((
+            "scope-refused",
+            "Full Access requires network scope `full`; Nexus does not claim Offline or Controlled Internet for an unsandboxed host process".into(),
+        ));
     }
     if frozen.fs_scope() == FsScope::Workspace
         && (daemon.autonomous.is_none() || !daemon.process_enabled)
@@ -3345,7 +3375,11 @@ fn do_direct_open(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                 "path": canon_s,
                 "externalChanges": external,
                 "fromRecorded": from_known,
-                "execFsScope": if direct_in_place { "workspace" } else { "scratch" },
+                "execFsScope": match task_permissions.as_ref().map(|g| g.fs.as_str()) {
+                    Some("full") => "full",
+                    _ if direct_in_place => "workspace",
+                    _ => "scratch",
+                },
             }
         }),
     )
@@ -4659,6 +4693,9 @@ fn do_status(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "writesEnabled": daemon.writes_enabled,
             "processEnabled": daemon.process_enabled,
             "inPlaceExecution": in_place_availability(daemon),
+            // M8: Full Access runs only on an operator-enabled daemon; the flag
+            // grants nothing without a per-project fs=full + net=full grant.
+            "hostExecution": { "available": daemon.host_exec_enabled, "reason": if daemon.host_exec_enabled { serde_json::Value::Null } else { serde_json::json!("this daemon was not started with --enable-host-exec") } },
             "controlledInternet": controlled_availability(daemon),
             "sandbox": daemon.sandbox_caps.as_ref().map(|c| serde_json::json!({
                 "available": c.available, "backend": c.backend,

@@ -442,6 +442,12 @@ fn start_daemon(home: &Home, tools: &Tools) -> Result<std::process::Child, Strin
     if let Some(dc) = std::env::var_os("NEXUS_DEP_CACHE").filter(|v| !v.is_empty()) {
         d.arg("--dep-cache").arg(dc);
     }
+    // M8: Full Access is an operator opt-in for the whole installation, off by
+    // default. Even then, every project still needs its own fs=full + net=full
+    // grant; this flag alone authorizes nothing.
+    if std::env::var_os("NEXUS_ENABLE_HOST_EXEC").is_some_and(|v| v == "1") {
+        d.arg("--enable-host-exec");
+    }
     let mut dchild = spawn(&mut d, &dlog)?;
     if let Err(e) = wait_for(
         "the Kernel daemon",

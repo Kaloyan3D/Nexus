@@ -1553,7 +1553,10 @@ impl Kernel {
     ) -> KernelResult<ProcessScopeBinding> {
         {
             let fs_scope = declared.fs_scope.as_str();
-            if fs_scope != FS_SCOPE_SCRATCH && fs_scope != FS_SCOPE_WORKSPACE {
+            if fs_scope != FS_SCOPE_SCRATCH
+                && fs_scope != FS_SCOPE_WORKSPACE
+                && fs_scope != FS_SCOPE_FULL
+            {
                 return Err(refuse(
                     KernelErrorCode::ScopeRefused,
                     "unsupported filesystem scope for a process scope",
