@@ -592,7 +592,7 @@ export interface ProjectGrantView {
   digest: string;
   /** `scratch`: commands work on a throw-away copy. `workspace`: they change the task's working copy in place. */
   fs: "scratch" | "workspace" | "full";
-  net: "offline" | "controlled" | "install";
+  net: "offline" | "controlled" | "install" | "full";
   /** Controlled Internet: the destinations commands may reach (an allowlist of WHERE, not of what is sent). */
   netPolicy?: { hosts: { host: string; ports: number[] }[]; local_ports?: number[] };
   /** `auto`: inside the grant, no prompt. `ask`: every operation waits for the independent approver. */
