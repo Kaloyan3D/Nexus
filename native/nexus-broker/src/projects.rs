@@ -135,7 +135,7 @@ pub fn grant_view(rec: &ProjectRecord, now_ms: i64) -> Option<Value> {
     Some(json!({
         "grantId": g.grant_id, "version": g.version, "digest": g.digest(&rec.id),
         "fs": g.fs, "net": g.net, "approval": g.approval,
-        "netPolicy": g.exec.net, "checkpoint": g.exec.checkpoint, "hardLinks": g.exec.hard_links, "gitWorktree": g.exec.git_worktree, "gitWrite": g.exec.git_write,
+        "netPolicy": g.exec.net, "checkpoint": g.exec.checkpoint, "hardLinks": g.exec.hard_links, "gitWorktree": g.exec.git_worktree, "gitWrite": g.exec.git_write, "devPorts": g.exec.dev_ports,
         "expiresAtMs": g.expires_at_ms, "createdAtMs": g.created_at_ms, "createdBy": g.created_by,
         "status": st.status(now_ms).as_str(),
         "revokedAtMs": st.revoked_at_ms,
@@ -211,6 +211,15 @@ fn spec_of(params: &Value) -> Result<nexus_tools::grant::GrantSpec, VerbErr> {
                 .get("gitWrite")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            dev_ports: params
+                .get("devPorts")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_u64().and_then(|n| u16::try_from(n).ok()))
+                        .collect()
+                })
+                .unwrap_or_default(),
             net: net_policy_of(params)?,
         },
     })

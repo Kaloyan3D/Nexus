@@ -756,6 +756,7 @@ async fn project_set_grant(
         local_ports: allow_local_ports.unwrap_or_default(),
         // the Desktop panel does not offer Git writes yet (CLI: --git-write); never implied
         git_write: false,
+        dev_ports: vec![],
     };
     tauri::async_runtime::spawn_blocking(move || {
         rt.project_set_grant(

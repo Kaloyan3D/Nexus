@@ -63,6 +63,11 @@ pub struct ExecPolicy {
     /// workspace are never made writable by this flag (explicitly unsupported in M6).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub git_write: bool,
+    /// M7C: development-server ports (inside the sandbox) that Nexus may expose on host loopback
+    /// for this project's background jobs. Empty = no exposure. The model cannot name or change
+    /// these; they are sealed into the grant digest and only narrowable while a task runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dev_ports: Vec<u16>,
     /// Controlled Internet (M5): the destinations commands may reach. Meaningful only with network scope
     /// `controlled`; part of the grant digest, so the Kernel seals it with the grant.
     #[serde(default, skip_serializing_if = "crate::netpolicy::NetPolicy::is_empty")]
@@ -80,6 +85,7 @@ impl Default for ExecPolicy {
             hard_links: "protect".into(),
             git_worktree: "off".into(),
             git_write: false,
+            dev_ports: Vec::new(),
             net: Default::default(),
         }
     }
@@ -107,6 +113,12 @@ impl ExecPolicy {
             return Err(gerr(
                 "bad-grant",
                 "git worktree access must be off or read-only",
+            ));
+        }
+        if self.dev_ports.len() > 32 || self.dev_ports.contains(&0) {
+            return Err(gerr(
+                "bad-grant",
+                "development ports must be 1..=65535, at most 32 of them",
             ));
         }
         self.net.validate().map_err(|m| gerr("bad-grant", m))?;
@@ -245,6 +257,12 @@ impl StandingGrant {
             }
             if self.exec.git_write {
                 v["exec"]["gitWrite"] = true.into();
+            }
+            if !self.exec.dev_ports.is_empty() {
+                let mut ports = self.exec.dev_ports.clone();
+                ports.sort_unstable();
+                ports.dedup();
+                v["exec"]["devPorts"] = ports.into();
             }
             if !self.exec.net.is_empty() {
                 v["exec"]["netPolicy"] =
@@ -452,8 +470,19 @@ pub fn consent_text_for(project_label: &str, spec: &GrantSpec, direct: bool) -> 
         } else {
             "\n• One limit: if a command CREATES a repository (git init) in a folder that had no .git, the metadata it writes during that same command (a commit, a hook, configuration) cannot be mount-protected — protection applies from the next command on, and the command's result says when this happened."
         };
+        let devp = if spec.exec.dev_ports.is_empty() {
+            String::new()
+        } else {
+            let mut ports = spec.exec.dev_ports.clone();
+            ports.sort_unstable();
+            ports.dedup();
+            format!(
+                "\n• Development servers: background jobs in this project may expose these ports on THIS machine's loopback only (127.0.0.1), so you can open the dev server in your browser: {}. No other port is exposed, nothing is bound publicly, and closing the job or narrowing this permission removes the access.",
+                ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
+            )
+        };
         extra = format!(
-            "\n• Recovery: {ck}\n• Hard links: {hl}{gw}{gitw}\n• Limits you should know: a checkpoint is not an atomic snapshot and does not cover dependency or build folders (node_modules, target, ...), .git, or secret-shaped files; a command's effect on the outside world (network installs, other tools) cannot be undone; restoring is an explicit action you take, and files you changed afterwards are never overwritten."
+            "\n• Recovery: {ck}\n• Hard links: {hl}{gw}{gitw}{devp}\n• Limits you should know: a checkpoint is not an atomic snapshot and does not cover dependency or build folders (node_modules, target, ...), .git, or secret-shaped files; a command's effect on the outside world (network installs, other tools) cannot be undone; restoring is an explicit action you take, and files you changed afterwards are never overwritten."
         );
     }
     format!(
@@ -519,6 +548,10 @@ pub fn narrowed(frozen: &Frozen, current: &StandingGrant) -> Frozen {
     if !current.exec.git_write {
         f.exec.git_write = false;
     }
+    // Development ports (M7C): a running task keeps only ports its current grant still allows
+    f.exec
+        .dev_ports
+        .retain(|p| current.exec.dev_ports.contains(p));
     // "ask" is the stricter approval behaviour; an unreadable value counts as ask
     if f.approval != "ask" && current.approval != "auto" {
         f.approval = "ask".into();
