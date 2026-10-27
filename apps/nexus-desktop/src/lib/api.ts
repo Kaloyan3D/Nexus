@@ -35,6 +35,7 @@ import type {
   RuntimeState,
   JournalResult,
   LiveBlockers,
+  JobView,
   MockEvent,
   MockResult,
   ModelCatalog,
@@ -99,6 +100,8 @@ export interface NativeApi {
   /** Native folder picker, then open the folder as a project. No path crosses this API. */
   projectPick(): Promise<ProjectOpenReply>;
   projectList(withChanges?: boolean): Promise<ProjectListReply>;
+  jobList(): Promise<{ jobs: JobView[] }>;
+  jobStop(jobId: string): Promise<JobView>;
   projectRefresh(projectId: string): Promise<ProjectOpenReply>;
   projectSetPolicy(projectId: string, policy: { installs?: boolean; trusted?: boolean }): Promise<unknown>;
   /** Where NEW tasks of a project edit (direct = its real folder). Choosing direct is confirmed natively. */
@@ -207,6 +210,8 @@ export const tauriApi: NativeApi = {
   providerRevoke: () => invoke<RuntimeState["consent"]>("provider_revoke"),
   projectPick: () => invoke<ProjectOpenReply>("project_pick"),
   projectList: (withChanges) => invoke<ProjectListReply>("project_list", { withChanges: withChanges ?? false }),
+  jobList: () => invoke<{ jobs: JobView[] }>("job_list"),
+  jobStop: (jobId) => invoke<JobView>("job_stop", { jobId }),
   projectRefresh: (projectId) => invoke<ProjectOpenReply>("project_refresh", { projectId }),
   projectSetPolicy: (projectId, policy) => invoke<unknown>("project_set_policy", { projectId, installs: policy.installs ?? null, trusted: policy.trusted ?? null }),
   projectSetEditMode: (projectId, mode) => invoke<unknown>("project_set_edit_mode", { projectId, mode }),
@@ -310,6 +315,8 @@ export const unavailableApi: NativeApi = {
   providerRevoke: () => Promise.reject(notInShell),
   projectPick: () => Promise.reject(notInShell),
   projectList: () => Promise.resolve({ projects: [] } as ProjectListReply),
+  jobList: () => Promise.resolve({ jobs: [] }),
+  jobStop: () => Promise.reject(notInShell),
   projectRefresh: () => Promise.reject(notInShell),
   projectSetPolicy: () => Promise.reject(notInShell),
   projectSetEditMode: () => Promise.reject(notInShell),

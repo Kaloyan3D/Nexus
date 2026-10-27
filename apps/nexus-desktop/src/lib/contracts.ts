@@ -602,6 +602,20 @@ export interface ProjectGrantView {
   history: { atMs: number; kind: string; version: number; by: string }[];
 }
 
+export interface JobView {
+  jobId: string;
+  state: string;
+  command: string;
+  task: string;
+  startedAtMs: number;
+  endedAtMs?: number | null;
+  exitCode?: number | null;
+  exposed: { port: number; hostPort: number; url: string }[];
+  ready: boolean;
+  logBytes: number;
+  logTruncated: boolean;
+}
+
 export interface ProjectView {
   projectId: string;
   label: string;

@@ -43,6 +43,8 @@
     "allow-provider-revoke",
     "allow-project-pick",
     "allow-project-list",
+    "allow-job-list",
+    "allow-job-stop",
     "allow-project-refresh",
     "allow-project-set-policy",
     "allow-code-limits-set",
