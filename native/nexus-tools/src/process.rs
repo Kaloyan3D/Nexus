@@ -1216,6 +1216,11 @@ pub fn run_process(
     // In place: nothing is staged. The task's own working copy is bound by the descriptor the Workspace
     // pinned; what the command writes is the working copy (reviewed through the task's git diff).
     let exec_override = if in_place { hooks.exec_policy() } else { None };
+    // A1: did `.git` exist before this command prepared its protections?
+    let git_existed_before = in_place
+        && std::path::Path::new(ctx.ws.root_path())
+            .join(".git")
+            .exists();
     let net_policy: Option<crate::netpolicy::NetPolicy> = hooks.net_policy();
     if net_policy.is_some() && !in_place {
         return failed(
@@ -1772,6 +1777,27 @@ pub fn run_process(
     }
     if let (Some(l), Some(o)) = (&ledger, output.as_object_mut()) {
         o.insert("effects".into(), crate::observe::summary(l, 40));
+    }
+    // A1 (M6 closure): mount protection is prepared from entries that EXIST before the command.
+    // A `.git` created BY this command (git init, a script, any program) is therefore writable
+    // inside that one command — hooks/config included — whatever the grant says; it is fully
+    // protected from the next command on. Never let that pass silently: say so in the result.
+    if in_place {
+        let git_now = std::path::Path::new(ctx.ws.root_path())
+            .join(".git")
+            .exists();
+        if git_now && !git_existed_before {
+            if let Some(o) = output.as_object_mut() {
+                o.insert(
+                    "gitMetadataCreated".into(),
+                    serde_json::json!({
+                        "byThisCommand": true,
+                        "mountProtectedInThisCommand": false,
+                        "note": "this command created .git; metadata written inside the creating command (including hooks/config) is not mount-protected — it is protected from the next command on",
+                    }),
+                );
+            }
+        }
     }
     if let (Some(e), Some(o)) = (&effects, output.as_object_mut()) {
         let mut v = serde_json::to_value(e).unwrap_or_default();
