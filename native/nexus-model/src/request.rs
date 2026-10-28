@@ -80,6 +80,9 @@ pub enum ToolProfile {
     /// (`job_start`/`job_status`/`job_logs`/`job_stop`, no Kernel tool ids). Offered only to
     /// the `muse-v0-jobs` engine; `RepoCodeV1` stays byte-identical.
     RepoCodeJobsV1,
+    /// Adaptive + Jobs: the `nexus-adaptive-v1` catalog — the full coding
+    /// catalog, the reasoning-signals tool, and the four job tools.
+    RepoCodeAdaptiveJobsV1,
 }
 
 /// Bounds for a tool-capable conversation.

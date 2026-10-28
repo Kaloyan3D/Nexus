@@ -82,7 +82,7 @@ pub fn tool_id_for_profile(
     match profile {
         P::RepoInspectV1 => tool_id_for(model_name),
         // the signals and job tools are broker-handled: they have no Kernel tool id
-        P::RepoCodeV1 | P::RepoCodeMuseSignalsV1 | P::RepoCodeJobsV1 => tool_id_for(model_name)
+        P::RepoCodeV1 | P::RepoCodeMuseSignalsV1 | P::RepoCodeJobsV1 | P::RepoCodeAdaptiveJobsV1 => tool_id_for(model_name)
             .or_else(|| {
                 CODE_EXTRA
                     .iter()
@@ -157,14 +157,17 @@ pub fn definitions_for(profile: crate::request::ToolProfile) -> Vec<Value> {
     let mut v = definitions();
     if matches!(
         profile,
-        P::RepoCodeV1 | P::RepoCodeMuseSignalsV1 | P::RepoCodeJobsV1
+        P::RepoCodeV1 | P::RepoCodeMuseSignalsV1 | P::RepoCodeJobsV1 | P::RepoCodeAdaptiveJobsV1
     ) {
         v.extend(code_definitions());
     }
     if profile == P::RepoCodeMuseSignalsV1 {
         v.push(muse_signals_definition());
     }
-    if profile == P::RepoCodeJobsV1 {
+    if profile == P::RepoCodeAdaptiveJobsV1 {
+        v.push(muse_signals_definition());
+    }
+    if profile == P::RepoCodeJobsV1 || profile == P::RepoCodeAdaptiveJobsV1 {
         v.extend(
             job_tool_definitions()
                 .as_array()
@@ -332,6 +335,12 @@ pub const REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST: &str =
 /// M7D: `RepoCodeV1` plus the four broker-handled job tools, for the `muse-v0-jobs` engine.
 pub const REPO_CODE_JOBS_V1_CATALOG_DIGEST: &str =
     "18168580698f1ef02b59c7f808da8ed0a709f0c50e7f3ea36d27961c2dc77bfc";
+/// Adaptive + Jobs (this milestone): `RepoCodeMuseSignalsV1` plus the four
+/// job tools, for `nexus-adaptive-v1`. A NEW frozen identity; the signals
+/// and jobs catalogs above are unchanged. Placeholder until measured, then
+/// pinned by the catalog test like every other profile.
+pub const REPO_CODE_ADAPTIVE_JOBS_V1_CATALOG_DIGEST: &str =
+    "d8650029799af93456f31c0c9b42cafeab46afc88490ada1197ed50105a87ecd";
 
 /// The frozen digest of `profile`'s catalog.
 pub fn frozen_catalog_digest(profile: crate::request::ToolProfile) -> &'static str {
@@ -341,6 +350,7 @@ pub fn frozen_catalog_digest(profile: crate::request::ToolProfile) -> &'static s
         P::RepoCodeV1 => REPO_CODE_V1_CATALOG_DIGEST,
         P::RepoCodeMuseSignalsV1 => REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST,
         P::RepoCodeJobsV1 => REPO_CODE_JOBS_V1_CATALOG_DIGEST,
+        P::RepoCodeAdaptiveJobsV1 => REPO_CODE_ADAPTIVE_JOBS_V1_CATALOG_DIGEST,
     }
 }
 
@@ -364,6 +374,52 @@ pub fn catalog_digest() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_adaptive_jobs_catalog_is_signals_plus_jobs_and_history_is_unchanged() {
+        use crate::request::ToolProfile as P;
+        let names = |p: P| -> Vec<String> {
+            definitions_for(p)
+                .iter()
+                .map(|d| d["name"].as_str().unwrap_or("").to_owned())
+                .collect()
+        };
+        let aj = names(P::RepoCodeAdaptiveJobsV1);
+        // coding tools + signals + the four job tools, nothing else
+        let mut expect = names(P::RepoCodeMuseSignalsV1);
+        expect.extend(["job_start", "job_status", "job_logs", "job_stop"].map(str::to_owned));
+        assert_eq!(aj, expect);
+        assert_eq!(aj.len(), 11);
+        assert!(verify_catalog(P::RepoCodeAdaptiveJobsV1));
+        assert_eq!(
+            frozen_catalog_digest(P::RepoCodeAdaptiveJobsV1),
+            "d8650029799af93456f31c0c9b42cafeab46afc88490ada1197ed50105a87ecd"
+        );
+        // historical catalogs are byte-identical to their frozen identities
+        assert_eq!(catalog_digest_for(P::RepoInspectV1), REPO_INSPECT_V1_CATALOG_DIGEST);
+        assert_eq!(catalog_digest_for(P::RepoCodeV1), REPO_CODE_V1_CATALOG_DIGEST);
+        assert_eq!(
+            catalog_digest_for(P::RepoCodeMuseSignalsV1),
+            REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST
+        );
+        assert_eq!(catalog_digest_for(P::RepoCodeJobsV1), REPO_CODE_JOBS_V1_CATALOG_DIGEST);
+        // the signals and job tools stay broker-handled under the new profile
+        for name in ["job_start", "job_status", "job_logs", "job_stop", MUSE_SIGNALS_TOOL] {
+            assert!(tool_id_for_profile(P::RepoCodeAdaptiveJobsV1, name).is_none(), "{name}");
+        }
+        // measured provider overhead of adding jobs to the adaptive catalog:
+        // exactly the four job definitions, nothing else moved
+        let bytes = |p: P| {
+            nexus_contracts::canonical_json(&serde_json::Value::Array(definitions_for(p))).len()
+        };
+        assert_eq!(bytes(P::RepoCodeMuseSignalsV1), 7686);
+        assert_eq!(bytes(P::RepoCodeAdaptiveJobsV1), 9599);
+        assert_eq!(
+            bytes(P::RepoCodeAdaptiveJobsV1) - bytes(P::RepoCodeMuseSignalsV1),
+            1913,
+            "job tools add 1913 canonical bytes to every adaptive request"
+        );
+    }
+
     #[test]
     fn the_command_tool_tells_the_model_that_installs_must_run_directly() {
         // found live (R-NATIVE-3 run 14): `npm install` inside `sh -c` has no network, the model tried it
