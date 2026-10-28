@@ -13447,10 +13447,10 @@ fn s6_an_adaptive_run_changes_effort_only_through_registry_and_kernel_before_eac
     );
     let bodies = fx.provider.bodies.lock().unwrap().clone();
     for x in &bodies {
-        // the active Muse catalog, byte for byte; nothing else moved
+        // the active unified Adaptive catalog, byte for byte
         assert_eq!(
             em04c1_wire_digest(x),
-            nexus_model::repo_tools::REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST
+            nexus_model::repo_tools::REPO_CODE_ADAPTIVE_JOBS_V1_CATALOG_DIGEST
         );
         assert_eq!(x["model"], "e2e-mock-model");
         assert!(tool_names(x).contains(&SIGNALS_TOOL.to_owned()));
@@ -13529,10 +13529,11 @@ fn s6_an_adaptive_run_changes_effort_only_through_registry_and_kernel_before_eac
     assert_eq!(hist[2]["limiter"]["claims"], 1);
     assert_eq!(st["payload"]["adaptive"]["limiter"]["droppedBefore"], false);
     assert_eq!(st["payload"]["adaptive"]["limiter"]["rearmTokensUsed"], 0);
-    // 5. the run records the catalog it was offered
+    // 5. the run records the catalog it was offered (Adaptive + Jobs since
+    // the catalog integration; new conversations adopt it, see aj_ tests)
     assert_eq!(
         em02_record(&fx, "s6-adaptive", &run.run_id)["toolCatalogDigest"],
-        nexus_model::repo_tools::REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST
+        nexus_model::repo_tools::REPO_CODE_ADAPTIVE_JOBS_V1_CATALOG_DIGEST
     );
     b.shutdown();
 }
@@ -14018,7 +14019,7 @@ fn s7_a614_with_the_real_adaptive_engine_stays_under_the_sealed_budget_and_the_g
         // the exact request: the adaptive catalog (with the real tool), the task message, valid pairs
         assert_eq!(
             em04c1_wire_digest(body),
-            nexus_model::repo_tools::REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST
+            nexus_model::repo_tools::REPO_CODE_ADAPTIVE_JOBS_V1_CATALOG_DIGEST
         );
         assert!(tool_names(body).contains(&SIGNALS_TOOL.to_owned()));
         assert!(em04a_pairs_intact(body));
