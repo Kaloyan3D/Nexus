@@ -36,6 +36,10 @@ import type {
   JournalResult,
   LiveBlockers,
   JobView,
+  JobLogs,
+  EnvCheck,
+  ExecEffects,
+  RestorePreview,
   MockEvent,
   MockResult,
   ModelCatalog,
@@ -100,14 +104,34 @@ export interface NativeApi {
   /** Native folder picker, then open the folder as a project. No path crosses this API. */
   projectPick(): Promise<ProjectOpenReply>;
   projectList(withChanges?: boolean): Promise<ProjectListReply>;
-  jobList(): Promise<{ jobs: JobView[] }>;
+  /** Background jobs (dev servers); `projectId` limits the list to one project's. */
+  jobList(projectId?: string | null): Promise<{ jobs: JobView[] }>;
   jobStop(jobId: string): Promise<JobView>;
+  /** Release 1: the bounded, redacted output of a job. */
+  jobLogs(jobId: string): Promise<JobLogs>;
+  /** Release 1: open a running preview in the default browser. The address comes from the broker, never from here. */
+  previewOpen(jobId: string, port: number): Promise<string>;
+  /** Release 1: what this computer offers the application (dialog tool, browser, toolchains). */
+  environmentCheck(): Promise<EnvCheck>;
+  /** Release 1: allow Nexus to edit this project and run commands in it (native confirmations). */
+  projectAllowWork(projectId: string): Promise<unknown>;
+  /** Release 1: allow local development previews on these ports (added to the active permissions; native confirmation). */
+  projectAllowPreviews(projectId: string, ports: number[]): Promise<unknown>;
+  projectRevokePreviews(projectId: string): Promise<unknown>;
+  /** Release 1: dependency downloads (network for install commands only) on or off, for a project that has permissions. */
+  projectAllowInstalls(projectId: string, allow: boolean): Promise<unknown>;
+  /** Release 1: what one command changed in the project folder. Read-only. */
+  commandEffects(executionId: string): Promise<ExecEffects>;
+  /** Release 1: what a guarded restore of that command's changes would do. Changes nothing. */
+  recoveryPreview(executionId: string): Promise<RestorePreview>;
+  /** Release 1: apply the restore the person reviewed (stale digests are refused; a native confirmation follows). */
+  recoveryApply(executionId: string, confirmDigest: string): Promise<{ restore: RestorePreview["restore"] }>;
   projectRefresh(projectId: string): Promise<ProjectOpenReply>;
   projectSetPolicy(projectId: string, policy: { installs?: boolean; trusted?: boolean }): Promise<unknown>;
   /** Where NEW tasks of a project edit (direct = its real folder). Choosing direct is confirmed natively. */
   projectSetEditMode(projectId: string, mode: WorkspaceMode): Promise<unknown>;
   /** Set the project's standing permissions. The native backend shows the exact consent text and needs the person's "yes". */
-  projectSetPermissions(projectId: string, grant: { fs: string; net: string; approval: string; expiresInSecs?: number | null; netPresets?: string[]; allowHosts?: string[]; allowLocalPorts?: number[] }): Promise<unknown>;
+  projectSetPermissions(projectId: string, grant: { fs: string; net: string; approval: string; expiresInSecs?: number | null; netPresets?: string[]; allowHosts?: string[]; allowLocalPorts?: number[]; devPorts?: number[] }): Promise<unknown>;
   /** Revoke (`clear` false) or remove (`clear` true) the project's standing permissions after a native confirmation. */
   projectEndPermissions(projectId: string, clear: boolean): Promise<unknown>;
   projectForget(projectId: string): Promise<{ forgotten: string }>;
@@ -210,12 +234,22 @@ export const tauriApi: NativeApi = {
   providerRevoke: () => invoke<RuntimeState["consent"]>("provider_revoke"),
   projectPick: () => invoke<ProjectOpenReply>("project_pick"),
   projectList: (withChanges) => invoke<ProjectListReply>("project_list", { withChanges: withChanges ?? false }),
-  jobList: () => invoke<{ jobs: JobView[] }>("job_list"),
+  jobList: (projectId) => invoke<{ jobs: JobView[] }>("job_list", { projectId: projectId ?? null }),
   jobStop: (jobId) => invoke<JobView>("job_stop", { jobId }),
+  jobLogs: (jobId) => invoke<JobLogs>("job_logs", { jobId }),
+  previewOpen: (jobId, port) => invoke<string>("preview_open", { jobId, port }),
+  environmentCheck: () => invoke<EnvCheck>("environment_check"),
+  projectAllowWork: (projectId) => invoke<unknown>("project_allow_work", { projectId }),
+  projectAllowPreviews: (projectId, ports) => invoke<unknown>("project_allow_previews", { projectId, ports }),
+  projectRevokePreviews: (projectId) => invoke<unknown>("project_revoke_previews", { projectId }),
+  projectAllowInstalls: (projectId, allow) => invoke<unknown>("project_allow_installs", { projectId, allow }),
+  commandEffects: (executionId) => invoke<ExecEffects>("exec_effects", { executionId }),
+  recoveryPreview: (executionId) => invoke<RestorePreview>("exec_restore_preview", { executionId }),
+  recoveryApply: (executionId, confirmDigest) => invoke<{ restore: RestorePreview["restore"] }>("exec_restore_apply", { executionId, confirmDigest }),
   projectRefresh: (projectId) => invoke<ProjectOpenReply>("project_refresh", { projectId }),
   projectSetPolicy: (projectId, policy) => invoke<unknown>("project_set_policy", { projectId, installs: policy.installs ?? null, trusted: policy.trusted ?? null }),
   projectSetEditMode: (projectId, mode) => invoke<unknown>("project_set_edit_mode", { projectId, mode }),
-  projectSetPermissions: (projectId, g) => invoke<unknown>("project_set_grant", { projectId, fs: g.fs, net: g.net, approval: g.approval, expiresInSecs: g.expiresInSecs ?? null, netPresets: g.netPresets ?? null, allowHosts: g.allowHosts ?? null, allowLocalPorts: g.allowLocalPorts ?? null }),
+  projectSetPermissions: (projectId, g) => invoke<unknown>("project_set_grant", { projectId, fs: g.fs, net: g.net, approval: g.approval, expiresInSecs: g.expiresInSecs ?? null, netPresets: g.netPresets ?? null, allowHosts: g.allowHosts ?? null, allowLocalPorts: g.allowLocalPorts ?? null, devPorts: g.devPorts ?? null }),
   projectEndPermissions: (projectId, clear) => invoke<unknown>("project_end_grant", { projectId, clear }),
   projectForget: (projectId) => invoke<{ forgotten: string }>("project_forget", { projectId }),
   projectAdopt: (runId) => invoke<{ applied: string[] }>("project_adopt", { runId }),
@@ -317,6 +351,16 @@ export const unavailableApi: NativeApi = {
   projectList: () => Promise.resolve({ projects: [] } as ProjectListReply),
   jobList: () => Promise.resolve({ jobs: [] }),
   jobStop: () => Promise.reject(notInShell),
+  jobLogs: () => Promise.reject(notInShell),
+  previewOpen: () => Promise.reject(notInShell),
+  environmentCheck: () => Promise.reject(notInShell),
+  projectAllowWork: () => Promise.reject(notInShell),
+  projectAllowPreviews: () => Promise.reject(notInShell),
+  projectRevokePreviews: () => Promise.reject(notInShell),
+  projectAllowInstalls: () => Promise.reject(notInShell),
+  commandEffects: () => Promise.reject(notInShell),
+  recoveryPreview: () => Promise.reject(notInShell),
+  recoveryApply: () => Promise.reject(notInShell),
   projectRefresh: () => Promise.reject(notInShell),
   projectSetPolicy: () => Promise.reject(notInShell),
   projectSetEditMode: () => Promise.reject(notInShell),

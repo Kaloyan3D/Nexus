@@ -500,7 +500,7 @@ describe("Evidence panel (A6.1.2)", () => {
     const lines = Array.from(viewer.querySelectorAll("[data-diff]")).map((n) => [n.getAttribute("data-diff"), n.textContent]);
     expect(lines).toContainEqual(["del", "-    a - b"]);
     expect(lines).toContainEqual(["add", "+    a + b"]);
-    expect(within(panel).getByText(/Your repository is unchanged/)).toBeInTheDocument();
+    expect(within(panel).getByText(/Your folder is unchanged until you apply these changes/)).toBeInTheDocument();
     expect(intentDiff).toHaveBeenCalledWith(run.runId);
     await user.click(within(panel).getByRole("button", { name: "Close panel" }));
     expect(screen.queryByRole("dialog", { name: "Evidence panel" })).not.toBeInTheDocument();

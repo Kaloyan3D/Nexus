@@ -597,6 +597,12 @@ export interface ProjectGrantView {
   netPolicy?: { hosts: { host: string; ports: number[] }[]; local_ports?: number[] };
   /** `auto`: inside the grant, no prompt. `ask`: every operation waits for the independent approver. */
   approval: "ask" | "auto";
+  /** Development-server ports (inside the sandbox) the owner allows to be shown on this computer. */
+  devPorts?: number[];
+  /** Recovery policy and Git choice: shown, kept when permissions are edited, never offered as controls. */
+  checkpoint?: "off" | "best-effort" | "required";
+  hardLinks?: "protect" | "allow";
+  gitWrite?: boolean;
   expiresAtMs: number | null;
   createdAtMs: number;
   createdBy: string;
@@ -607,6 +613,8 @@ export interface ProjectGrantView {
 
 export interface JobView {
   jobId: string;
+  /** The project the job runs in (absent on records from before Release 1). */
+  projectId?: string;
   state: string;
   command: string;
   task: string;
@@ -692,6 +700,8 @@ export interface ToolActivity {
   exitCode?: number | null;
   /** `pass` | `fail` for a command. */
   verification?: string | null;
+  /** `job_start` only: the development-server ports the model asked to show. A request, never an authorization. */
+  requestedPorts?: number[] | null;
 }
 
 /** An operator-approved read-only workspace, by identity only (never a path). */
@@ -1133,4 +1143,76 @@ export interface ThreadSendInput {
   model?: ModelSelection | null;
   /** Phase 2: the engine for a NEW conversation (ignored for an existing one, which keeps its own). */
   engine?: EngineKind | null;
+}
+
+/** Release 1: the bounded, redacted output of a background job. */
+export interface JobLogs {
+  jobId: string;
+  logs: string;
+}
+
+/** Release 1: what this computer offers the application (first-run guidance; read-only). */
+export interface EnvCheck {
+  platform: string;
+  dialogTool: string | null;
+  opener: string | null;
+  /** [program, found] */
+  toolchains: [string, boolean][];
+}
+
+/** One path in a recovery report. */
+export interface RestoreItem {
+  path: string;
+  detail: string;
+}
+
+/** What a guarded restore would do (or did). Preview changes nothing. */
+export interface RestoreReport {
+  executionId: string;
+  dryRun: boolean;
+  /** `refused` | `completed` | `partial` | `nothing-restored` */
+  outcome: string;
+  refused: string | null;
+  checkpointStatus?: string | null;
+  restored: RestoreItem[];
+  skipped: RestoreItem[];
+  conflicted: RestoreItem[];
+  unrecoverable: RestoreItem[];
+  recordListsTruncated: boolean;
+  note: string;
+}
+
+export interface RestorePreview {
+  restore: RestoreReport;
+  /** Binds a later apply to exactly this preview. */
+  confirmDigest: string;
+}
+
+/** A category of changed paths: the exact count, and as many paths as were recorded. */
+export interface PathList {
+  count: number;
+  paths: string[];
+  truncated: boolean;
+}
+
+/** What one in-place command changed, trimmed for display. */
+export interface ExecEffects {
+  effects: {
+    executionId: string;
+    /** `observed` | `partial` | `uncertain` */
+    outcome: string;
+    outcomeReasons: string[];
+    fsScope: string;
+    startedMs: number;
+    endedMs: number;
+    process: { exited: boolean; how: string; exitCode: number | null; settled: boolean };
+    effects: {
+      created: PathList;
+      modified: PathList;
+      deleted: PathList;
+      listsMayBeIncomplete: boolean;
+    };
+    recoverability?: { complete: boolean; available: number; unavailable: number; newPaths: number; bulkNotCaptured: number };
+    note: string;
+  };
 }

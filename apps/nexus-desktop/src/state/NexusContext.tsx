@@ -163,8 +163,21 @@ export interface NexusState {
   forgetProject: (projectId: string) => Promise<void>;
   setProjectPolicy: (projectId: string, policy: { installs?: boolean; trusted?: boolean }) => Promise<void>;
   setProjectEditMode: (projectId: string, mode: WorkspaceMode) => Promise<void>;
-  setProjectPermissions: (projectId: string, grant: { fs: string; net: string; approval: string; expiresInSecs?: number | null; netPresets?: string[]; allowHosts?: string[]; allowLocalPorts?: number[] }) => Promise<void>;
+  setProjectPermissions: (projectId: string, grant: { fs: string; net: string; approval: string; expiresInSecs?: number | null; netPresets?: string[]; allowHosts?: string[]; allowLocalPorts?: number[]; devPorts?: number[] }) => Promise<void>;
   endProjectPermissions: (projectId: string, clear: boolean) => Promise<void>;
+  /**
+   * Release 1: the plain-language project actions. Each asks the NATIVE backend, which shows the broker's
+   * exact consent text in a system dialog; nothing changes without a "yes" there. They resolve to true when
+   * the change was made; a declined dialog is false with no error.
+   */
+  allowProjectWork: (projectId: string) => Promise<boolean>;
+  allowProjectPreviews: (projectId: string, ports: number[]) => Promise<boolean>;
+  revokeProjectPreviews: (projectId: string) => Promise<boolean>;
+  allowProjectInstalls: (projectId: string, allow: boolean) => Promise<boolean>;
+  /** Which of those is in flight (`<action>:<projectId>`), and the last one's error. */
+  accessBusy: string | null;
+  accessError: UiError | null;
+  clearAccessError: () => void;
 }
 
 function newIdempotencyKey(): string {
@@ -661,6 +674,53 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
   );
   const forgetProject = useCallback(async (id: string) => void (await guarded("project", () => nativeApi.projectForget(id))), [guarded, nativeApi]);
 
+  // ---- Release 1: plain-language project access --------------------------------------------------
+  const [accessBusy, setAccessBusy] = useState<string | null>(null);
+  const [accessError, setAccessError] = useState<UiError | null>(null);
+  const clearAccessError = useCallback(() => setAccessError(null), []);
+  const access = useCallback(
+    async (key: string, f: () => Promise<unknown>): Promise<boolean> => {
+      setAccessBusy(key);
+      setAccessError(null);
+      try {
+        await f();
+        return true;
+      } catch (e) {
+        const u = asUiError(e);
+        // declining the native dialog is not an error
+        if (u.code !== "cancelled" && u.message !== "cancelled") setAccessError(u);
+        return false;
+      } finally {
+        setAccessBusy(null);
+        await refreshProjects(false);
+        setReloadTick((n) => n + 1);
+      }
+    },
+    [refreshProjects],
+  );
+  const allowProjectWork = useCallback((id: string) => access(`work:${id}`, () => nativeApi.projectAllowWork(id)), [access, nativeApi]);
+  const allowProjectPreviews = useCallback((id: string, ports: number[]) => access(`previews:${id}`, () => nativeApi.projectAllowPreviews(id, ports)), [access, nativeApi]);
+  const revokeProjectPreviews = useCallback((id: string) => access(`previews:${id}`, () => nativeApi.projectRevokePreviews(id)), [access, nativeApi]);
+  const projectsRef = useRef<ProjectView[]>([]);
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
+  // Dependency downloads: permissions the project already has are amended; a folder Nexus edits directly first
+  // gets the permissions it needs (its own native confirmation); a copy keeps the older per-project switch.
+  const allowProjectInstalls = useCallback(
+    (id: string, allow: boolean) =>
+      access(`installs:${id}`, async () => {
+        const p = projectsRef.current.find((x) => x.projectId === id);
+        if (p?.grant?.status === "active") return nativeApi.projectAllowInstalls(id, allow);
+        if (allow && p?.workspaceMode === "direct") {
+          await nativeApi.projectAllowWork(id);
+          return nativeApi.projectAllowInstalls(id, true);
+        }
+        return nativeApi.projectSetPolicy(id, { installs: allow });
+      }),
+    [access, nativeApi],
+  );
+
   // ---- A7.1 conversations -----------------------------------------------------------
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   // Reopening the app returns to the conversation the user was in (only when no route was given).
@@ -881,6 +941,13 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     setProjectEditMode,
     setProjectPermissions,
     endProjectPermissions,
+    allowProjectWork,
+    allowProjectPreviews,
+    revokeProjectPreviews,
+    allowProjectInstalls,
+    accessBusy,
+    accessError,
+    clearAccessError,
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

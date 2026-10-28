@@ -1404,3 +1404,51 @@
 .nv-table--targets .nv-table__row {
   grid-template-columns: repeat(10, minmax(0, 1fr));
 }
+
+/* ---------- Release 1: project access, previews, permission requests, recovery ---------- */
+.nv-projects { display: flex; flex-direction: column; gap: var(--nv-s-4); }
+.nv-project { border: 1px solid var(--nv-border); border-radius: var(--nv-radius-lg); background: var(--nv-surface); padding: var(--nv-s-4); display: flex; flex-direction: column; gap: var(--nv-s-3); }
+.nv-project__head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--nv-s-2); }
+.nv-project__name { margin: 0; font-size: var(--nv-text-lg); font-weight: 600; }
+.nv-project__snap { margin: 0; }
+.nv-project__advanced { border-top: 1px solid var(--nv-border-subtle); padding-top: var(--nv-s-2); }
+
+.nv-access { display: flex; flex-direction: column; gap: var(--nv-s-2); }
+.nv-access__summary { margin: 0; }
+.nv-access__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.nv-access__row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--nv-s-3); padding: var(--nv-s-2) 0; border-top: 1px solid var(--nv-border-subtle); }
+.nv-access__row:first-child { border-top: none; }
+.nv-access__main { min-width: 0; }
+.nv-access__title { font-size: var(--nv-text-base); font-weight: 500; display: flex; flex-wrap: wrap; align-items: center; gap: var(--nv-s-2); }
+.nv-access__why { margin: 2px 0 0; max-width: 62ch; }
+.nv-access__act { display: flex; flex-shrink: 0; gap: var(--nv-s-1); flex-wrap: wrap; justify-content: flex-end; }
+.nv-access__ports { border: 1px solid var(--nv-border-subtle); border-radius: var(--nv-radius); padding: var(--nv-s-3); display: flex; flex-direction: column; gap: var(--nv-s-2); }
+.nv-access__ports .nv-note { margin: 0; }
+.nv-access__choices { display: flex; flex-wrap: wrap; align-items: center; gap: var(--nv-s-3); }
+.nv-access__custom { width: 90px; }
+.nv-terms__toggle { display: inline-flex; align-items: center; gap: 4px; }
+
+.nv-previews { display: flex; flex-direction: column; gap: var(--nv-s-2); }
+.nv-previews__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--nv-s-2); }
+.nv-preview { border: 1px solid var(--nv-border-subtle); border-radius: var(--nv-radius); padding: var(--nv-s-3); display: flex; flex-direction: column; gap: var(--nv-s-2); background: var(--nv-surface-elevated); }
+.nv-preview__head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--nv-s-2); }
+.nv-preview__cmd { font-family: var(--nv-font-mono); font-size: var(--nv-text-sm); overflow-wrap: anywhere; }
+.nv-preview__when { margin: 0; margin-left: auto; }
+.nv-preview__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--nv-s-2); }
+.nv-preview__url { font-family: var(--nv-font-mono); font-size: var(--nv-text-sm); color: var(--nv-text-secondary); }
+.nv-preview__log { max-height: 240px; overflow: auto; margin: 0; }
+.nv-preview .nv-note { margin: 0; }
+
+.nv-needs { display: flex; flex-direction: column; gap: var(--nv-s-2); }
+.nv-needs__card { border: 1px solid var(--nv-purple-border); background: var(--nv-purple-tint); border-radius: var(--nv-radius); padding: var(--nv-s-3); display: flex; flex-direction: column; gap: var(--nv-s-2); }
+.nv-needs__head { display: flex; align-items: center; gap: var(--nv-s-2); }
+.nv-needs__card .nv-note { margin: 0; }
+.nv-needs__act { display: flex; flex-wrap: wrap; gap: var(--nv-s-2); }
+
+.nv-recovery { display: flex; flex-direction: column; gap: var(--nv-s-2); border-top: 1px solid var(--nv-border-subtle); padding-top: var(--nv-s-3); }
+.nv-recovery .nv-note { margin: 0; }
+.nv-recovery__cmd { display: flex; flex-direction: column; gap: var(--nv-s-2); }
+.nv-recovery__paths { margin: 0; padding-left: var(--nv-s-4); font-size: var(--nv-text-sm); }
+.nv-recovery__review { border: 1px solid var(--nv-border-subtle); border-radius: var(--nv-radius); padding: var(--nv-s-3); display: flex; flex-direction: column; gap: var(--nv-s-2); }
+
+.nv-envnotes { display: flex; flex-direction: column; gap: var(--nv-s-2); margin: var(--nv-s-3) 0; }

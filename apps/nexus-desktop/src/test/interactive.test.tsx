@@ -60,7 +60,12 @@ describe("First-run setup (A6.1.4)", () => {
       state = rt();
       return state.consent;
     });
-    const api = fakeApi({ runtimeState: async () => state, providerConnect, providerConsent });
+    let opened = false;
+    const projectPick = vi.fn(async () => {
+      opened = true;
+      return { project: project(), created: true, snapshot: { files: 1, bytes: 1, skippedTotal: 0, skipped: [] } };
+    });
+    const api = fakeApi({ runtimeState: async () => state, providerConnect, providerConsent, projectPick, projectList: async () => ({ projects: opened ? [project()] : [] }), intentCodeSources: async () => (opened ? sources : []), intentCodeLimits: async () => limits });
     const user = userEvent.setup();
     mount(api);
     expect(await screen.findByText("Starting Nexus…")).toBeInTheDocument();
@@ -75,7 +80,46 @@ describe("First-run setup (A6.1.4)", () => {
     const allow = await screen.findByRole("button", { name: /Review and allow…/ }, { timeout: 5000 });
     await user.click(allow);
     expect(providerConsent).toHaveBeenCalledTimes(1);
+    // the engine is ready (fixture) and the last step is a project: still no composer
+    const open = await screen.findByRole("button", { name: /Open project…/ }, { timeout: 5000 });
+    expect(screen.queryByLabelText("Task prompt")).not.toBeInTheDocument();
+    await user.click(open);
+    expect(projectPick).toHaveBeenCalledTimes(1);
+    expect(projectPick.mock.calls[0]).toHaveLength(0); // the page names no folder
     expect(await screen.findByLabelText("Task prompt", {}, { timeout: 5000 })).toBeInTheDocument();
+  });
+
+  it("Nexus Adaptive is prepared during setup (a billable check behind a native confirmation), not left for Settings", async () => {
+    let ready = false;
+    const adaptiveSetup = vi.fn(async () => {
+      ready = true;
+      return { verified: true, checks: [] };
+    });
+    const api = fakeApi({
+      runtimeState: async () => rt(),
+      engineChoice: async () => ({ preferred: "adaptive" as const, adaptiveAvailable: ready, adaptiveReason: ready ? null : "Adaptive has not been verified with your provider yet.", adaptiveModel: "m", adaptiveRoute: "r", effective: ready ? ("adaptive" as const) : null }),
+      adaptiveSetup,
+      projectList: async () => ({ projects: [project()] }),
+    });
+    const user = userEvent.setup();
+    mount(api);
+    const set = await screen.findByRole("button", { name: /Set up Nexus Adaptive…/ });
+    expect(screen.getByText(/eight small requests that count against your OpenCode Go plan/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Task prompt")).not.toBeInTheDocument();
+    await user.click(set);
+    expect(adaptiveSetup).toHaveBeenCalledTimes(1);
+    expect(await screen.findByLabelText("Task prompt", {}, { timeout: 5000 })).toBeInTheDocument();
+  });
+
+  it("a computer without a system dialog tool is told exactly what to install", async () => {
+    const api = fakeApi({
+      runtimeState: async () => rt({ providerConnected: false }),
+      environmentCheck: async () => ({ platform: "linux", dialogTool: null, opener: "xdg-open", toolchains: [["node", true]] as [string, boolean][] }),
+    });
+    mount(api);
+    const alert = await screen.findByText("Nexus cannot show its permission dialogs");
+    expect(alert.closest(".nv-alert")).toHaveTextContent(/zenity/);
+    expect(alert.closest(".nv-alert")).toHaveTextContent(/restart Nexus/);
   });
 
   it("a startup failure is explained and retryable; a dismissed dialog is not an error", async () => {
@@ -122,16 +166,18 @@ describe("Run on a project without ceremony (A6.1.4)", () => {
     const user = userEvent.setup();
     mount(api({ threadSend: submit as NativeApi["threadSend"] }));
     const run = await screen.findByRole("button", { name: "Run" });
-    expect(screen.getByRole("radio", { name: "Work on project" })).toBeChecked();
+    // no model, route, request-mode or engine pickers: a project, a task and what Nexus may do
+    expect(screen.queryByRole("radio", { name: "Work on project" })).not.toBeInTheDocument();
     expect(screen.queryByRole("radio", { name: "Inspect" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Acknowledge disclosure")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Prompt fingerprint")).not.toBeInTheDocument();
     expect(screen.queryByText(/sha256/i)).not.toBeInTheDocument();
     expect(run).toBeDisabled(); // nothing typed
     await user.type(screen.getByLabelText("Task prompt"), "fix the failing tests");
     await waitFor(() => expect(run).toBeEnabled());
-    const terms = screen.getByLabelText("Autonomous run");
-    expect(within(terms).getByText(/isolated copy/)).toBeInTheDocument();
+    const terms = screen.getByLabelText("What Nexus may do here");
+    expect(within(terms).getByText(/Nexus works on a copy and you apply its changes/)).toBeInTheDocument();
     expect(within(terms).getByText(/60 model turns, 60 edits and 40 test runs/)).toBeInTheDocument();
     await user.click(run);
     await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
@@ -172,7 +218,7 @@ describe("Projects page and evidence (A6.1.4)", () => {
     }));
     const user = userEvent.setup();
     mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectRefresh: refresh, projectForget: forget }), "#/projects");
-    const table = await screen.findByRole("table", { name: "Opened projects" });
+    const table = await screen.findByRole("region", { name: "Opened projects" });
     expect(within(table).getByText("Rust (Cargo)")).toBeInTheDocument();
     expect(within(table).getByText(/Go · edit only/)).toBeInTheDocument();
     expect(within(table).getByText(/folder changed since/)).toBeInTheDocument();
@@ -191,18 +237,17 @@ describe("Projects page and evidence (A6.1.4)", () => {
     }));
     const user = userEvent.setup();
     mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetEditMode: setWs }), "#/projects");
-    const table = await screen.findByRole("table", { name: "Opened projects" });
-    const direct = within(table).getByRole("combobox", { name: "Workspace for tinycsv" }) as HTMLSelectElement;
-    const iso = within(table).getByRole("combobox", { name: "Workspace for svc" }) as HTMLSelectElement;
-    expect(direct.value).toBe("direct");
-    expect(iso.value).toBe("isolated");
-    expect(within(table).getByText("edits your files")).toBeInTheDocument();
-    // "apply automatically" belongs to isolated copies only
-    expect(within(table).queryByLabelText("Apply finished work to tinycsv automatically")).not.toBeInTheDocument();
-    expect(within(table).getByLabelText("Apply finished work to svc automatically")).toBeInTheDocument();
-    await user.selectOptions(iso, "direct");
+    const region = await screen.findByRole("region", { name: "Opened projects" });
+    const tiny = within(within(region).getByRole("article", { name: "Project tinycsv" }));
+    const svc = within(within(region).getByRole("article", { name: "Project svc" }));
+    expect(tiny.getByText("in your folder")).toBeInTheDocument();
+    expect(svc.getByText("on a copy")).toBeInTheDocument();
+    // "apply automatically" belongs to isolated copies only, and lives under Advanced
+    expect(tiny.queryByLabelText("Apply finished work to tinycsv automatically")).not.toBeInTheDocument();
+    expect(svc.getByLabelText("Apply finished work to svc automatically")).toBeInTheDocument();
+    await user.click(svc.getByRole("button", { name: "Let Nexus edit svc directly" }));
     expect(setWs).toHaveBeenCalledWith("svc-aaaaaa", "direct");
-    await user.selectOptions(direct, "isolated");
+    await user.click(tiny.getByRole("button", { name: "Work on a copy of tinycsv instead" }));
     expect(setWs).toHaveBeenCalledWith("tinycsv-6c94b7", "isolated");
   });
 
@@ -220,10 +265,10 @@ describe("Projects page and evidence (A6.1.4)", () => {
     }));
     const user = userEvent.setup();
     mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetPermissions: setGrant, projectEndPermissions: endGrant }), "#/projects");
-    const table = await screen.findByRole("table", { name: "Opened projects" });
+    const table = await screen.findByRole("region", { name: "Opened projects" });
     expect(within(table).getByText("In-place commands · installs online · automatic")).toBeInTheDocument();
     expect(within(table).getByText("Default permissions")).toBeInTheDocument();
-    expect(within(table).getByText(/revoked$/)).toBeInTheDocument();
+    expect(within(table).getAllByText(/revoked$/).length).toBeGreaterThan(0);
     // a project without a grant: choose and apply; only the three choices and a lifetime are sent
     await user.click(within(table).getByRole("button", { name: "Permissions for svc" }));
     const grp = within(table).getByRole("group", { name: "Permissions for svc" });
@@ -251,7 +296,7 @@ describe("Projects page and evidence (A6.1.4)", () => {
     }));
     const user = userEvent.setup();
     mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetPermissions: setPerm }), "#/projects");
-    const table = await screen.findByRole("table", { name: "Opened projects" });
+    const table = await screen.findByRole("region", { name: "Opened projects" });
     await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
     const ask = within(table).getByRole("option", { name: /Asks me first/ }) as HTMLOptionElement;
     expect(ask.disabled).toBe(true);
@@ -266,7 +311,7 @@ describe("Projects page and evidence (A6.1.4)", () => {
     const list = vi.fn(async () => ({ projects: [project()], permissions: support() }));
     const user = userEvent.setup();
     mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetPermissions: setPerm }), "#/projects");
-    const table = await screen.findByRole("table", { name: "Opened projects" });
+    const table = await screen.findByRole("region", { name: "Opened projects" });
     await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
     expect((within(table).getByRole("option", { name: /Asks me first/ }) as HTMLOptionElement).disabled).toBe(false);
     expect(within(table).queryByRole("note", { name: /Why Ask is unavailable/ })).not.toBeInTheDocument();
@@ -280,7 +325,7 @@ describe("Projects page and evidence (A6.1.4)", () => {
     const list = vi.fn(async () => ({ projects: [project({ workspaceMode: "direct" })], permissions: support({ inPlaceAvailable: true, controlledAvailable: true }) }));
     const user = userEvent.setup();
     mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetPermissions: setPerm }), "#/projects");
-    const table = await screen.findByRole("table", { name: "Opened projects" });
+    const table = await screen.findByRole("region", { name: "Opened projects" });
     await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
     await user.selectOptions(within(table).getByLabelText("Command filesystem scope for tinycsv"), "workspace");
     await user.selectOptions(within(table).getByLabelText("Network scope for tinycsv"), "controlled");
@@ -296,7 +341,7 @@ describe("Projects page and evidence (A6.1.4)", () => {
     const list = vi.fn(async () => ({ projects: [project()], permissions: support({ inPlaceAvailable: true, controlledAvailable: false, controlledReason: "the network gatekeeper `nexus-egress` was not found next to nexusd" }) }));
     const user = userEvent.setup();
     mount(fakeApi({ runtimeState: async () => rt(), projectList: list }), "#/projects");
-    const table = await screen.findByRole("table", { name: "Opened projects" });
+    const table = await screen.findByRole("region", { name: "Opened projects" });
     await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
     const opt = within(table).getByRole("option", { name: /Only the internet destinations I list/ }) as HTMLOptionElement;
     expect(opt.disabled).toBe(true);
@@ -308,13 +353,13 @@ describe("Projects page and evidence (A6.1.4)", () => {
     const list = vi.fn(async () => ({ projects: [project()], permissions: support({ known: false, standingGrants: false, askAvailable: false, askReason: "the Nexus runtime could not be asked just now" }) }));
     const user = userEvent.setup();
     mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetPermissions: setPerm }), "#/projects");
-    const table = await screen.findByRole("table", { name: "Opened projects" });
+    const table = await screen.findByRole("region", { name: "Opened projects" });
     await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
     expect(within(table).getByRole("button", { name: "Apply…" })).toBeDisabled();
     expect(within(table).getByRole("note", { name: /Why Ask is unavailable/ })).toHaveTextContent(/could not be asked just now/);
   });
 
-  it("the installs setting says which control governs it: the old checkbox without permissions, the Network setting with them", async () => {
+  it("dependency downloads read from whichever setting governs them: the old switch without permissions, the permissions' network setting with them", async () => {
     const grant = { grantId: "grt_a", version: 1, digest: "d".repeat(64), fs: "scratch" as const, net: "install" as const, approval: "auto" as const, expiresAtMs: null, createdAtMs: 1, createdBy: "cli:uid:1", status: "active" as const, revokedAtMs: null, history: [] };
     const list = vi.fn(async () => ({
       projects: [
@@ -326,25 +371,27 @@ describe("Projects page and evidence (A6.1.4)", () => {
       permissions: support(),
     }));
     const setPolicy = vi.fn(async () => ({}));
+    const user = userEvent.setup();
     mount(fakeApi({ runtimeState: async () => rt(), projectList: list, projectSetPolicy: setPolicy }), "#/projects");
-    const table = await screen.findByRole("table", { name: "Opened projects" });
-    // legacy: the checkbox, unchanged
-    expect(within(table).getByLabelText("Allow dependency installs for legacy")).toBeChecked();
-    // with permissions: no checkbox, the sentence names the controlling setting
-    for (const name of ["withnet", "offline", "revoked"]) {
-      expect(within(table).queryByLabelText(`Allow dependency installs for ${name}`)).not.toBeInTheDocument();
-    }
-    expect(within(table).getByText("installs: allowed by Permissions")).toBeInTheDocument();
-    expect(within(table).getByText("installs: not allowed by Permissions")).toBeInTheDocument();
-    expect(within(table).getByText("installs: stopped (permissions revoked)")).toBeInTheDocument();
+    const region = await screen.findByRole("region", { name: "Opened projects" });
+    const row = (name: string) => within(within(region).getByRole("article", { name: `Project ${name}` })).getByText("Download dependencies").closest("li") as HTMLElement;
+    expect(within(row("legacy")).getByText("on")).toBeInTheDocument();
+    expect(within(row("withnet")).getByText("on")).toBeInTheDocument();
+    expect(within(row("offline")).getByText("off")).toBeInTheDocument();
+    // permissions that ended allow nothing, and the page says they ended
+    expect(within(row("revoked")).getByText("off")).toBeInTheDocument();
+    expect(within(within(region).getByRole("article", { name: "Project revoked" })).getByText(/permissions were revoked/)).toBeInTheDocument();
     expect(setPolicy).not.toHaveBeenCalled();
+    // a copy without permissions keeps the older per-project switch (the native backend confirms turning it on)
+    await user.click(within(row("legacy")).getByRole("button", { name: "Turn off dependency downloads for legacy" }));
+    expect(setPolicy).toHaveBeenCalledWith("legacy-a", { installs: false });
   });
 
   it("a project that edits its real folder can choose in-place commands, labelled as changing the real files", async () => {
     const list = vi.fn(async () => ({ projects: [project({ workspaceMode: "direct" })], permissions: { ...support(), inPlaceAvailable: true, inPlaceReason: null } }));
     const user = userEvent.setup();
     mount(fakeApi({ runtimeState: async () => rt(), projectList: list }), "#/projects");
-    const table = await screen.findByRole("table", { name: "Opened projects" });
+    const table = await screen.findByRole("region", { name: "Opened projects" });
     await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
     const opt = within(table).getByRole("option", { name: /Commands change my real project files directly/ }) as HTMLOptionElement;
     expect(opt.disabled).toBe(false);
@@ -357,7 +404,7 @@ describe("Projects page and evidence (A6.1.4)", () => {
     }));
     const user = userEvent.setup();
     mount(fakeApi({ runtimeState: async () => rt(), projectList: list }), "#/projects");
-    const table = await screen.findByRole("table", { name: "Opened projects" });
+    const table = await screen.findByRole("region", { name: "Opened projects" });
     await user.click(within(table).getByRole("button", { name: "Permissions for tinycsv" }));
     const opt = within(table).getByRole("option", { name: /Commands change my real project files directly/ }) as HTMLOptionElement;
     expect(opt.disabled).toBe(true);

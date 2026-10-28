@@ -6,8 +6,8 @@ import type { Page, Selection } from "../state/NexusContext";
  * #/history, #/models, #/sentry, #/settings, #/advanced/{tasks|control-room|mock}.
  * Only identities appear in a route - never a path, credential or approval.
  */
-const PRIMARY: Page[] = ["workspace", "projects", "history", "models", "sentry", "settings"];
-const ADVANCED: Page[] = ["tasks", "control-room", "mock"];
+const PRIMARY: Page[] = ["workspace", "projects", "history", "models", "settings"];
+const ADVANCED: Page[] = ["tasks", "control-room", "mock", "sentry"];
 const CONV = /^model_[0-9a-f]{32}$/;
 const THREAD = /^thr_[0-9a-f]{32}$/;
 
