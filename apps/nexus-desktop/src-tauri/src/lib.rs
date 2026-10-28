@@ -651,12 +651,17 @@ async fn project_list(with_changes: Option<bool>) -> Result<serde_json::Value, U
     .map_err(|_| internal())?
 }
 
-/// M7D: background jobs (dev servers, watchers) — status and stop, nothing privileged.
+/// M7D: background jobs (dev servers, watchers) - status, logs and stop; nothing privileged.
+/// `project_id` limits the list to one project's jobs.
 #[tauri::command]
-async fn job_list() -> Result<serde_json::Value, UiError> {
+async fn job_list(project_id: Option<String>) -> Result<serde_json::Value, UiError> {
     tauri::async_runtime::spawn_blocking(move || {
-        nexus_client::intent_client::job_list(&nexus_client::intent_client::default_broker_socket())
-            .map_err(|e| backend::ui_error(&e))
+        let sock = nexus_client::intent_client::default_broker_socket();
+        match project_id.as_deref() {
+            Some(p) => nexus_client::intent_client::job_list_for(&sock, p),
+            None => nexus_client::intent_client::job_list(&sock),
+        }
+        .map_err(|e| backend::ui_error(&e))
     })
     .await
     .map_err(|_| internal())?
@@ -673,6 +678,87 @@ async fn job_stop(job_id: String) -> Result<serde_json::Value, UiError> {
     })
     .await
     .map_err(|_| internal())?
+}
+
+/// Release 1: the bounded, redacted output of a background job (read-only).
+#[tauri::command]
+async fn job_logs(job_id: String) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::job_logs(
+            &nexus_client::intent_client::default_broker_socket(),
+            &job_id,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// Release 1: open a running job's preview in the default browser. The renderer names a job and the
+/// sandbox port; the address comes from the broker's own job record, so no address can be injected.
+#[tauri::command]
+async fn preview_open(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+    job_id: String,
+    port: u16,
+) -> Result<String, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || rt.preview_open(d.as_ref(), &job_id, port))
+        .await
+        .map_err(|_| internal())?
+        .map_err(|m| ui_msg("preview", m))
+}
+
+/// Release 1: what this computer offers the application (dialog tool, browser opener, toolchains).
+#[tauri::command]
+fn environment_check() -> interactive::EnvCheck {
+    interactive::environment_check()
+}
+
+/// Release 1: what one command changed in the project folder, and what could be recovered. Read-only.
+#[tauri::command]
+async fn exec_effects(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    execution_id: String,
+) -> Result<serde_json::Value, UiError> {
+    let rt = rt.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || rt.exec_effects_view(&execution_id))
+        .await
+        .map_err(|_| internal())?
+        .map_err(|m| ui_msg("recovery", m))
+}
+
+/// Release 1: preview of a guarded restore. Changes nothing; carries the digest that binds a later apply.
+#[tauri::command]
+async fn exec_restore_preview(execution_id: String) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::exec_restore_preview(
+            &nexus_client::intent_client::default_broker_socket(),
+            &execution_id,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// Release 1: apply a restore after a NATIVE confirmation of its exact outcome. The renderer supplies only
+/// the digest of the preview it showed; a stale digest is refused.
+#[tauri::command]
+async fn exec_restore_apply(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+    execution_id: String,
+    confirm_digest: String,
+) -> Result<serde_json::Value, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        rt.restore_apply(d.as_ref(), &execution_id, &confirm_digest)
+    })
+    .await
+    .map_err(|_| internal())?
+    .map_err(|m| ui_msg("recovery", m))
 }
 
 /// Settings: the user's own, lower run limits. Everything is optional; leaving a field out
@@ -694,21 +780,19 @@ async fn code_limits_set(
 
 #[tauri::command]
 async fn project_set_policy(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
     project_id: String,
     installs: Option<bool>,
     trusted: Option<bool>,
 ) -> Result<serde_json::Value, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
     tauri::async_runtime::spawn_blocking(move || {
-        nexus_client::intent_client::project_policy(
-            &nexus_client::intent_client::default_broker_socket(),
-            &project_id,
-            installs,
-            trusted,
-        )
-        .map_err(|e| backend::ui_error(&e))
+        rt.project_set_policy(d.as_ref(), &project_id, installs, trusted)
     })
     .await
     .map_err(|_| internal())?
+    .map_err(|m| ui_msg("project", m))
 }
 
 #[tauri::command]
@@ -770,6 +854,7 @@ async fn project_set_grant(
     net_presets: Option<Vec<String>>,
     allow_hosts: Option<Vec<String>>,
     allow_local_ports: Option<Vec<u16>>,
+    dev_ports: Option<Vec<u16>>,
 ) -> Result<serde_json::Value, UiError> {
     let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
     // Destinations are the owner's choice made in this panel and shown in the consent dialog; the broker
@@ -778,12 +863,13 @@ async fn project_set_grant(
         presets: net_presets.unwrap_or_default(),
         hosts: allow_hosts.unwrap_or_default(),
         local_ports: allow_local_ports.unwrap_or_default(),
-        // the Desktop panel does not offer Git writes yet (CLI: --git-write); never implied
+        // Git writes are never offered by the Desktop (CLI: --git-write); an existing active choice is
+        // kept by `project_set_grant_keeping`, a new one is never implied
         git_write: false,
         dev_ports: vec![],
     };
     tauri::async_runtime::spawn_blocking(move || {
-        rt.project_set_grant(
+        rt.project_set_grant_keeping(
             d.as_ref(),
             &project_id,
             &fs,
@@ -791,6 +877,7 @@ async fn project_set_grant(
             &approval,
             expires_in_secs,
             &dest,
+            dev_ports,
         )
     })
     .await
@@ -809,6 +896,70 @@ async fn project_end_grant(
     let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
     tauri::async_runtime::spawn_blocking(move || {
         rt.project_end_grant(d.as_ref(), &project_id, clear)
+    })
+    .await
+    .map_err(|_| internal())?
+    .map_err(|m| ui_msg("project", m))
+}
+
+/// "Allow Nexus to edit this project": Direct workspace + confined in-place commands, each confirmed natively.
+#[tauri::command]
+async fn project_allow_work(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+    project_id: String,
+) -> Result<serde_json::Value, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || rt.project_allow_work(d.as_ref(), &project_id))
+        .await
+        .map_err(|_| internal())?
+        .map_err(|m| ui_msg("project", m))
+}
+
+/// "Allow local development previews" on these ports (added to the active permissions; native confirmation).
+#[tauri::command]
+async fn project_allow_previews(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+    project_id: String,
+    ports: Vec<u16>,
+) -> Result<serde_json::Value, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        rt.project_allow_previews(d.as_ref(), &project_id, &ports)
+    })
+    .await
+    .map_err(|_| internal())?
+    .map_err(|m| ui_msg("project", m))
+}
+
+/// Stop allowing previews (narrowing; the result is shown in a native dialog).
+#[tauri::command]
+async fn project_revoke_previews(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+    project_id: String,
+) -> Result<serde_json::Value, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        rt.project_revoke_previews(d.as_ref(), &project_id)
+    })
+    .await
+    .map_err(|_| internal())?
+    .map_err(|m| ui_msg("project", m))
+}
+
+/// "Allow dependency downloads" on a project that has standing permissions.
+#[tauri::command]
+async fn project_allow_installs(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+    project_id: String,
+    allow: bool,
+) -> Result<serde_json::Value, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        rt.project_allow_installs(d.as_ref(), &project_id, allow)
     })
     .await
     .map_err(|_| internal())?
@@ -1235,6 +1386,16 @@ pub fn run() {
             code_limits_set,
             project_forget,
             project_adopt,
+            project_allow_work,
+            project_allow_previews,
+            project_revoke_previews,
+            project_allow_installs,
+            job_logs,
+            preview_open,
+            environment_check,
+            exec_effects,
+            exec_restore_preview,
+            exec_restore_apply,
             thread_list,
             thread_get,
             thread_send,
@@ -1302,6 +1463,16 @@ mod authz_tests {
         "code_limits_set",
         "project_forget",
         "project_adopt",
+        "project_allow_work",
+        "project_allow_previews",
+        "project_revoke_previews",
+        "project_allow_installs",
+        "job_logs",
+        "preview_open",
+        "environment_check",
+        "exec_effects",
+        "exec_restore_preview",
+        "exec_restore_apply",
         "thread_list",
         "thread_get",
         "thread_send",

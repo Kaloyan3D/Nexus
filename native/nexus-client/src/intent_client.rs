@@ -281,6 +281,11 @@ pub struct ToolActivity {
     /// (lock files excepted) that were NOT saved to the project. Absent when there were none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsaved_files: Option<u32>,
+    /// Release 1: for a `job_start`, the development-server ports the model asked to expose (plain
+    /// port numbers; a request, never an authorization). Lets the Desktop offer the owner a
+    /// scoped "allow previews on this port" action. Absent for every other tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_ports: Option<Vec<u16>>,
 }
 
 /// An operation waiting for an independent human approval (A5.6). The
@@ -1506,4 +1511,14 @@ pub fn job_stop(socket: &Path, job_id: &str) -> Result<serde_json::Value, Client
 
 pub fn job_list(socket: &Path) -> Result<serde_json::Value, ClientError> {
     call(socket, "job-list", serde_json::json!({}), 15_000)
+}
+
+/// The background jobs of one project only.
+pub fn job_list_for(socket: &Path, project_id: &str) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "job-list",
+        serde_json::json!({ "projectId": project_id }),
+        15_000,
+    )
 }

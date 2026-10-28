@@ -1478,7 +1478,7 @@ impl Broker {
             "job-status" => crate::jobs::job_status(&mgr, params),
             "job-logs" => crate::jobs::job_logs(&mgr, params),
             "job-stop" => crate::jobs::job_stop(&mgr, params),
-            _ => crate::jobs::job_list(&mgr),
+            _ => crate::jobs::job_list(&mgr, params),
         }
     }
 

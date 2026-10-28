@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-revoke-previews"
+description = "Enables the project_revoke_previews command without any pre-configured scope."
+commands.allow = ["project_revoke_previews"]
+
+[[permission]]
+identifier = "deny-project-revoke-previews"
+description = "Denies the project_revoke_previews command without any pre-configured scope."
+commands.deny = ["project_revoke_previews"]

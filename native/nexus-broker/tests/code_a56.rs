@@ -20592,6 +20592,30 @@ fn aj_adaptive_runs_signals_and_the_full_job_lifecycle_on_a_real_server() {
         "{:?}",
         run.tool_activity
     );
+    // Release 1: the run record says WHAT was asked and WHY it was refused, so the Desktop can offer the
+    // owner a scoped "allow previews on this port" action (a request, never an authorization).
+    let refused = run
+        .tool_activity
+        .iter()
+        .find(|a| a.tool == "job_start" && a.status == "refused")
+        .expect("the unauthorized start is in the run record");
+    assert_eq!(
+        refused.error_code.as_deref(),
+        Some("dev-port-not-authorized"),
+        "{refused:?}"
+    );
+    assert_eq!(refused.requested_ports, Some(vec![9999]), "{refused:?}");
+    assert_eq!(
+        refused.args_summary, "node server.js · preview port 9999",
+        "{refused:?}"
+    );
+    let started = run
+        .tool_activity
+        .iter()
+        .find(|a| a.tool == "job_start" && a.status == "executed")
+        .expect("the authorized start");
+    assert_eq!(started.requested_ports, Some(vec![4321]), "{started:?}");
+    assert_eq!(started.error_code, None);
     let jobs = ic::job_list(&sock).expect("job list");
     assert!(
         jobs["jobs"]

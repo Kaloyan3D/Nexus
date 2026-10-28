@@ -205,7 +205,7 @@ fn m7d_broker_job_lifecycle_revocation_and_restart_honesty() {
     let mgr2 = Arc::new(JobManager::open(&fx.state.join("jobs")).unwrap());
     let st = jobs::job_status(&mgr2, &json!({"jobId": job2_id})).unwrap();
     assert_ne!(st["state"], "running", "{st}");
-    let list = jobs::job_list(&mgr2).unwrap();
+    let list = jobs::job_list(&mgr2, &json!({})).unwrap();
     assert!(
         list["jobs"]
             .as_array()
@@ -214,6 +214,19 @@ fn m7d_broker_job_lifecycle_revocation_and_restart_honesty() {
             .all(|j| j["state"] != "running"),
         "{list}"
     );
+    // Release 1: a job belongs to its project, and that survives the owner (the record is on disk),
+    // so the Desktop can show each project's previews and never another project's.
+    let mine = jobs::job_list(&mgr2, &json!({"projectId": pid})).unwrap();
+    assert!(
+        mine["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|j| j["jobId"] == job2_id.as_str() && j["projectId"] == pid.as_str()),
+        "{mine}"
+    );
+    let other = jobs::job_list(&mgr2, &json!({"projectId": "some-other-project"})).unwrap();
+    assert!(other["jobs"].as_array().unwrap().is_empty(), "{other}");
     // keep fixture dirs alive to the end
     let _ = &fx.proj;
     drop(fx);

@@ -1942,12 +1942,21 @@ fn job_call(
     args: &Value,
 ) -> Rendered {
     act.tool = name.to_owned();
+    // Release 1: a readable, redaction-safe record of WHAT was asked (the run record only; the text the
+    // model sees is unchanged) so the Desktop can say "preview on port N" instead of "N bytes".
+    if name == "job_start" {
+        let (summary, ports) = job_start_summary(args);
+        act.args_summary = summary;
+        act.requested_ports = ports;
+    }
     if let Err((code, message)) = crate::jobs::validate_tool_call(name, args) {
         act.status = "refused".into();
+        act.error_code = Some(code.to_owned());
         return render_error(name, code, &message);
     }
     let Some(env) = ctx.b.cfg.registry_env() else {
         act.status = "refused".into();
+        act.error_code = Some("not-available".into());
         return render_error(
             name,
             "not-available",
@@ -1958,6 +1967,7 @@ fn job_call(
         Ok(m) => m,
         Err((code, message)) => {
             act.status = "refused".into();
+            act.error_code = Some(code.to_owned());
             return render_error(name, code, &message);
         }
     };
@@ -2002,9 +2012,70 @@ fn job_call(
         }
         Err((code, message)) => {
             act.status = "refused".into();
+            // The model-visible rendering keeps the original code; the run record gets the finer one.
+            act.error_code = Some(job_refusal_code(code, &message).to_owned());
             render_error(name, code, &message)
         }
     }
+}
+
+/// Run-record classification of a refused job operation. `command-refused` is shared by several causes;
+/// an unauthorized development port is the one the owner can fix from the Desktop, so it gets its own
+/// code. Only the run record changes - never the text the model is shown.
+pub(crate) fn job_refusal_code(code: &'static str, message: &str) -> &'static str {
+    if code == "command-refused" && message.starts_with("development port ") {
+        "dev-port-not-authorized"
+    } else {
+        code
+    }
+}
+
+/// `program arg arg · preview port N` (bounded, printable) and the requested ports, from a `job_start`
+/// proposal. Best effort on malformed input: validation reports the real problem.
+fn job_start_summary(args: &Value) -> (String, Option<Vec<u16>>) {
+    let clean = |s: &str, n: usize| -> String {
+        s.chars()
+            .filter(|c| !c.is_control())
+            .take(n)
+            .collect::<String>()
+    };
+    let program = clean(args.get("program").and_then(|v| v.as_str()).unwrap_or(""), 60);
+    let argv = args
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .take(8)
+                .map(|s| clean(s, 40))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    let ports: Vec<u16> = args
+        .get("exposePorts")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_u64().and_then(|n| u16::try_from(n).ok()))
+                .filter(|p| *p > 0)
+                .take(32)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut text = format!("{program} {argv}").trim().to_owned();
+    if !ports.is_empty() {
+        text.push_str(&format!(
+            " · preview port{} {}",
+            if ports.len() == 1 { "" } else { "s" },
+            ports
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    (text, (!ports.is_empty()).then_some(ports))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4556,5 +4627,37 @@ mod tests {
         }
         // the task message is never touched
         assert!(matches!(&items[0], InputItem::Message { content, .. } if content == "task"));
+    }
+    #[test]
+    fn rel1_job_start_records_a_readable_summary_and_the_requested_ports() {
+        let (text, ports) = job_start_summary(&serde_json::json!({
+            "program": "npm", "args": ["run", "dev"], "cwd": ".", "exposePorts": [5173, 0, 70000]
+        }));
+        assert_eq!(text, "npm run dev · preview port 5173");
+        assert_eq!(ports, Some(vec![5173]));
+        // no ports: no suffix, no field
+        let (text, ports) = job_start_summary(&serde_json::json!({"program": "node", "args": ["server.js"], "exposePorts": []}));
+        assert_eq!(text, "node server.js");
+        assert_eq!(ports, None);
+        // control characters never reach the record
+        let (text, _) = job_start_summary(&serde_json::json!({"program": "no\u{1b}de", "args": ["a\nb"]}));
+        assert!(!text.chars().any(|c| c.is_control()), "{text:?}");
+        // malformed input does not panic
+        let (text, ports) = job_start_summary(&serde_json::json!("nope"));
+        assert_eq!((text.as_str(), ports), ("", None));
+    }
+
+    #[test]
+    fn rel1_only_the_unauthorized_port_refusal_gets_its_own_run_record_code() {
+        let port_msg = "development port 4321 is not authorized for this project (grant devPorts: []); Nexus will not expose it";
+        assert_eq!(
+            job_refusal_code("command-refused", port_msg),
+            "dev-port-not-authorized"
+        );
+        assert_eq!(
+            job_refusal_code("command-refused", "program not allowed"),
+            "command-refused"
+        );
+        assert_eq!(job_refusal_code("no-grant", port_msg), "no-grant");
     }
 }
