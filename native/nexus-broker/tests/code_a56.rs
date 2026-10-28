@@ -20604,6 +20604,200 @@ fn aj_adaptive_runs_signals_and_the_full_job_lifecycle_on_a_real_server() {
     b.shutdown();
 }
 
+/// Real acceptance (user-requested): the Adaptive model itself creates a
+/// Node stdlib app, starts it with the native job tools, the host verifies
+/// both versions over the actual bridge, and the job is stopped.
+#[test]
+fn aj2_adaptive_builds_and_runs_a_real_node_web_app() {
+    if !sandbox_ready() {
+        return;
+    }
+    let evidence = Arc::new(Mutex::new(Vec::<String>::new()));
+    let ev = evidence.clone();
+    let fetch = |url: &str| -> String {
+        let addr = url.trim_start_matches("http://");
+        let Ok(mut s) = std::net::TcpStream::connect(addr) else {
+            return "<connect-failed>".into();
+        };
+        use std::io::{Read, Write};
+        let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let _ = s.write_all(b"GET / HTTP/1.0\r\n\r\n");
+        let mut buf = String::new();
+        let _ = s.read_to_string(&mut buf);
+        buf
+    };
+    let job_of = |ev: &Arc<Mutex<Vec<String>>>| -> String {
+        let e = ev.lock().unwrap();
+        e.iter()
+            .find(|l| l.starts_with("started job="))
+            .map(|l| {
+                l.trim_start_matches("started job=")
+                    .split(' ')
+                    .next()
+                    .unwrap_or("")
+                    .to_owned()
+            })
+            .unwrap_or_default()
+    };
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let out = m71_last_output(body);
+        let call = |id: &str, name: &str, args: &str| {
+            Answer::Frames(call_frames(&resp, n, id, name, args))
+        };
+        match tool_calls_done(body) {
+            0 => call(
+                "b0",
+                "fs_write",
+                r##"{"path":"server.js","mode":"create","content":"const http=require('http'),fs=require('fs');http.createServer((q,r)=>{if(q.url==='/'||q.url==='/index.html'){r.writeHead(200,{'content-type':'text/html'});r.end(fs.readFileSync('index.html'));}else{r.writeHead(404);r.end('not found');}}).listen(4321,'0.0.0.0',()=>console.log('listening-4321'));\n"}"##,
+            ),
+            1 => call(
+                "b1",
+                "fs_write",
+                r##"{"path":"index.html","mode":"create","content":"<!doctype html><html><body><h1>Version 1</h1></body></html>\n"}"##,
+            ),
+            2 => call(
+                "b2",
+                "fs_write",
+                r##"{"path":"README.md","mode":"create","content":"# Nexus Jobs Acceptance\n\nNode.js standard-library web app. Run: node server.js (port 4321).\n"}"##,
+            ),
+            3 => call(
+                "b3",
+                "job_start",
+                r#"{"program":"node","args":["server.js"],"cwd":".","exposePorts":[4321]}"#,
+            ),
+            4 => {
+                let started: Value = serde_json::from_str(&out).unwrap_or_default();
+                let job = started["jobId"].as_str().unwrap_or("").to_owned();
+                let url = started["exposed"][0]["url"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned();
+                let got = fetch(&url);
+                ev.lock()
+                    .unwrap()
+                    .push(format!("started job={job} url={url} http1={got}"));
+                call("b4", "job_status", &json!({"jobId": job}).to_string())
+            }
+            5 => {
+                ev.lock().unwrap().push(format!("status: {out}"));
+                let job = job_of(&ev);
+                call("b5", "job_logs", &json!({"jobId": job}).to_string())
+            }
+            6 => {
+                ev.lock().unwrap().push(format!("logs: {out}"));
+                call(
+                    "b6",
+                    "fs_write",
+                    r##"{"path":"index.html","mode":"replace","content":"<!doctype html><html><body><h1>Version 2</h1></body></html>\n","expectedSha256":"dd09d93f623bfa363580e84f13136de552fd861e0980516f7a7b4424c388e503"}"##,
+                )
+            }
+            7 => {
+                ev.lock().unwrap().push(format!("edit: {out}"));
+                let (job, url) = {
+                    let e = ev.lock().unwrap();
+                    let l = e
+                        .iter()
+                        .find(|l| l.starts_with("started job="))
+                        .cloned()
+                        .unwrap_or_default();
+                    let job = l
+                        .trim_start_matches("started job=")
+                        .split(' ')
+                        .next()
+                        .unwrap_or("")
+                        .to_owned();
+                    let url = l
+                        .split("url=")
+                        .nth(1)
+                        .map(|u| u.split(' ').next().unwrap_or("").to_owned())
+                        .unwrap_or_default();
+                    (job, url)
+                };
+                let got = fetch(&url);
+                ev.lock().unwrap().push(format!("http2={got}"));
+                call("b7", "job_stop", &json!({"jobId": job}).to_string())
+            }
+            _ => {
+                ev.lock().unwrap().push(format!("stop/final-status: {out}"));
+                Answer::Frames(text_frames(
+                    &resp,
+                    "App created, served Version 1 and Version 2, and stopped.",
+                ))
+            }
+        }
+    });
+    let (fx, b, sock, pid, folder) = aj_env(responder, "aj2-webapp");
+    // the model creates the app itself: clear the fixture server files
+    let _ = std::fs::remove_file(folder.join("server.js"));
+    let _ = std::fs::remove_file(folder.join("msg.txt"));
+    let run = submit_wait(
+        &sock,
+        &aj_intent(
+            &pid,
+            "Create server.js, index.html and README.md for a Node stdlib web app, run it as a background job on port 4321, verify it, update index.html to Version 2, then stop it.",
+            "ajobs2-0001",
+        ),
+        300,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let rec = em02_record(&fx, "aj2-webapp", &run.run_id);
+    assert_eq!(
+        rec["toolCatalogDigest"],
+        nexus_model::repo_tools::REPO_CODE_ADAPTIVE_JOBS_V1_CATALOG_DIGEST,
+        "{rec}"
+    );
+    for name in ["server.js", "index.html", "README.md"] {
+        assert!(folder.join(name).exists(), "{name} missing");
+    }
+    assert!(std::fs::read_to_string(folder.join("index.html"))
+        .unwrap()
+        .contains("Version 2"));
+    let ev = evidence.lock().unwrap();
+    let all = ev.join("\n");
+    eprintln!("AJ2-EVIDENCE\n{all}");
+    assert!(all.contains("listening-4321"), "{all}");
+    assert!(all.contains("Version 1"), "{all}");
+    assert!(all.contains("Version 2"), "{all}");
+    // job id + bridge url were real, and the endpoint is down after job_stop
+    let started = ev
+        .iter()
+        .find(|l| l.starts_with("started job="))
+        .cloned()
+        .unwrap_or_default();
+    let url = started
+        .split("url=")
+        .nth(1)
+        .map(|u| u.split(' ').next().unwrap_or("").to_owned())
+        .unwrap_or_default();
+    assert!(url.starts_with("http://"), "{started}");
+    assert_eq!(
+        fetch(&url),
+        "<connect-failed>",
+        "bridge still serving: {url}"
+    );
+    let job_id = started
+        .trim_start_matches("started job=")
+        .split(' ')
+        .next()
+        .unwrap_or("")
+        .to_owned();
+    let final_status = ic::job_status(&sock, &job_id).expect("final job status");
+    eprintln!("AJ2-FINAL-STATUS {final_status}");
+    assert_ne!(final_status["state"], "running", "{final_status}");
+    let jobs = ic::job_list(&sock).expect("job list");
+    eprintln!("AJ2-JOBS {jobs}");
+    assert!(
+        jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|j| j["state"] != "running"),
+        "{jobs}"
+    );
+    b.shutdown();
+}
+
 #[test]
 fn aj_an_existing_conversation_keeps_its_signals_catalog() {
     if !sandbox_ready() {
