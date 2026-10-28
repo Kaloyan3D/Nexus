@@ -2002,6 +2002,12 @@ fn job_call(
                     ctx.b.note_job_owner(j, pid, ctx.run_id);
                 }
             }
+            // The Desktop-facing `projectId` (job records now carry it) is not part of what the model has
+            // always been shown: provider-visible tool results stay byte-identical to the frozen baselines.
+            let mut v = v;
+            if let Some(o) = v.as_object_mut() {
+                o.remove("projectId");
+            }
             let text = nexus_contracts::canonical_json(&v);
             Rendered {
                 digest: digest_of(&text),

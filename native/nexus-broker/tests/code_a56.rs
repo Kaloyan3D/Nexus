@@ -20569,6 +20569,11 @@ fn aj_adaptive_runs_signals_and_the_full_job_lifecycle_on_a_real_server() {
         all.contains("not authorized") || all.contains("devPorts"),
         "{all}"
     );
+    // Release 1: job records carry the project for the Desktop; the model was never shown it
+    assert!(
+        !all.contains("projectId"),
+        "a Desktop-only field leaked into provider-visible text"
+    );
     assert!(all.contains("listening-4321"), "{all}");
     assert!(all.contains("v1"), "{all}");
     assert!(all.contains("v2"), "{all}");
