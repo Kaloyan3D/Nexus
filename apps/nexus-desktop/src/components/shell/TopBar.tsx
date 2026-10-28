@@ -5,7 +5,7 @@ import { Badge, Button, Kbd, StatusDot, modKeys } from "../ui/primitives";
 
 /** One runtime pill instead of scattered health badges: the reasons are in its popover. */
 function RuntimePill() {
-  const { runtime, intentModelsError, intentModels, tasks } = useNexus();
+  const { runtime, intentModelsError, intentModels, tasks, runtimeState } = useNexus();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -21,6 +21,39 @@ function RuntimePill() {
       window.removeEventListener("keydown", onKey);
     };
   }, [open]);
+  // The application's own runtime (interactive profile): its state is what the person needs. The Controller
+  // ledger daemon and the model list belong to the operator view and say nothing about whether Nexus works.
+  if (runtimeState?.mode === "interactive") {
+    const phase = runtimeState.phase;
+    const tone = phase === "ready" ? "success" : phase === "error" ? "error" : "neutral";
+    const label = runtimeState.updatePending ? "ready · update waiting" : phase === "ready" ? "ready" : phase === "error" ? "could not start" : phase === "starting" ? "starting…" : "stopped";
+    return (
+      <div className="nv-runtime" ref={ref}>
+        <button type="button" className="nv-runtime__pill" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+          <StatusDot tone={tone} /> <span>Nexus {label}</span>
+        </button>
+        {open && (
+          <div className="nv-runtime__pop" role="dialog" aria-label="Nexus status">
+            <dl className="nv-kv">
+              <dt>Runtime</dt>
+              <dd>{phase === "ready" ? "running on this computer" : (runtimeState.message ?? phase)}</dd>
+              <dt>OpenCode Go</dt>
+              <dd>{runtimeState.providerConnected ? "connected" : "not connected yet"}</dd>
+              <dt>Autonomous work</dt>
+              <dd>{runtimeState.consent.given ? "allowed" : "not allowed yet"}</dd>
+              {runtimeState.node && (
+                <>
+                  <dt>Node.js</dt>
+                  <dd>{runtimeState.node.source === "bundled" ? `${runtimeState.node.version ?? ""} (bundled with Nexus)` : "from this computer"}</dd>
+                </>
+              )}
+            </dl>
+            <Badge tone="neutral">More under Settings</Badge>
+          </div>
+        )}
+      </div>
+    );
+  }
   const conn = runtime?.connection;
   const connected = conn === "connected";
   const brokerOk = intentModels !== null && !intentModelsError;

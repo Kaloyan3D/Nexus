@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { PIN, PROGRAMS, verifyTree } from './verify-package.mjs'
+import { BRIDGE_DATA, PIN, PROGRAMS, bridgeSelfTest, verifyTree } from './verify-package.mjs'
 
 const CONTROL = `Package: nexus
 Version: 0.1.0
@@ -40,6 +40,7 @@ function tree() {
   w(`${R}/config/registry/native-intent-bridge.cjs`, "const a = require('./service.cjs')\n")
   w(`${R}/config/registry/service.cjs`, '')
   w(`${R}/scripts/Setup-NativeOpenCodeGo.cjs`, "require(path.join(REPO, 'config', 'registry', 'service.cjs'))\n")
+  for (const f of BRIDGE_DATA) w(`${R}/${f}`, '{}')
   w(`${R}/scripts/Verify-NativeOpenCodeGoRoute.cjs`, "require(path.join(REPO, 'config', 'registry', 'service.cjs'))\n")
   for (const m of ['engineering-v1', 'engineering-v2', 'engineering-v2-jobs', 'engineering-v3', 'engineering-v2-adaptive']) w(`${R}/config/registry/modes/${m}.json`, '{}')
   w('usr/share/doc/nexus/THIRD-PARTY-NOTICES.md', `Node.js ${PIN.version}\nNode.js is licensed for use as follows:\n`)
@@ -70,6 +71,8 @@ test('every required asset, when removed, is reported by name', { skip: !isX86El
     ['usr/lib/Nexus/node/lib/node_modules/npm/package.json', 'npm/package.json'],
     ['usr/lib/Nexus/repo/config/registry/native-intent-bridge.cjs', 'native-intent-bridge.cjs'],
     ['usr/lib/Nexus/repo/config/registry/service.cjs', 'service.cjs'], // required BY the bridge and the scripts
+    ['usr/lib/Nexus/repo/config/model-registry.json', 'model-registry.json'], // READ by the bridge at run time
+    ['usr/lib/Nexus/repo/config/muse-profiles.json', 'muse-profiles.json'],
     ['usr/lib/Nexus/repo/scripts/Setup-NativeOpenCodeGo.cjs', 'Setup-NativeOpenCodeGo.cjs'],
     ['usr/lib/Nexus/repo/scripts/Verify-NativeOpenCodeGoRoute.cjs', 'Verify-NativeOpenCodeGoRoute.cjs'],
     ['usr/lib/Nexus/repo/config/registry/modes/engineering-v2-adaptive.json', 'engineering-v2-adaptive'],
@@ -105,4 +108,24 @@ test('the control file must declare the runtime needs and must not depend on a s
   assert.ok(run(d, CONTROL.replace('zenity | kdialog', 'zenity')).some((b) => b.includes('zenity | kdialog')))
   assert.ok(run(d, CONTROL.replace('util-linux', 'util-linux, nodejs (>= 18)')).some((b) => b.includes('system Node.js')))
   assert.ok(run(d, CONTROL.replace('amd64', 'arm64')).some((b) => b.includes('Architecture')))
+})
+
+// The self-test runs the REAL bridge from the repository with the host's Node: it passes with the shipped file
+// set and FAILS, naming the bridge, when a file the bridge reads at run time is missing.
+const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..')
+const nodeBin = process.execPath
+function stage(drop) {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'nxrepo-'))
+  fs.cpSync(path.join(repoRoot, 'config', 'registry'), path.join(d, 'config', 'registry'), { recursive: true })
+  for (const f of BRIDGE_DATA) if (f !== drop) { fs.mkdirSync(path.dirname(path.join(d, f)), { recursive: true }); fs.copyFileSync(path.join(repoRoot, f), path.join(d, f)) }
+  fs.mkdirSync(path.join(d, 'scripts'))
+  for (const s of ['Setup-NativeOpenCodeGo.cjs', 'Verify-NativeOpenCodeGoRoute.cjs']) fs.copyFileSync(path.join(repoRoot, 'scripts', s), path.join(d, 'scripts', s))
+  return d
+}
+test('the bridge self-test passes with the shipped file set', () => {
+  assert.deepEqual(bridgeSelfTest(stage(null), nodeBin), [])
+})
+test('the bridge self-test fails when a file the bridge reads at run time is missing', () => {
+  const bad = bridgeSelfTest(stage('config/model-registry.json'), nodeBin)
+  assert.ok(bad.length > 0 && bad.every((b) => b.startsWith('bridge self-test')), JSON.stringify(bad))
 })

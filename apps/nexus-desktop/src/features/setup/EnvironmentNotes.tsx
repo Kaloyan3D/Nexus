@@ -62,7 +62,8 @@ export function environmentFindings(env: EnvCheck | null, inPlace: { available: 
 }
 
 /** The facts about this computer that decide what Nexus can do, with what to do about each. Shown only when there is something to say. */
-export function EnvironmentNotes({ onlyBlocking = false }: { onlyBlocking?: boolean }) {
+/** `hideInfo`: leave out the purely informational findings (the first-run screen should show only what blocks or limits). */
+export function EnvironmentNotes({ onlyBlocking = false, hideInfo = false }: { onlyBlocking?: boolean; hideInfo?: boolean }) {
   const { api, permissionSupport, runtimeState } = useNexus();
   const [env, setEnv] = useState<EnvCheck | null>(null);
   useEffect(() => {
@@ -76,7 +77,7 @@ export function EnvironmentNotes({ onlyBlocking = false }: { onlyBlocking?: bool
     };
   }, [api]);
   const inPlace = permissionSupport?.known === true ? { available: permissionSupport.inPlaceAvailable, reason: permissionSupport.inPlaceReason } : { available: undefined, reason: undefined };
-  const findings = environmentFindings(env, inPlace, runtimeState?.node?.source === "bundled").filter((f) => !onlyBlocking || f.tone === "error");
+  const findings = environmentFindings(env, inPlace, runtimeState?.node?.source === "bundled").filter((f) => (!onlyBlocking || f.tone === "error") && (!hideInfo || f.tone !== "info"));
   if (findings.length === 0) return null;
   return (
     <section className="nv-envnotes" aria-label="About this computer">
