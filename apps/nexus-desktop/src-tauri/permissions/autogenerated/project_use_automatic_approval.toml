@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-use-automatic-approval"
+description = "Enables the project_use_automatic_approval command without any pre-configured scope."
+commands.allow = ["project_use_automatic_approval"]
+
+[[permission]]
+identifier = "deny-project-use-automatic-approval"
+description = "Denies the project_use_automatic_approval command without any pre-configured scope."
+commands.deny = ["project_use_automatic_approval"]

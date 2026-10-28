@@ -124,6 +124,119 @@ pub struct Tools {
     /// The network gatekeeper for Controlled Internet, from the same directory. Absent = Controlled Internet is
     /// reported unavailable by the daemon (never replaced by direct networking).
     pub egress: Option<PathBuf>,
+    /// Nexus's own Node.js (`<install>/node`), verified at start-up, when this is an installed build.
+    /// `None` in a development checkout (the Node on PATH is used there).
+    pub private_node_dir: Option<PathBuf>,
+    /// Which Node runs the Registry bridge, for diagnostics.
+    pub node_info: NodeInfo,
+}
+
+/// Which Node.js the runtime uses, and what it is.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeInfo {
+    /// `bundled` (shipped with Nexus, verified) | `system` (found on PATH; development layout only)
+    pub source: &'static str,
+    pub version: Option<String>,
+}
+
+/// Environment variable through which children learn where the verified private Node.js is
+/// (the same name `nexus_tools::process::PRIVATE_NODE_ENV`, pinned by a test).
+pub const PRIVATE_NODE_ENV: &str = "NEXUS_PRIVATE_NODE_DIR";
+
+/// `<install>/node/nexus-node.json`, written at packaging time.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeManifest {
+    schema_version: u32,
+    version: String,
+    arch: String,
+    node_sha256: String,
+}
+
+/// Verify the private Node.js next to an installed build. `Ok(None)` = this is not an installed build (no
+/// manifest). Anything wrong with an installed build's Node is an ERROR: there is no silent fallback to a
+/// Node found on PATH, because a bundled runtime that fails verification is a broken or tampered install.
+fn verify_private_node(bin_dir: &Path) -> Result<Option<(PathBuf, PathBuf, String)>, String> {
+    verify_private_node_with(bin_dir, SUPPORTED_NODE_PREFIX)
+}
+
+/// Release 1 ships Node.js 24 LTS and accepts nothing else as its private runtime.
+const SUPPORTED_NODE_PREFIX: &str = "v24.";
+
+fn verify_private_node_with(
+    bin_dir: &Path,
+    prefix: &str,
+) -> Result<Option<(PathBuf, PathBuf, String)>, String> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let Some(dir) = bin_dir.parent().map(|p| p.join("node")) else {
+        return Ok(None);
+    };
+    let manifest_path = dir.join("nexus-node.json");
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    let bad = |m: String| format!("the bundled Node.js failed verification: {m}; reinstall Nexus");
+    let m: NodeManifest = serde_json::from_slice(
+        &std::fs::read(&manifest_path)
+            .map_err(|e| bad(format!("cannot read its manifest: {e}")))?,
+    )
+    .map_err(|e| bad(format!("its manifest is unreadable: {e}")))?;
+    if m.schema_version != 1 || m.arch != "linux-x64" || !m.version.starts_with(prefix) {
+        return Err(bad(format!(
+            "unsupported manifest ({} {} schema {})",
+            m.version, m.arch, m.schema_version
+        )));
+    }
+    let node = dir.join("bin/node");
+    let md =
+        std::fs::symlink_metadata(&node).map_err(|e| bad(format!("bin/node is missing: {e}")))?;
+    let me = unsafe { libc::geteuid() };
+    if !md.is_file() || (md.uid() != 0 && md.uid() != me) || md.permissions().mode() & 0o022 != 0 {
+        return Err(bad(
+            "bin/node is not a regular file owned by root or you and closed to others".into(),
+        ));
+    }
+    let mut f = std::fs::File::open(&node).map_err(|e| bad(e.to_string()))?;
+    let mut head = [0u8; 20];
+    // a file shorter than an ELF header is simply "not an executable of this kind"
+    if f.read_exact(&mut head).is_err() {
+        return Err(bad("bin/node is not an x86-64 Linux executable".into()));
+    }
+    // ELF, 64-bit, little-endian, machine x86-64
+    if &head[..4] != b"\x7fELF"
+        || head[4] != 2
+        || head[5] != 1
+        || u16::from_le_bytes([head[18], head[19]]) != 0x3e
+    {
+        return Err(bad("bin/node is not an x86-64 Linux executable".into()));
+    }
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    let mut f = std::fs::File::open(&node).map_err(|e| bad(e.to_string()))?;
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| bad(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    if hex::encode(h.finalize()) != m.node_sha256.to_ascii_lowercase() {
+        return Err(bad("bin/node does not match its recorded digest".into()));
+    }
+    let out = Command::new(&node)
+        .arg("--version")
+        .env_clear()
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| bad(format!("it does not run: {e}")))?;
+    let got = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if !out.status.success() || got != m.version {
+        return Err(bad(format!("it reports {got:?}, expected {}", m.version)));
+    }
+    Ok(Some((dir, node, got)))
 }
 
 impl Tools {
@@ -171,7 +284,26 @@ impl Tools {
                     .find(|a| a.join(marker).is_file())
             })
             .ok_or("the Registry/Controller bridge was not found (set NEXUS_REPO_ROOT)")?;
-        let node = path_lookup("node").ok_or("node was not found on PATH")?;
+        // An installed build brings its own, verified Node.js and never looks at PATH; a development
+        // checkout (no manifest next to the programs) uses the Node on PATH.
+        let (node, private_node_dir, node_info) = match verify_private_node(&bin_dir)? {
+            Some((dir, node, version)) => (
+                node,
+                Some(dir),
+                NodeInfo {
+                    source: "bundled",
+                    version: Some(version),
+                },
+            ),
+            None => (
+                path_lookup("node").ok_or("node was not found on PATH")?,
+                None,
+                NodeInfo {
+                    source: "system",
+                    version: None,
+                },
+            ),
+        };
         Ok(Tools {
             nexusd: find("nexusd")?,
             broker: find("nexus-broker")?,
@@ -180,6 +312,8 @@ impl Tools {
             approver: find("nexus-approver").ok(),
             confine: find("nexus-confine").ok(),
             egress: find("nexus-egress").ok(),
+            private_node_dir,
+            node_info,
         })
     }
 }
@@ -404,6 +538,9 @@ fn start_daemon(home: &Home, tools: &Tools) -> Result<std::process::Child, Strin
     if let Some(e) = &tools.egress {
         d.env("NEXUS_EGRESS_BIN", e);
     }
+    if let Some(n) = &tools.private_node_dir {
+        d.env(PRIVATE_NODE_ENV, n);
+    }
     d.arg("--db")
         .arg(home.daemon_dir().join("k.db"))
         .arg("--socket")
@@ -509,6 +646,9 @@ pub fn start_if<F: FnOnce() -> Result<(), String>>(
     let dchild = start_daemon(home, tools)?;
     let mut dchild = dchild;
     let mut b = Command::new(&tools.broker);
+    if let Some(n) = &tools.private_node_dir {
+        b.env(PRIVATE_NODE_ENV, n);
+    }
     b.arg("--state-dir")
         .arg(home.broker_dir())
         .arg("--socket")
@@ -626,6 +766,18 @@ fn stop_inner(home: &Home) {
     for pid in [bp, dp].into_iter().flatten() {
         if pid_is_ours(pid, home) {
             unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+    }
+    // A process this one started stays a zombie until it is waited for: reap it, so a stopped runtime leaves
+    // nothing behind in the process table (ECHILD for a runtime started by someone else is expected and ignored).
+    for pid in [bp, dp].into_iter().flatten() {
+        for _ in 0..50 {
+            let mut st = 0;
+            let r = unsafe { libc::waitpid(pid as i32, &mut st, libc::WNOHANG) };
+            if r != 0 {
+                break; // reaped, or not our child
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
     let _ = std::fs::remove_file(home.state_file());
@@ -844,4 +996,147 @@ pub fn enable_adaptive(home: &Home, tools: &Tools) -> Result<ConnectReport, Stri
         verified: ok,
         checks,
     })
+}
+
+#[cfg(test)]
+mod node_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn host_node() -> Option<(PathBuf, String)> {
+        let p = path_lookup("node")?;
+        let v = String::from_utf8(Command::new(&p).arg("--version").output().ok()?.stdout).ok()?;
+        Some((p, v.trim().to_owned()))
+    }
+
+    /// `<tmp>/bin/` (the programs) and `<tmp>/node/` (a copy of the host's node, with a manifest).
+    fn install(
+        manifest: impl FnOnce(&str, &str) -> String,
+    ) -> Option<(tempfile::TempDir, PathBuf, String)> {
+        let (hn, ver) = host_node()?;
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("bin")).unwrap();
+        std::fs::create_dir_all(t.path().join("node/bin")).unwrap();
+        let dst = t.path().join("node/bin/node");
+        std::fs::copy(&hn, &dst).unwrap();
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sha = hex::encode(Sha256::digest(std::fs::read(&dst).unwrap()));
+        std::fs::write(t.path().join("node/nexus-node.json"), manifest(&ver, &sha)).unwrap();
+        let bin = t.path().join("bin");
+        Some((t, bin, ver))
+    }
+    fn good(ver: &str, sha: &str) -> String {
+        format!(
+            r#"{{"schemaVersion":1,"version":"{ver}","arch":"linux-x64","nodeSha256":"{sha}"}}"#
+        )
+    }
+
+    #[test]
+    fn a_development_layout_has_no_private_node_and_uses_path() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("bin")).unwrap();
+        assert!(verify_private_node(&t.path().join("bin"))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn a_genuine_private_node_is_accepted_and_reports_its_version() {
+        let Some((_t, bin, ver)) = install(good) else {
+            return;
+        };
+        let prefix = &ver[..4]; // "v26." etc: the host's major stands in for the pinned one
+        let (dir, node, got) = verify_private_node_with(&bin, prefix)
+            .unwrap()
+            .expect("installed layout");
+        assert_eq!(got, ver);
+        assert!(node.ends_with("node/bin/node") && dir.ends_with("node"));
+        // the production rule only accepts Node 24
+        if !ver.starts_with("v24.") {
+            assert!(verify_private_node(&bin)
+                .unwrap_err()
+                .contains("unsupported manifest"));
+        }
+    }
+
+    #[test]
+    fn a_tampered_wrong_or_untrusted_private_node_is_an_error_never_a_fallback() {
+        // wrong digest
+        let Some((_t, bin, ver)) = install(|v, _| good(v, &"0".repeat(64))) else {
+            return;
+        };
+        let p = &ver[..4];
+        assert!(verify_private_node_with(&bin, p)
+            .unwrap_err()
+            .contains("recorded digest"));
+        // the file changed after packaging
+        let Some((t, bin, ver)) = install(good) else {
+            return;
+        };
+        let mut b = std::fs::read(t.path().join("node/bin/node")).unwrap();
+        let n = b.len() - 1;
+        b[n] ^= 0xff;
+        std::fs::write(t.path().join("node/bin/node"), b).unwrap();
+        assert!(verify_private_node_with(&bin, &ver[..4])
+            .unwrap_err()
+            .contains("recorded digest"));
+        // not an ELF
+        let Some((t, bin, ver)) = install(good) else {
+            return;
+        };
+        let script = b"#!/bin/sh\necho v0\n".to_vec();
+        std::fs::write(t.path().join("node/bin/node"), &script).unwrap();
+        std::fs::write(
+            t.path().join("node/nexus-node.json"),
+            good(&ver, &hex::encode(Sha256::digest(&script))),
+        )
+        .unwrap();
+        assert!(verify_private_node_with(&bin, &ver[..4])
+            .unwrap_err()
+            .contains("x86-64 Linux executable"));
+        // writable by others
+        let Some((t, bin, ver)) = install(good) else {
+            return;
+        };
+        std::fs::set_permissions(
+            t.path().join("node/bin/node"),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        assert!(verify_private_node_with(&bin, &ver[..4])
+            .unwrap_err()
+            .contains("closed to others"));
+        // a version the manifest does not match / unsupported
+        let Some((_t, bin, ver)) = install(|_, s| good("v24.0.0", s)) else {
+            return;
+        };
+        assert!(
+            verify_private_node_with(&bin, "v24.")
+                .unwrap_err()
+                .contains("expected v24.0.0"),
+            "{ver}"
+        );
+        // another architecture
+        let Some((_t, bin, ver)) = install(|v, s| good(v, s).replace("linux-x64", "linux-arm64"))
+        else {
+            return;
+        };
+        assert!(verify_private_node_with(&bin, &ver[..4])
+            .unwrap_err()
+            .contains("unsupported manifest"));
+        // a missing binary
+        let Some((t, bin, ver)) = install(good) else {
+            return;
+        };
+        std::fs::remove_file(t.path().join("node/bin/node")).unwrap();
+        assert!(verify_private_node_with(&bin, &ver[..4])
+            .unwrap_err()
+            .contains("missing"));
+    }
+
+    #[test]
+    fn the_environment_variable_name_matches_the_toolchains() {
+        assert_eq!(PRIVATE_NODE_ENV, nexus_tools::process::PRIVATE_NODE_ENV);
+    }
 }

@@ -24,6 +24,7 @@ pub mod depcache;
 pub mod detect;
 pub mod devbridge;
 pub mod direct;
+pub mod edit_restore;
 pub mod egress;
 pub mod egress_host;
 pub mod events;

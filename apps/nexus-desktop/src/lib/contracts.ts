@@ -549,6 +549,8 @@ export interface RuntimeState {
   updatePending?: boolean;
   /** How to decide a pending operation of a project that asks: the trusted terminal approver, with this installation's real paths. */
   approverCommand?: string | null;
+  /** Which Node.js runs Nexus itself: `bundled` = shipped and verified with the application. */
+  node?: { source: "bundled" | "system"; version: string | null } | null;
 }
 
 export interface ProjectKindView {
@@ -1180,6 +1182,22 @@ export interface RestoreReport {
   unrecoverable: RestoreItem[];
   recordListsTruncated: boolean;
   note: string;
+}
+
+/** Restoring the files Nexus's edit tools wrote in the project folder (one run). Same shape, no command ledger. */
+export interface EditRestoreReport {
+  dryRun: boolean;
+  outcome: string;
+  refused: string | null;
+  restored: RestoreItem[];
+  skipped: RestoreItem[];
+  conflicted: RestoreItem[];
+  unrecoverable: RestoreItem[];
+  note: string;
+}
+export interface EditRestorePreview {
+  edits: EditRestoreReport;
+  confirmDigest: string;
 }
 
 export interface RestorePreview {

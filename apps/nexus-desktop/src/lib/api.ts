@@ -40,6 +40,8 @@ import type {
   EnvCheck,
   ExecEffects,
   RestorePreview,
+  EditRestorePreview,
+  EditRestoreReport,
   MockEvent,
   MockResult,
   ModelCatalog,
@@ -118,6 +120,8 @@ export interface NativeApi {
   /** Release 1: allow local development previews on these ports (added to the active permissions; native confirmation). */
   projectAllowPreviews(projectId: string, ports: number[]): Promise<unknown>;
   projectRevokePreviews(projectId: string): Promise<unknown>;
+  /** Release 1: a project that asks before every action (needs a terminal approver) is switched to automatic approval inside its permissions (native confirmation). */
+  projectUseAutomatic(projectId: string): Promise<unknown>;
   /** Release 1: dependency downloads (network for install commands only) on or off, for a project that has permissions. */
   projectAllowInstalls(projectId: string, allow: boolean): Promise<unknown>;
   /** Release 1: what one command changed in the project folder. Read-only. */
@@ -126,6 +130,10 @@ export interface NativeApi {
   recoveryPreview(executionId: string): Promise<RestorePreview>;
   /** Release 1: apply the restore the person reviewed (stale digests are refused; a native confirmation follows). */
   recoveryApply(executionId: string, confirmDigest: string): Promise<{ restore: RestorePreview["restore"] }>;
+  /** Release 1: what putting back the files Nexus's edit tools wrote in a finished run would do. Changes nothing. */
+  editsPreview(runId: string): Promise<EditRestorePreview>;
+  /** Apply the restore the person reviewed (a stale digest is refused; a native confirmation follows). */
+  editsApply(runId: string, confirmDigest: string): Promise<{ edits: EditRestoreReport }>;
   projectRefresh(projectId: string): Promise<ProjectOpenReply>;
   projectSetPolicy(projectId: string, policy: { installs?: boolean; trusted?: boolean }): Promise<unknown>;
   /** Where NEW tasks of a project edit (direct = its real folder). Choosing direct is confirmed natively. */
@@ -242,10 +250,13 @@ export const tauriApi: NativeApi = {
   projectAllowWork: (projectId) => invoke<unknown>("project_allow_work", { projectId }),
   projectAllowPreviews: (projectId, ports) => invoke<unknown>("project_allow_previews", { projectId, ports }),
   projectRevokePreviews: (projectId) => invoke<unknown>("project_revoke_previews", { projectId }),
+  projectUseAutomatic: (projectId) => invoke<unknown>("project_use_automatic_approval", { projectId }),
   projectAllowInstalls: (projectId, allow) => invoke<unknown>("project_allow_installs", { projectId, allow }),
   commandEffects: (executionId) => invoke<ExecEffects>("exec_effects", { executionId }),
   recoveryPreview: (executionId) => invoke<RestorePreview>("exec_restore_preview", { executionId }),
   recoveryApply: (executionId, confirmDigest) => invoke<{ restore: RestorePreview["restore"] }>("exec_restore_apply", { executionId, confirmDigest }),
+  editsPreview: (runId) => invoke<EditRestorePreview>("run_restore_preview", { runId }),
+  editsApply: (runId, confirmDigest) => invoke<{ edits: EditRestoreReport }>("run_restore_apply", { runId, confirmDigest }),
   projectRefresh: (projectId) => invoke<ProjectOpenReply>("project_refresh", { projectId }),
   projectSetPolicy: (projectId, policy) => invoke<unknown>("project_set_policy", { projectId, installs: policy.installs ?? null, trusted: policy.trusted ?? null }),
   projectSetEditMode: (projectId, mode) => invoke<unknown>("project_set_edit_mode", { projectId, mode }),
@@ -357,10 +368,13 @@ export const unavailableApi: NativeApi = {
   projectAllowWork: () => Promise.reject(notInShell),
   projectAllowPreviews: () => Promise.reject(notInShell),
   projectRevokePreviews: () => Promise.reject(notInShell),
+  projectUseAutomatic: () => Promise.reject(notInShell),
   projectAllowInstalls: () => Promise.reject(notInShell),
   commandEffects: () => Promise.reject(notInShell),
   recoveryPreview: () => Promise.reject(notInShell),
   recoveryApply: () => Promise.reject(notInShell),
+  editsPreview: () => Promise.reject(notInShell),
+  editsApply: () => Promise.reject(notInShell),
   projectRefresh: () => Promise.reject(notInShell),
   projectSetPolicy: () => Promise.reject(notInShell),
   projectSetEditMode: () => Promise.reject(notInShell),

@@ -76,7 +76,7 @@ fn the_native_backend_shows_the_brokers_text_and_only_a_yes_reaches_the_broker()
         "p",
         "workspace",
         "install",
-        "ask",
+        "auto",
         Some(3600),
         &Default::default(),
     );
@@ -101,7 +101,7 @@ fn the_native_backend_shows_the_brokers_text_and_only_a_yes_reaches_the_broker()
         "p",
         "workspace",
         "install",
-        "ask",
+        "auto",
         Some(3600),
         &Default::default(),
     )
@@ -116,7 +116,7 @@ fn the_native_backend_shows_the_brokers_text_and_only_a_yes_reaches_the_broker()
     assert_eq!(f["params"]["textSha256"], "f".repeat(64));
     assert_eq!(f["params"]["surface"], "desktop");
     assert_eq!(f["params"]["fs"], "workspace");
-    assert_eq!(f["params"]["approval"], "ask");
+    assert_eq!(f["params"]["approval"], "auto");
     assert_eq!(f["params"]["expiresInSecs"], 3600);
 
     // revoke / clear need the confirmation too

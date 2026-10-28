@@ -41,6 +41,17 @@ pub struct RuntimeState {
     /// with this installation's real paths (the credential file's PATH, never its content). Absent when
     /// the approver is not installed or the runtime is operator-run.
     pub approver_command: Option<String>,
+    /// Which Node.js runs Nexus itself (`bundled`: shipped and verified with the application).
+    pub node: Option<nexus_runtime::NodeInfo>,
+}
+
+/// See [`Runtime::guard`].
+pub struct ShutdownGuard<'a>(&'a Runtime);
+
+impl Drop for ShutdownGuard<'_> {
+    fn drop(&mut self) {
+        self.0.shutdown();
+    }
 }
 
 pub type ActivityProbe = Box<dyn Fn() -> Result<usize, String> + Send + Sync>;
@@ -343,6 +354,13 @@ impl Runtime {
         }
     }
 
+    /// A guard that stops what this process started when it goes out of scope. For tests and acceptance
+    /// runners: a runtime they start must never outlive them (a test that forgot used to leave a `nexusd`
+    /// and a broker running after the run). The application itself uses [`Runtime::shutdown`] on exit.
+    pub fn guard(&self) -> ShutdownGuard<'_> {
+        ShutdownGuard(self)
+    }
+
     fn sock(&self) -> std::path::PathBuf {
         ic::default_broker_socket()
     }
@@ -377,6 +395,7 @@ impl Runtime {
             },
             can_open_projects: false,
             update_pending: self.update_pending.load(Ordering::SeqCst),
+            node: self.tools.as_ref().ok().map(|t| t.node_info.clone()),
             approver_command: match (&self.home, &self.tools, self.external) {
                 (Some(h), Ok(t), false) => t.approver.as_ref().map(|bin| {
                     format!(
@@ -588,6 +607,12 @@ impl Runtime {
         id: &str,
         g: &GrantDraft,
     ) -> Result<serde_json::Value, String> {
+        // Release 1 has no way to answer a per-operation approval inside the application (the approver is a
+        // separate terminal program with its own credential), so it never CREATES one - refused before any
+        // dialog rather than offered as a control that would leave a task waiting for an answer nobody can give.
+        if g.approval == "ask" {
+            return Err(ASK_UNAVAILABLE.into());
+        }
         let sock = self.sock();
         let exec = Some((g.checkpoint.as_str(), g.hard_links.as_str()));
         let pv = ic::project_grant_preview_net(
@@ -763,6 +788,25 @@ impl Runtime {
         self.apply_draft(d, id, &draft)
     }
 
+    /// Switch a project that asks before every action to automatic approval inside its permissions (everything
+    /// else kept). This WIDENS autonomy, so it is the broker's exact text in a native dialog like any other change.
+    pub fn project_use_automatic_approval(
+        &self,
+        d: &dyn Dialogs,
+        id: &str,
+    ) -> Result<serde_json::Value, String> {
+        let (_, grant) = self.project_facts(id)?;
+        let Some(g) = grant else {
+            return Err("this project has no permissions".into());
+        };
+        let mut draft = GrantDraft::from_view(&g)?;
+        if draft.approval != "ask" {
+            return Err("nothing to change: approval is already automatic".into());
+        }
+        draft.approval = "auto".into();
+        self.apply_draft(d, id, &draft)
+    }
+
     /// "Allow Nexus to edit this project": the project edits its real folder (native confirmation) and its
     /// commands run there, confined (the broker's consent text, native confirmation). Network stays off,
     /// approval automatic inside the permissions, no end date unless the person already had one.
@@ -889,39 +933,50 @@ impl Runtime {
                     .into(),
             );
         }
-        let list = |k: &str| -> Vec<String> {
-            r[k].as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|i| i["path"].as_str().map(str::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        let part = |title: &str, k: &str| -> String {
-            let l = list(k);
-            if l.is_empty() {
-                return String::new();
-            }
-            let shown: Vec<String> = l.iter().take(15).map(|p| format!("  {p}")).collect();
-            let more = if l.len() > 15 {
-                format!("\n  … and {} more", l.len() - 15)
-            } else {
-                String::new()
-            };
-            format!("\n{title} ({}):\n{}{more}\n", l.len(), shown.join("\n"))
-        };
-        let text = format!(
-            "Put these files back the way they were before the command ran?\n{}{}{}{}\nFiles you or anything else changed afterwards are left exactly as they are. This is not atomic and cannot recover anything Nexus did not observe (changes outside the project folder, or in dependency folders).",
-            part("Will be restored", "restored"),
-            part("Left alone (already as they were)", "skipped"),
-            part("Left alone (changed since - in conflict)", "conflicted"),
-            part("Cannot be recovered", "unrecoverable"),
+        let text = restore_text(
+            "Put these files back the way they were before the command ran?",
+            "This is not atomic and cannot recover anything Nexus did not observe (changes outside the project folder, or in dependency folders).",
+            r,
         );
         if !d.confirm("Restore files changed by a command", &text)? {
             return Err("cancelled".into());
         }
         ic::exec_restore_apply(&sock, execution_id, digest, "desktop").map_err(|e| e.message)
+    }
+
+    /// Guarded restoration of the files Nexus's own edit tools wrote in the project folder during one run.
+    /// Same contract as [`Self::restore_apply`]: the renderer names a run and the digest of the preview it
+    /// showed; THIS process re-previews, refuses if the files moved since, shows the exact outcome in a native
+    /// dialog and only a "yes" applies it. A file you changed afterwards is never touched.
+    pub fn edits_restore_apply(
+        &self,
+        d: &dyn Dialogs,
+        run_id: &str,
+        reviewed_digest: &str,
+    ) -> Result<serde_json::Value, String> {
+        let sock = self.sock();
+        let pv = ic::direct_restore_preview(&sock, run_id).map_err(|e| e.message)?;
+        let r = &pv["edits"];
+        if let Some(why) = r["refused"].as_str() {
+            return Err(format!("refused: {why}"));
+        }
+        let digest = pv["confirmDigest"]
+            .as_str()
+            .ok_or("no confirmation digest")?;
+        if digest != reviewed_digest {
+            return Err(
+                "changed: the files changed since you reviewed this; review it again".into(),
+            );
+        }
+        let text = restore_text(
+            "Put the files Nexus changed back the way they were?",
+            "Files Nexus created are removed only if they are unchanged. This does not undo commands Nexus ran, changes outside the project folder, or anything in Git.",
+            r,
+        );
+        if !d.confirm("Restore changes", &text)? {
+            return Err("cancelled".into());
+        }
+        ic::direct_restore_apply(&sock, run_id, digest, "desktop").map_err(|e| e.message)
     }
 
     /// What one command changed, trimmed for display (no per-file hashes, no grant internals).
@@ -975,6 +1030,9 @@ impl Runtime {
         ic::project_forget(&self.sock(), id).map_err(|e| e.message)
     }
 }
+
+/// Why "Ask me first" cannot be chosen in Release 1 (shown by the page as the reason; refused natively).
+pub const ASK_UNAVAILABLE: &str = "not-available: asking before every action needs a separate terminal program and is not part of this release; permissions run automatically inside what you allow";
 
 /// A complete permission set to be previewed, confirmed and stored.
 #[derive(Debug, Clone)]
@@ -1090,8 +1148,39 @@ pub fn environment_check() -> EnvCheck {
     }
 }
 
+/// The native confirmation text of a restore: what will be put back, what is left alone and why.
+fn restore_text(intro: &str, limits: &str, r: &serde_json::Value) -> String {
+    let part = |title: &str, k: &str| -> String {
+        let l: Vec<String> = r[k]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|i| i["path"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if l.is_empty() {
+            return String::new();
+        }
+        let shown: Vec<String> = l.iter().take(15).map(|p| format!("  {p}")).collect();
+        let more = if l.len() > 15 {
+            format!("\n  … and {} more", l.len() - 15)
+        } else {
+            String::new()
+        };
+        format!("\n{title} ({}):\n{}{more}\n", l.len(), shown.join("\n"))
+    };
+    format!(
+        "{intro}\n{}{}{}{}\nFiles you or anything else changed afterwards are left exactly as they are. {limits}",
+        part("Will be restored", "restored"),
+        part("Left alone (already as they were)", "skipped"),
+        part("Left alone (changed since - in conflict)", "conflicted"),
+        part("Cannot be recovered", "unrecoverable"),
+    )
+}
+
 const DIRECT_TITLE: &str = "Let Nexus edit this folder directly?";
-const DIRECT_TEXT: &str = "Yes: Nexus reads, creates, changes and deletes files in this project folder itself. Each change is on disk as soon as it is made, your editor and terminal see it at once, and there is no patch to apply afterwards. Nexus still cannot leave the folder, touch secrets or .git, or overwrite a file you changed since it read it, and it keeps the original of every file it changes for 30 days. Putting edited files back is manual in this version, so keep the project in version control.\n\nNo: Nexus works in a throw-away copy and you review and apply its patch yourself.\n\nYou can change this later in the project's settings; it applies to new tasks only.";
+const DIRECT_TEXT: &str = "Yes: Nexus reads, creates, changes and deletes files in this project folder itself. Each change is on disk as soon as it is made, your editor and terminal see it at once, and there is no patch to apply afterwards. Nexus still cannot leave the folder, touch secrets or .git, or overwrite a file you changed since it read it, and it keeps the original of every file it changes for 30 days, and you can restore its changes later from the run's details (files you changed since are left alone). It is not an undo for everything: keep the project in version control too.\n\nNo: Nexus works in a throw-away copy and you review and apply its patch yourself.\n\nYou can change this later in the project's settings; it applies to new tasks only.";
 
 /// The Desktop's coding submission: text + project identity only. The limits are the
 /// broker's (never the renderer's). Shared by the Tauri command and the acceptance runner

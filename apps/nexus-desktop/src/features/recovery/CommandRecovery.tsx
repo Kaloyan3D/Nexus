@@ -1,7 +1,7 @@
 import { History, Loader2, RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { asUiError } from "../../lib/api";
-import type { ExecEffects, IntentRun, PathList, RestoreItem, RestorePreview, ToolActivity, UiError } from "../../lib/contracts";
+import type { ExecEffects, IntentRun, PathList, RestoreItem, ToolActivity, UiError } from "../../lib/contracts";
 import { Alert, Badge, Button, Loading } from "../../components/ui/primitives";
 import { useNexus } from "../../state/NexusContext";
 
@@ -30,34 +30,47 @@ function Paths({ title, items, max = 8 }: { title: string; items: string[]; max?
 const pathsOf = (l: PathList | undefined): string[] => l?.paths ?? [];
 const countOf = (l: PathList | undefined): number => l?.count ?? 0;
 
-function Review({ executionId, onApplied }: { executionId: string; onApplied: () => void }) {
-  const { api } = useNexus();
-  const [pv, setPv] = useState<RestorePreview | null>(null);
+interface ReviewData {
+  digest: string;
+  refused: string | null;
+  restored: RestoreItem[];
+  skipped: RestoreItem[];
+  conflicted: RestoreItem[];
+  unrecoverable: RestoreItem[];
+  truncated: boolean;
+  note: string;
+}
+
+/**
+ * Review (changes nothing) -> Restore (native confirmation of the exact outcome) -> the result in counts. The
+ * same flow for a command's effects and for the files Nexus's edit tools wrote; `load`/`apply` differ.
+ */
+function Review({ load, apply, label, onApplied }: { load: () => Promise<ReviewData>; apply: (digest: string) => Promise<ReviewData>; label: string; onApplied: () => void }) {
+  const [pv, setPv] = useState<ReviewData | null>(null);
   const [loadErr, setLoadErr] = useState<UiError | null>(null);
   const [err, setErr] = useState<UiError | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
-    api
-      .recoveryPreview(executionId)
+    load()
       .then((p) => alive && setPv(p))
       .catch((e: unknown) => alive && setLoadErr(asUiError(e)));
     return () => {
       alive = false;
     };
-  }, [api, executionId]);
+    // `load` is a closure over the request identity, which is the component's key
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   if (loadErr) return <Alert tone="warning" title="Recovery is not available">{sentence(loadErr)}</Alert>;
   if (!pv) return <Loading label="Checking what can be restored…" />;
-  const r = pv.restore;
   const items = (l: RestoreItem[]) => l.map((i) => i.path);
-  const can = r.refused === null && r.restored.length > 0;
-  const apply = async () => {
+  const can = pv.refused === null && pv.restored.length > 0;
+  const doApply = async () => {
     setBusy(true);
     setErr(null);
     try {
-      const out = await api.recoveryApply(executionId, pv.confirmDigest);
-      const x = out.restore;
+      const x = await apply(pv.digest);
       setResult(`${x.restored.length} file${x.restored.length === 1 ? "" : "s"} restored · ${x.skipped.length} already as before · ${x.conflicted.length} left alone because they changed since · ${x.unrecoverable.length} could not be restored.`);
       onApplied();
     } catch (e) {
@@ -70,17 +83,17 @@ function Review({ executionId, onApplied }: { executionId: string; onApplied: ()
   };
   return (
     <div className="nv-recovery__review" role="group" aria-label="Recovery review">
-      {r.refused && <Alert tone="warning" title="Nothing can be restored right now">{r.refused}</Alert>}
-      <Paths title="Would be restored" items={items(r.restored)} />
-      <Paths title="Already as they were" items={items(r.skipped)} />
-      <Paths title="Changed since — will be left alone" items={items(r.conflicted)} />
-      <Paths title="Cannot be recovered" items={items(r.unrecoverable)} />
-      {!r.refused && r.restored.length === 0 && !result && <p className="nv-note">There is nothing to restore: every file is already as it was, or was changed afterwards.</p>}
-      {r.recordListsTruncated && <p className="nv-note">The change record was too long to list every file; files beyond it are not covered.</p>}
-      <p className="nv-note">{r.note}</p>
+      {pv.refused && <Alert tone="warning" title="Nothing can be restored right now">{pv.refused}</Alert>}
+      <Paths title="Would be restored" items={items(pv.restored)} />
+      <Paths title="Already as they were" items={items(pv.skipped)} />
+      <Paths title="Changed since — will be left alone" items={items(pv.conflicted)} />
+      <Paths title="Some changes cannot be restored" items={items(pv.unrecoverable)} />
+      {!pv.refused && pv.restored.length === 0 && !result && <p className="nv-note">There is nothing to restore: every file is already as it was, or was changed afterwards.</p>}
+      {pv.truncated && <p className="nv-note">The change record was too long to list every file; files beyond it are not covered.</p>}
+      <p className="nv-note">{pv.note}</p>
       {can && !result && (
-        <Button variant="primary" size="sm" disabled={busy} icon={busy ? <Loader2 size={13} className="nv-spin" /> : <RotateCcw size={13} />} onClick={() => void apply()}>
-          Restore {r.restored.length} file{r.restored.length === 1 ? "" : "s"}…
+        <Button variant="primary" size="sm" disabled={busy} icon={busy ? <Loader2 size={13} className="nv-spin" /> : <RotateCcw size={13} />} onClick={() => void doApply()}>
+          {label} {pv.restored.length} file{pv.restored.length === 1 ? "" : "s"}…
         </Button>
       )}
       {result && <p role="status">{result}</p>}
@@ -142,8 +155,59 @@ function Command({ a }: { a: ToolActivity }) {
           </Button>
         </div>
       )}
-      {reviewing && <Review executionId={id} onApplied={() => setTick((t) => t + 1)} />}
+      {reviewing && (
+        <Review
+          label="Restore"
+          onApplied={() => setTick((t) => t + 1)}
+          load={async () => {
+            const p = await api.recoveryPreview(id);
+            const r = p.restore;
+            return { digest: p.confirmDigest, refused: r.refused, restored: r.restored, skipped: r.skipped, conflicted: r.conflicted, unrecoverable: r.unrecoverable, truncated: r.recordListsTruncated, note: r.note };
+          }}
+          apply={async (digest) => {
+            const x = (await api.recoveryApply(id, digest)).restore;
+            return { digest, refused: x.refused, restored: x.restored, skipped: x.skipped, conflicted: x.conflicted, unrecoverable: x.unrecoverable, truncated: x.recordListsTruncated, note: x.note };
+          }}
+        />
+      )}
     </li>
+  );
+}
+
+/** The files Nexus's own edit tools wrote in the project folder during this run, and putting them back. */
+function EditsRecovery({ run, edits }: { run: IntentRun; edits: number }) {
+  const { api } = useNexus();
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="nv-recovery__cmd" aria-label="File edits">
+      <div className="nv-heading__meta">
+        <strong>
+          {edits} file edit{edits === 1 ? "" : "s"} by Nexus
+        </strong>
+        <Badge tone="neutral">originals kept 30 days</Badge>
+      </div>
+      <p className="nv-note">Nexus kept the original of every file it changed. A file is put back only if it still holds exactly what Nexus wrote; anything you changed since is left alone.</p>
+      <div>
+        <Button size="sm" variant="ghost" aria-expanded={open} icon={<History size={13} />} onClick={() => setOpen((o) => !o)}>
+          {open ? "Hide" : "Restore changes…"}
+        </Button>
+      </div>
+      {open && (
+        <Review
+          label="Restore"
+          onApplied={() => undefined}
+          load={async () => {
+            const p = await api.editsPreview(run.runId);
+            const r = p.edits;
+            return { digest: p.confirmDigest, refused: r.refused, restored: r.restored, skipped: r.skipped, conflicted: r.conflicted, unrecoverable: r.unrecoverable, truncated: false, note: r.note };
+          }}
+          apply={async (digest) => {
+            const x = (await api.editsApply(run.runId, digest)).edits;
+            return { digest, refused: x.refused, restored: x.restored, skipped: x.skipped, conflicted: x.conflicted, unrecoverable: x.unrecoverable, truncated: false, note: x.note };
+          }}
+        />
+      )}
+    </div>
   );
 }
 
@@ -166,14 +230,10 @@ export function RecoverySection({ run }: { run: IntentRun }) {
           ))}
         </ul>
       )}
-      {direct && edits > 0 && (
-        <p className="nv-note">
-          Nexus saved the original of each of the {edits} file{edits === 1 ? "" : "s"} it edited directly in your folder (kept for 30 days). Restoring file edits with one click is not available in this version: use the Diff tab to see exactly what changed, and your version control to go back.
-        </p>
-      )}
+      {direct && edits > 0 && <EditsRecovery run={run} edits={edits} />}
       {!direct && ops.length === 0 && <p className="nv-note">This run worked on a copy: your folder is unchanged until you apply the changes, so there is nothing to restore.</p>}
       {direct && ops.length === 0 && edits === 0 && <p className="nv-note">This run changed nothing in your folder.</p>}
-      <p className="nv-note">Only changes Nexus observed inside the project folder can be restored. Downloads, changes outside the folder, and the contents of dependency folders are not recoverable — this is not a universal undo.</p>
+      <p className="nv-note">Only changes Nexus observed inside the project folder can be restored. Some changes cannot be restored: downloads, changes outside the folder, Git, and the contents of dependency or build folders. This is not a universal undo.</p>
     </section>
   );
 }

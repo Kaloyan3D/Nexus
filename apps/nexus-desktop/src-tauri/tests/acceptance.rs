@@ -100,6 +100,7 @@ fn real_provider_autonomous_acceptance() {
     std::env::remove_var("NEXUS_SOCKET");
     std::env::set_var("NEXUS_HOME", home.path().join("nexus"));
     let rt = Runtime::new();
+    let _stop = rt.guard();
     check(
         "interactive-mode",
         !rt.external,
@@ -340,6 +341,12 @@ struct Rig {
     sock: PathBuf,
 }
 
+impl Drop for Rig {
+    fn drop(&mut self) {
+        self.rt.shutdown();
+    }
+}
+
 fn rig(project: &str, key_file: &str) -> Rig {
     let work = tempfile::tempdir().unwrap();
     let copy: PathBuf = work.path().join("project");
@@ -369,6 +376,7 @@ fn rig(project: &str, key_file: &str) -> Rig {
     std::env::remove_var("NEXUS_SOCKET");
     std::env::set_var("NEXUS_HOME", home.path().join("nexus"));
     let rt = Runtime::new();
+
     rt.start_blocking();
     assert_eq!(rt.state().phase, "ready");
     let dialogs = ScriptedDialogs {

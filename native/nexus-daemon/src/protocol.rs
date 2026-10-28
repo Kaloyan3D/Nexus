@@ -280,6 +280,7 @@ pub fn is_privileged(cmd: &str) -> bool {
             | "worktree-stat"
             | "exec-effects"
             | "exec-restore"
+            | "direct-restore"
     )
 }
 

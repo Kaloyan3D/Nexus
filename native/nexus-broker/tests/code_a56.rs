@@ -15841,6 +15841,134 @@ fn direct_refuses_escapes_symlinks_and_protected_names() {
     env.b.shutdown();
 }
 
+/// Release 1: the files a Direct run's edit tools wrote can be put back through the broker - guarded by a
+/// digest-bound preview, conflict detection and ownership - and what the person changed afterwards is never touched.
+#[test]
+fn rel1_direct_run_edits_are_restorable_through_the_broker_and_user_changes_are_never_touched() {
+    if !sandbox_ready() {
+        return;
+    }
+    let env = direct_env("rel1-restore", |_cell| {
+        Arc::new(move |n, body| {
+            let resp = format!("resp_{n}");
+            let call = |id: &str, name: &str, args: String| {
+                Answer::Frames(call_frames(&resp, n, id, name, &args))
+            };
+            match tool_calls_done(body) {
+                0 => call("c0", "fs_read", r#"{"path":"docs/NOTES.md"}"#.into()),
+                1 => call(
+                    "c1",
+                    "fs_edit",
+                    json!({"path":"docs/NOTES.md","edits":[{"oldText":"# Notes","newText":"# Notes (edited by nexus)"}]}).to_string(),
+                ),
+                2 => call(
+                    "c2",
+                    "fs_write",
+                    json!({"path":"docs/CREATED.md","mode":"create","content":"made by nexus\n"}).to_string(),
+                ),
+                3 => call(
+                    "c3",
+                    "fs_write",
+                    json!({"path":"docs/ALSO.md","mode":"create","content":"also by nexus\n"}).to_string(),
+                ),
+                _ => Answer::Frames(text_frames(&resp, "Done.")),
+            }
+        })
+    });
+    let notes = env.folder.join("docs/NOTES.md");
+    let original = std::fs::read_to_string(&notes).unwrap();
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(
+            &env,
+            "Edit the notes and add two files.",
+            "rel1-restore-0001",
+        ),
+        240,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert!(std::fs::read_to_string(&notes)
+        .unwrap()
+        .contains("edited by nexus"));
+    assert!(
+        env.folder.join("docs/CREATED.md").is_file() && env.folder.join("docs/ALSO.md").is_file()
+    );
+
+    // a preview changes nothing and says exactly what would happen
+    let pv = ic::direct_restore_preview(&env.sock, &run.run_id).expect("preview");
+    let paths = |v: &Value, k: &str| -> Vec<String> {
+        v["edits"][k]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|i| i["path"].as_str().unwrap().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut restored = paths(&pv, "restored");
+    restored.sort();
+    assert_eq!(
+        restored,
+        ["docs/ALSO.md", "docs/CREATED.md", "docs/NOTES.md"],
+        "{pv}"
+    );
+    assert!(
+        std::fs::read_to_string(&notes)
+            .unwrap()
+            .contains("edited by nexus"),
+        "a preview changed a file"
+    );
+    let digest = pv["confirmDigest"].as_str().unwrap().to_owned();
+
+    // the person edits one created file after reviewing: the review is stale and nothing is applied
+    std::fs::write(
+        env.folder.join("docs/ALSO.md"),
+        "also by nexus\nmy own addition\n",
+    )
+    .unwrap();
+    let stale = ic::direct_restore_apply(&env.sock, &run.run_id, &digest, "test");
+    assert!(
+        stale.is_err(),
+        "a stale confirmation must be refused: {stale:?}"
+    );
+    assert!(
+        std::fs::read_to_string(&notes)
+            .unwrap()
+            .contains("edited by nexus"),
+        "a refused restore changed a file"
+    );
+    // a wrong or missing digest is refused too
+    assert!(ic::direct_restore_apply(&env.sock, &run.run_id, &"0".repeat(64), "test").is_err());
+
+    // review again, apply: the original comes back, the unchanged created file goes, the user's file STAYS
+    let pv2 = ic::direct_restore_preview(&env.sock, &run.run_id).expect("preview 2");
+    assert_ne!(pv2["confirmDigest"], digest.as_str());
+    assert_eq!(paths(&pv2, "conflicted"), ["docs/ALSO.md"], "{pv2}");
+    let done = ic::direct_restore_apply(
+        &env.sock,
+        &run.run_id,
+        pv2["confirmDigest"].as_str().unwrap(),
+        "test",
+    )
+    .expect("apply");
+    assert_eq!(done["edits"]["outcome"], "partial", "{done}");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), original);
+    assert!(!env.folder.join("docs/CREATED.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(env.folder.join("docs/ALSO.md")).unwrap(),
+        "also by nexus\nmy own addition\n",
+        "the person's file was touched"
+    );
+    // restoring again is safe
+    let again = ic::direct_restore_preview(&env.sock, &run.run_id).unwrap();
+    assert!(paths(&again, "restored").is_empty(), "{again}");
+
+    // another client cannot reach this run's restore; an unknown run is "not found"
+    assert!(ic::direct_restore_preview(&env.sock, "run_00000000000000000000000000000000").is_err());
+    env.b.shutdown();
+}
+
 /// 5: a file the user changed (before or during the run) is never silently overwritten; what is NOT the
 /// agent's work stays out of its evidence.
 #[test]

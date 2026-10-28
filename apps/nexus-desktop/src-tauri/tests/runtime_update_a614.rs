@@ -28,6 +28,7 @@ fn a_stale_broker_is_replaced_before_submit_unless_a_task_runs() {
     std::env::set_var("NEXUS_BIN_DIR", &bin);
     std::env::set_var("NEXUS_HOME", tmp.path().join("home"));
     let rt = Runtime::new();
+    let _stop = rt.guard();
     rt.start_blocking();
     assert_eq!(rt.state().phase, "ready");
     let home = rt.home.clone().unwrap();

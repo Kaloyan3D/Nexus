@@ -116,6 +116,8 @@ pub(crate) fn resolve(pol: &CommandPolicy, a: &ProcessArgs) -> Result<ResolvedCo
         path.push_str("/toolchain/cargo/bin:");
     }
     path.push_str("/usr/bin:/bin");
+    // the private Node.js comes LAST: a system Node, or one the project provides, always wins
+    path.push_str(&pol.private_node_path_suffix());
     for (k, v) in [
         ("PATH", path.as_str()),
         ("HOME", "/work/out/home"),
@@ -204,9 +206,13 @@ pub(crate) fn resolve(pol: &CommandPolicy, a: &ProcessArgs) -> Result<ResolvedCo
             }
             "tsc" => {
                 // the project's own compiler (installed into its environment)
-                program = find(&["/usr/bin/npx", "/usr/local/bin/npx"]).ok_or_else(|| {
-                    refuse("tsc needs npx, which is not available inside the authorized runtime")
-                })?;
+                program = find(&["/usr/bin/npx", "/usr/local/bin/npx"])
+                    .or_else(|| pol.private_node_program("npx"))
+                    .ok_or_else(|| {
+                        refuse(
+                            "tsc needs npx, which is not available inside the authorized runtime",
+                        )
+                    })?;
                 argv.insert(0, "tsc".to_owned());
                 argv.insert(0, "--no-install".to_owned());
                 env.insert("npm_config_offline".into(), "true".into());
@@ -232,6 +238,7 @@ pub(crate) fn resolve(pol: &CommandPolicy, a: &ProcessArgs) -> Result<ResolvedCo
                     &format!("/usr/bin/{name}"),
                     &format!("/bin/{name}"),
                 ])
+                .or_else(|| pol.private_node_program(name))
                 .ok_or_else(|| refuse(format!(
                     "program '{name}' is not available inside the authorized runtime: no '{name}' in \
                      /usr/local/bin, /usr/bin, /bin or the Rust toolchain. Install it on this machine, \
@@ -527,5 +534,74 @@ mod tests {
         assert!(strict
             .resolve(&args("python3", &["-c", "print(1)"]))
             .is_err());
+    }
+
+    #[test]
+    fn rel1_the_private_node_is_a_last_resort_that_never_displaces_a_system_node() {
+        let d = std::env::temp_dir().join(format!("nexus-private-node-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        for n in ["node", "npm", "npx"] {
+            std::fs::write(d.join("bin").join(n), "#!/bin/sh\n").unwrap();
+        }
+        let tc = Toolchain {
+            cargo_home_bin: None,
+            rustup_home: None,
+            private_node: Some(d.clone()),
+        };
+        let p = CommandPolicy::standard(tc).with_workbench();
+        // the private programs exist for node/npm/npx only
+        assert_eq!(
+            p.private_node_program("node"),
+            Some(format!("{}/bin/node", d.display()))
+        );
+        assert_eq!(
+            p.private_node_program("npm"),
+            Some(format!("{}/bin/npm", d.display()))
+        );
+        assert_eq!(p.private_node_program("python3"), None);
+        assert_eq!(p.private_node_program("../../bin/sh"), None);
+        // a system Node, when there is one, is what runs
+        if host("/usr/bin/node") {
+            let r = p.resolve(&args("node", &["--version"])).unwrap();
+            assert_eq!(r.program, "/usr/bin/node");
+        }
+        // the sandbox PATH reaches the private bin only AFTER the system directories
+        let r = p.resolve(&args("ls", &["-la"])).unwrap();
+        let path = r.env.get("PATH").unwrap();
+        assert!(
+            path.ends_with(&format!("/usr/bin:/bin:{}/bin", d.display())),
+            "{path}"
+        );
+        // without a private Node there is no suffix
+        let plain = CommandPolicy::standard(Toolchain {
+            cargo_home_bin: None,
+            rustup_home: None,
+            private_node: None,
+        })
+        .with_workbench();
+        assert!(plain
+            .resolve(&args("ls", &["-la"]))
+            .unwrap()
+            .env
+            .get("PATH")
+            .unwrap()
+            .ends_with("/usr/bin:/bin"));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn rel1_a_private_node_named_by_the_environment_must_be_trustworthy() {
+        // not under /usr, relative, or with '..': never trusted (the sandbox could not even see it)
+        for bad in [
+            "/tmp/node",
+            "relative/node",
+            "/usr/../tmp/node",
+            "/home/u/node",
+        ] {
+            std::env::set_var(crate::process::PRIVATE_NODE_ENV, bad);
+            assert_eq!(crate::process::private_node_from_env(), None, "{bad}");
+        }
+        std::env::remove_var(crate::process::PRIVATE_NODE_ENV);
+        assert_eq!(crate::process::private_node_from_env(), None);
     }
 }

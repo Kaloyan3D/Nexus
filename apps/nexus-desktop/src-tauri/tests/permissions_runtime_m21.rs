@@ -41,6 +41,7 @@ fn the_desktop_runtime_has_a_private_approver_channel_and_manages_permissions_th
     std::env::set_var("NEXUS_BIN_DIR", &bin);
     std::env::set_var("NEXUS_HOME", tmp.path().join("home"));
     let rt = Runtime::new();
+    let _stop = rt.guard();
     rt.start_blocking();
     let st = rt.state();
     assert_eq!(st.phase, "ready", "{:?}", st.message);
@@ -114,17 +115,53 @@ fn the_desktop_runtime_has_a_private_approver_channel_and_manages_permissions_th
     assert_eq!(l["permissions"]["standingGrants"], true);
     assert_eq!(l["permissions"]["askAvailable"], true, "{l}");
 
-    // Ask, then Auto, then revoke, then remove - each through the native confirmation
-    rt.project_set_grant(
-        &d,
+    // Release 1: the application never CREATES a per-operation "ask" (nobody could answer it inside the app):
+    // refused before any dialog, nothing stored
+    let shown_before = d.shown.lock().unwrap().len();
+    let refused = rt
+        .project_set_grant(
+            &d,
+            &id,
+            "workspace",
+            "offline",
+            "ask",
+            None,
+            &Default::default(),
+        )
+        .unwrap_err();
+    assert!(refused.starts_with("not-available:"), "{refused}");
+    assert_eq!(
+        d.shown.lock().unwrap().len(),
+        shown_before,
+        "a dialog was shown for a choice that is refused"
+    );
+    assert!(ic::project_list(&sock, false).unwrap()["projects"][0]
+        .get("grant")
+        .is_none_or(|g| g.is_null()));
+
+    // A project that ALREADY asks (set by the operator's CLI path, with the broker's own digest) can be switched
+    // to automatic from the application, through the native confirmation, keeping everything else
+    let pv = ic::project_grant_preview(&sock, &id, "workspace", "offline", "ask", None).unwrap();
+    ic::project_grant_set(
+        &sock,
         &id,
         "workspace",
         "offline",
         "ask",
         None,
-        &Default::default(),
+        pv["textSha256"].as_str().unwrap(),
+        "cli",
     )
-    .expect("ask");
+    .unwrap();
+    assert_eq!(
+        ic::project_list(&sock, false).unwrap()["projects"][0]["grant"]["approval"],
+        "ask"
+    );
+    // amending an asking project (previews, installs) is refused until it is automatic
+    let e = rt.project_allow_installs(&d, &id, true).unwrap_err();
+    assert!(e.starts_with("not-available:"), "{e}");
+    rt.project_use_automatic_approval(&d, &id)
+        .expect("switch to automatic");
     let g = ic::project_list(&sock, false).unwrap()["projects"][0]["grant"].clone();
     assert_eq!(
         (
@@ -132,12 +169,16 @@ fn the_desktop_runtime_has_a_private_approver_channel_and_manages_permissions_th
             g["fs"].as_str(),
             g["status"].as_str()
         ),
-        (Some("ask"), Some("workspace"), Some("active"))
+        (Some("auto"), Some("workspace"), Some("active"))
     );
     assert_eq!(
         g["createdBy"].as_str().unwrap().split(':').next(),
         Some("desktop")
     );
+    assert!(rt
+        .project_use_automatic_approval(&d, &id)
+        .unwrap_err()
+        .starts_with("nothing to change"));
     rt.project_set_grant(
         &d,
         &id,
@@ -151,7 +192,7 @@ fn the_desktop_runtime_has_a_private_approver_channel_and_manages_permissions_th
     let g = ic::project_list(&sock, false).unwrap()["projects"][0]["grant"].clone();
     assert_eq!(
         (g["approval"].as_str(), g["version"].as_u64()),
-        (Some("auto"), Some(2))
+        (Some("auto"), Some(3)) // asking(1) -> automatic(2) -> automatic with a lifetime(3)
     );
     // a "no" in the dialog changes nothing
     let no = ScriptedDialogs {
@@ -185,6 +226,9 @@ fn the_desktop_runtime_has_a_private_approver_channel_and_manages_permissions_th
                 .to_owned()
         })
         .collect();
-    assert_eq!(events, ["created", "replaced", "revoked", "cleared"]);
+    assert_eq!(
+        events,
+        ["created", "replaced", "replaced", "revoked", "cleared"]
+    );
     rt.shutdown();
 }

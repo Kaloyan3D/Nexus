@@ -104,6 +104,7 @@ fn the_preview_journey_runs_on_the_real_runtime_without_a_terminal() {
     std::env::set_var("NEXUS_BIN_DIR", &bin);
     std::env::set_var("NEXUS_HOME", tmp.path().join("home"));
     let rt = Runtime::new();
+    let _stop = rt.guard();
     rt.start_blocking();
     assert_eq!(rt.state().phase, "ready", "{:?}", rt.state().message);
     let sock = ic::default_broker_socket();
