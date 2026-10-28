@@ -641,11 +641,25 @@ async fn project_pick(
 #[tauri::command]
 async fn project_list(with_changes: Option<bool>) -> Result<serde_json::Value, UiError> {
     tauri::async_runtime::spawn_blocking(move || {
-        nexus_client::intent_client::project_list(
+        let mut v = nexus_client::intent_client::project_list(
             &nexus_client::intent_client::default_broker_socket(),
             with_changes.unwrap_or(false),
         )
-        .map_err(|e| backend::ui_error(&e))
+        .map_err(|e| backend::ui_error(&e))?;
+        // Release 1: per-operation approval cannot be answered inside the application, so it is reported as
+        // unavailable whatever the broker's channel could do (the page then offers no such control).
+        if let Some(p) = v.get_mut("permissions").and_then(|p| p.as_object_mut()) {
+            p.insert("askAvailable".into(), serde_json::Value::Bool(false));
+            p.insert(
+                "askReason".into(),
+                serde_json::Value::String(
+                    interactive::ASK_UNAVAILABLE
+                        .trim_start_matches("not-available: ")
+                        .to_owned(),
+                ),
+            );
+        }
+        Ok(v)
     })
     .await
     .map_err(|_| internal())?
@@ -727,6 +741,37 @@ async fn exec_effects(
         .await
         .map_err(|_| internal())?
         .map_err(|m| ui_msg("recovery", m))
+}
+
+/// Release 1: preview of restoring the files a finished run's edit tools wrote. Changes nothing.
+#[tauri::command]
+async fn run_restore_preview(run_id: String) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::direct_restore_preview(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// Release 1: apply that restore after a NATIVE confirmation of its exact outcome; stale digests are refused.
+#[tauri::command]
+async fn run_restore_apply(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+    run_id: String,
+    confirm_digest: String,
+) -> Result<serde_json::Value, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        rt.edits_restore_apply(d.as_ref(), &run_id, &confirm_digest)
+    })
+    .await
+    .map_err(|_| internal())?
+    .map_err(|m| ui_msg("recovery", m))
 }
 
 /// Release 1: preview of a guarded restore. Changes nothing; carries the digest that binds a later apply.
@@ -960,6 +1005,22 @@ async fn project_allow_installs(
     let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
     tauri::async_runtime::spawn_blocking(move || {
         rt.project_allow_installs(d.as_ref(), &project_id, allow)
+    })
+    .await
+    .map_err(|_| internal())?
+    .map_err(|m| ui_msg("project", m))
+}
+
+/// Switch a project from asking before every action to automatic approval (native confirmation).
+#[tauri::command]
+async fn project_use_automatic_approval(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+    project_id: String,
+) -> Result<serde_json::Value, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        rt.project_use_automatic_approval(d.as_ref(), &project_id)
     })
     .await
     .map_err(|_| internal())?
@@ -1428,12 +1489,15 @@ pub fn run() {
             project_allow_previews,
             project_revoke_previews,
             project_allow_installs,
+            project_use_automatic_approval,
             job_logs,
             preview_open,
             environment_check,
             exec_effects,
             exec_restore_preview,
             exec_restore_apply,
+            run_restore_preview,
+            run_restore_apply,
             thread_list,
             thread_get,
             thread_send,
@@ -1539,12 +1603,15 @@ mod authz_tests {
         "project_allow_previews",
         "project_revoke_previews",
         "project_allow_installs",
+        "project_use_automatic_approval",
         "job_logs",
         "preview_open",
         "environment_check",
         "exec_effects",
         "exec_restore_preview",
         "exec_restore_apply",
+        "run_restore_preview",
+        "run_restore_apply",
         "thread_list",
         "thread_get",
         "thread_send",

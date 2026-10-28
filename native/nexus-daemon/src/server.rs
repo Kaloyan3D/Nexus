@@ -3818,6 +3818,122 @@ fn do_exec_restore(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     ok(&req.id, serde_json::json!({ "restore": report }))
 }
 
+/// Guarded restoration of the files a DIRECT task's edit tools wrote (Release 1; operator/user action, the model
+/// has no path to it). Same contract as `exec-restore`: a dry run returns the exact report and its `confirmDigest`;
+/// applying requires that digest back, recomputed from the CURRENT state, so anything that changed since the
+/// preview invalidates the confirmation. Refused while the task still has a command open. Every request is
+/// appended to `restore.audit.jsonl`.
+fn do_direct_restore(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    if let Err(r) = only_keys(
+        &req.params,
+        &["taskInstanceId", "dryRun", "confirm", "actor"],
+        &req.id,
+    ) {
+        return r;
+    }
+    let task = match get_string(&req.params, "taskInstanceId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    if !nexus_tools::gitwt::valid_task_id(&task) {
+        return fail(
+            &req.id,
+            "bad-request",
+            "bad-request: invalid task instance id",
+        );
+    }
+    let dry = req
+        .params
+        .get("dryRun")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let actor: String = req
+        .params
+        .get("actor")
+        .and_then(|v| v.as_str())
+        .unwrap_or("operator")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_'))
+        .take(48)
+        .collect();
+    let Some((store, droot)) = direct_store(daemon, &task) else {
+        return fail(
+            &req.id,
+            "not-found",
+            "not-found: this task did not edit a project folder directly",
+        );
+    };
+    {
+        let Ok(k) = daemon.kernel.lock() else {
+            return fail(&req.id, "internal", "internal: kernel unavailable");
+        };
+        match k.open_processes() {
+            Ok(open) if open.iter().any(|o| o.task_instance_id == task) => {
+                return fail(
+                    &req.id,
+                    "busy",
+                    "busy: the task still has a command in progress",
+                );
+            }
+            Ok(_) => {}
+            Err(_) => return fail(&req.id, "internal", "internal: process journal unreadable"),
+        }
+    }
+    let Ok(ws) = nexus_tools::workspace::Workspace::open_root(
+        &droot,
+        nexus_tools::workspace::WorkspacePolicy::default(),
+    ) else {
+        return fail(
+            &req.id,
+            "scope-refused",
+            "scope-refused: the project folder cannot be opened",
+        );
+    };
+    let preview = nexus_tools::edit_restore::restore_edits(&ws, &store, true);
+    let digest = preview.confirm_digest();
+    let audit = |outcome: &str, counts: serde_json::Value| {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let line = serde_json::json!({
+            "atMs": now_ms_i64(), "kind": "direct-edits", "actor": actor, "taskInstanceId": task,
+            "dryRun": dry, "outcome": outcome, "confirmDigest": digest, "counts": counts,
+        });
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(daemon.run_root.join("restore.audit.jsonl"))
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    };
+    if dry {
+        audit(&preview.outcome, preview.counts());
+        return ok(
+            &req.id,
+            serde_json::json!({ "edits": preview, "confirmDigest": digest }),
+        );
+    }
+    if preview.refused.is_some() {
+        audit("refused", preview.counts());
+        return ok(
+            &req.id,
+            serde_json::json!({ "edits": preview, "confirmDigest": digest }),
+        );
+    }
+    if req.params.get("confirm").and_then(|v| v.as_str()) != Some(digest.as_str()) {
+        audit("confirmation-mismatch", preview.counts());
+        return fail(
+            &req.id,
+            "consent-mismatch",
+            "consent-mismatch: the confirmation does not match what a restore would do now (the project changed since the preview, or the preview was not confirmed); nothing was changed",
+        );
+    }
+    let report = nexus_tools::edit_restore::restore_edits(&ws, &store, false);
+    audit(&report.outcome, report.counts());
+    ok(&req.id, serde_json::json!({ "edits": report }))
+}
+
 fn do_worktree_stat(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     if let Err(r) = only_keys(&req.params, &["taskInstanceId"], &req.id) {
         return r;
@@ -4793,6 +4909,7 @@ pub fn dispatch(
             "worktree-stat" => do_worktree_stat(daemon, req),
             "exec-effects" => do_exec_effects(daemon, req),
             "exec-restore" => do_exec_restore(daemon, req),
+            "direct-restore" => do_direct_restore(daemon, req),
             "seal" => do_seal(daemon, req),
             "accept" => do_accept(daemon, req),
             _ => unreachable!("privileged set is fixed"),

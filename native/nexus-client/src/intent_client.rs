@@ -1262,6 +1262,35 @@ pub fn exec_restore_apply(
     )
 }
 
+/// Release 1: preview of restoring the files a finished run's edit tools wrote in the project folder.
+/// Changes nothing; the answer carries the `confirmDigest` that binds an apply to exactly this preview.
+pub fn direct_restore_preview(
+    socket: &Path,
+    run_id: &str,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "direct-restore-preview",
+        serde_json::json!({ "runId": run_id }),
+        120_000,
+    )
+}
+
+/// Apply that restore; `confirm` must be the digest of a preview taken against the current state.
+pub fn direct_restore_apply(
+    socket: &Path,
+    run_id: &str,
+    confirm: &str,
+    surface: &str,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "direct-restore",
+        serde_json::json!({ "runId": run_id, "confirm": confirm, "surface": surface }),
+        600_000,
+    )
+}
+
 pub fn project_grant_revoke(
     socket: &Path,
     project_id: &str,

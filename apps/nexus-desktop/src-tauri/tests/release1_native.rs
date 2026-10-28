@@ -699,3 +699,160 @@ fn effects_are_trimmed_for_display() {
     assert_eq!(e["outcome"], "observed");
     assert!(e["effects"]["created"].is_object());
 }
+
+// ---- restoring the files Nexus's edit tools wrote ------------------------------------------------------
+
+fn edits_broker(refused: Option<&'static str>) -> Handler {
+    Box::new(move |f| {
+        if f["cmd"] == "direct-restore-preview" || f["cmd"] == "direct-restore" {
+            return Ok(json!({
+                "edits": {
+                    "dryRun": f["cmd"] == "direct-restore-preview", "outcome": "partial", "refused": refused,
+                    "restored": [{"path": "docs/NOTES.md", "detail": "would be put back as it was"}, {"path": "docs/NEW.md", "detail": "created by Nexus and unchanged; would be removed"}],
+                    "skipped": [], "conflicted": [{"path": "docs/MINE.md", "detail": "changed after Nexus wrote it"}], "unrecoverable": [],
+                },
+                "confirmDigest": "edits-digest-1",
+            }));
+        }
+        Ok(json!({}))
+    })
+}
+
+#[test]
+fn restoring_edits_is_bound_to_the_reviewed_digest_and_a_native_yes_and_names_what_is_left_alone() {
+    let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (fake, rt) = Fake::start("edits", edits_broker(None));
+    let d = dialogs(true);
+    let e = rt.edits_restore_apply(&d, "run_x", "stale").unwrap_err();
+    assert!(e.starts_with("changed:"), "{e}");
+    assert!(
+        d.shown.lock().unwrap().is_empty(),
+        "no dialog for a stale review"
+    );
+
+    let no = dialogs(false);
+    assert_eq!(
+        rt.edits_restore_apply(&no, "run_x", "edits-digest-1")
+            .unwrap_err(),
+        "cancelled"
+    );
+    let text = no.shown.lock().unwrap()[0].1.clone();
+    assert!(
+        text.contains("docs/NOTES.md") && text.contains("docs/NEW.md"),
+        "{text}"
+    );
+    assert!(
+        text.contains("docs/MINE.md") && text.contains("left exactly as they are"),
+        "{text}"
+    );
+    assert!(
+        text.contains("anything in Git"),
+        "the limits are stated: {text}"
+    );
+    assert!(
+        fake.frames
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|f| f["cmd"] != "direct-restore"),
+        "a declined dialog applied a restore"
+    );
+
+    rt.edits_restore_apply(&dialogs(true), "run_x", "edits-digest-1")
+        .unwrap();
+    let applied = fake.frame("direct-restore").expect("applied");
+    assert_eq!(applied["params"]["confirm"], "edits-digest-1");
+    assert_eq!(applied["params"]["surface"], "desktop");
+    assert_eq!(applied["params"]["runId"], "run_x");
+}
+
+#[test]
+fn a_refused_edit_restore_shows_no_dialog_and_applies_nothing() {
+    let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (fake, rt) = Fake::start(
+        "edits-refused",
+        edits_broker(Some("no record of this run's file changes")),
+    );
+    let d = dialogs(true);
+    let e = rt
+        .edits_restore_apply(&d, "run_x", "edits-digest-1")
+        .unwrap_err();
+    assert!(e.starts_with("refused:"), "{e}");
+    assert!(d.shown.lock().unwrap().is_empty());
+    assert!(!fake.cmds().contains(&"direct-restore".to_owned()));
+}
+
+#[test]
+fn a_per_operation_ask_is_never_created_and_an_existing_one_can_be_switched_to_automatic_natively()
+{
+    let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (fake, rt) = Fake::start(
+        "ask",
+        project_broker(project(
+            "direct",
+            Some(grant("workspace", "offline", json!({"approval": "ask"}))),
+        )),
+    );
+    let d = dialogs(true);
+    // creating one: refused before any dialog
+    let e = rt
+        .project_set_grant(
+            &d,
+            "p",
+            "workspace",
+            "offline",
+            "ask",
+            None,
+            &Default::default(),
+        )
+        .unwrap_err();
+    assert!(
+        e.starts_with("not-available:") && e.contains("terminal"),
+        "{e}"
+    );
+    let e = rt
+        .project_set_grant_keeping(
+            &d,
+            "p",
+            "workspace",
+            "offline",
+            "ask",
+            None,
+            &Default::default(),
+            None,
+        )
+        .unwrap_err();
+    assert!(e.starts_with("not-available:"), "{e}");
+    // amending an asking project is refused too: the previews/installs cannot be stored under an ask
+    assert!(rt
+        .project_allow_previews(&d, "p", &[5173])
+        .unwrap_err()
+        .starts_with("not-available:"));
+    assert!(
+        d.shown.lock().unwrap().is_empty(),
+        "a dialog was shown for a refused choice"
+    );
+    assert!(!fake.cmds().contains(&"project-grant".to_owned()));
+    // switching to automatic: the broker's text, a native yes, everything else kept
+    rt.project_use_automatic_approval(&d, "p").unwrap();
+    let p = fake.frame("project-grant").unwrap()["params"].clone();
+    assert_eq!(
+        (p["approval"].as_str(), p["fs"].as_str(), p["net"].as_str()),
+        (Some("auto"), Some("workspace"), Some("offline"))
+    );
+    assert_eq!(d.shown.lock().unwrap().len(), 1);
+    // declined: nothing changes
+    let (fake, rt) = Fake::start(
+        "ask-no",
+        project_broker(project(
+            "direct",
+            Some(grant("workspace", "offline", json!({"approval": "ask"}))),
+        )),
+    );
+    assert_eq!(
+        rt.project_use_automatic_approval(&dialogs(false), "p")
+            .unwrap_err(),
+        "cancelled"
+    );
+    assert!(!fake.cmds().contains(&"project-grant".to_owned()));
+}

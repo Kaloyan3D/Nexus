@@ -1529,6 +1529,67 @@ impl Broker {
         Ok(r)
     }
 
+    /// Release 1: guarded restoration of the files the edit tools of one of THIS client's finished runs wrote
+    /// directly in the project folder. User clients only (uid-gated socket; the model has no path to it). The
+    /// broker checks ownership, that the run has ended and that no other task is editing the folder; the daemon
+    /// decides what is restorable, enforces the confirmation digest and audits every request.
+    fn direct_restore_verb(
+        &self,
+        client: &str,
+        cmd: &str,
+        run_id: &str,
+        params: &Value,
+    ) -> CmdResult {
+        let rec = self.owned(client, run_id)?;
+        if rec.run.intent_type != nexus_contracts::intent::INTENT_REPO_CODE {
+            return Err(("not-found", "this run did not edit files".into()));
+        }
+        if !rec.run.terminal {
+            return Err((
+                "busy",
+                "this run is still working; restore its changes after it has finished".into(),
+            ));
+        }
+        let task = rec
+            .run
+            .task_instance_id
+            .clone()
+            .ok_or(("not-found", "this run has no recorded changes".to_owned()))?;
+        if let Some(pid) = rec.run.workspace_id.as_deref() {
+            let claimed = self
+                .direct_claims
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains_key(pid);
+            if claimed {
+                return Err((
+                    "project-busy",
+                    "another task is editing this project's folder right now; restore after it has finished".into(),
+                ));
+            }
+        }
+        let surface: String = params
+            .get("surface")
+            .and_then(|v| v.as_str())
+            .unwrap_or("client")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(12)
+            .collect();
+        let actor = format!("{surface}:{client}");
+        let dparams = if cmd == "direct-restore-preview" {
+            json!({ "taskInstanceId": task, "dryRun": true, "actor": actor })
+        } else {
+            let confirm = params.get("confirm").and_then(|v| v.as_str()).ok_or((
+                "bad-request",
+                "a restore needs the confirmation digest of its preview".to_owned(),
+            ))?;
+            json!({ "taskInstanceId": task, "dryRun": false, "confirm": confirm, "actor": actor })
+        };
+        crate::pipeline::daemon_timeout(self, "direct-restore", dparams, 600_000)
+            .map_err(|e| ("daemon", format!("{}: {}", e.code, e.message)))
+    }
+
     /// The consent the user has given (if any) plus the exact text a new consent
     /// must present. Interactive profile only.
     fn consent_status(&self) -> CmdResult {
@@ -1746,6 +1807,9 @@ impl Broker {
             | "project-grant-clear" => self.project_grant_verb(client, cmd, params),
             "exec-effects" | "exec-restore-preview" | "exec-restore" => {
                 self.exec_evidence_verb(client, cmd, params)
+            }
+            "direct-restore-preview" | "direct-restore" => {
+                self.direct_restore_verb(client, cmd, run_id, params)
             }
             "job-start" | "job-status" | "job-logs" | "job-stop" | "job-list" => {
                 self.job_verb(cmd, params)

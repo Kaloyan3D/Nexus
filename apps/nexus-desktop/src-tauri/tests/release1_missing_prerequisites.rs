@@ -21,6 +21,7 @@ fn a_missing_node_is_reported_by_the_runtime_state_and_nothing_is_started() {
     std::env::set_var("NEXUS_HOME", tmp.path().join("home"));
     std::env::set_var("PATH", &empty); // no node anywhere
     let rt = Runtime::new();
+    let _stop = rt.guard();
     rt.start_blocking();
     let st = rt.state();
     assert_eq!(st.phase, "error", "{st:?}");

@@ -416,10 +416,13 @@ dependencies = [
 name = "nexus-runtime"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "libc",
  "nexus-client",
+ "nexus-tools",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

@@ -120,6 +120,39 @@ impl ResolvedCommand {
 pub struct Toolchain {
     pub cargo_home_bin: Option<PathBuf>,
     pub rustup_home: Option<PathBuf>,
+    /// Nexus's own private Node.js (`<dir>/bin/{node,npm,npx}`), installed with the application under
+    /// `/usr` so the sandbox sees it read-only. Only a FALLBACK for project commands: a system Node, or
+    /// one the project names by path (`./node_modules/.bin/...`), always wins.
+    pub private_node: Option<PathBuf>,
+}
+
+/// Environment variable through which the supervisor tells its own children (daemon, broker) where the
+/// verified private Node.js lives. Read only after the checks in [`private_node_from_env`].
+pub const PRIVATE_NODE_ENV: &str = "NEXUS_PRIVATE_NODE_DIR";
+
+/// The private Node.js directory named by the environment, if it can be trusted: absolute, under `/usr`
+/// (what the sandbox exposes read-only), `bin/node` a regular file owned by root or this user and not
+/// writable by anyone else, and the directory itself not writable by others.
+pub fn private_node_from_env() -> Option<PathBuf> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let dir = PathBuf::from(std::env::var_os(PRIVATE_NODE_ENV)?);
+    if !dir.is_absolute()
+        || !dir.starts_with("/usr")
+        || dir.components().any(|c| c.as_os_str() == "..")
+    {
+        return None;
+    }
+    let me = unsafe { libc::geteuid() };
+    let ok = |p: &Path, want_file: bool| -> bool {
+        let Ok(md) = std::fs::symlink_metadata(p) else {
+            return false;
+        };
+        (if want_file { md.is_file() } else { md.is_dir() })
+            && (md.uid() == 0 || md.uid() == me)
+            && md.permissions().mode() & 0o022 == 0
+    };
+    (ok(&dir, false) && ok(&dir.join("bin"), false) && ok(&dir.join("bin/node"), true))
+        .then_some(dir)
 }
 
 impl Toolchain {
@@ -135,7 +168,17 @@ impl Toolchain {
         Self {
             cargo_home_bin: cargo_bin.filter(|p| p.is_dir()),
             rustup_home: rustup.filter(|p| p.is_dir()),
+            private_node: private_node_from_env(),
         }
+    }
+
+    /// `<private node>/bin/<name>` for `node`, `npm` or `npx`, when the private Node exists.
+    pub(crate) fn private_node_program(&self, name: &str) -> Option<String> {
+        if !matches!(name, "node" | "npm" | "npx") {
+            return None;
+        }
+        let p = self.private_node.as_ref()?.join("bin").join(name);
+        p.exists().then(|| p.to_string_lossy().into_owned())
     }
 }
 
@@ -269,6 +312,20 @@ impl CommandPolicy {
         self.toolchain.cargo_home_bin.is_some()
     }
 
+    /// See [`Toolchain::private_node_program`].
+    pub(crate) fn private_node_program(&self, name: &str) -> Option<String> {
+        self.toolchain.private_node_program(name)
+    }
+
+    /// `:`-prefixed PATH suffix that makes the private Node's `bin` reachable (after the system dirs).
+    pub(crate) fn private_node_path_suffix(&self) -> String {
+        self.toolchain
+            .private_node
+            .as_ref()
+            .map(|n| format!(":{}", n.join("bin").to_string_lossy()))
+            .unwrap_or_default()
+    }
+
     pub(crate) fn toolchain_binds_pub(&self) -> Vec<(PathBuf, String)> {
         self.toolchain_binds()
     }
@@ -302,6 +359,10 @@ impl CommandPolicy {
             path.push_str("/toolchain/cargo/bin:");
         }
         path.push_str("/usr/bin:/bin");
+        if let Some(n) = &self.toolchain.private_node {
+            path.push(':');
+            path.push_str(&n.join("bin").to_string_lossy());
+        }
         e.insert("PATH".into(), path);
         e.insert("HOME".into(), "/work/out/home".into());
         e.insert("TMPDIR".into(), "/tmp".into());

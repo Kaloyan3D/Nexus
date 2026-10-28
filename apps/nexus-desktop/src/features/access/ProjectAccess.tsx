@@ -69,7 +69,7 @@ function PreviewPorts({ p, onDone }: { p: ProjectView; onDone: () => void }) {
  * network destinations, expiry and Full Access live under Advanced permissions on the Projects page.
  */
 export function ProjectAccess({ p, onAdvanced }: { p: ProjectView; onAdvanced?: () => void }) {
-  const { allowProjectWork, allowProjectInstalls, revokeProjectPreviews, setProjectEditMode, permissionSupport, accessBusy, accessError, clearAccessError } = useNexus();
+  const { allowProjectWork, allowProjectInstalls, revokeProjectPreviews, switchToAutomaticApproval, setProjectEditMode, permissionSupport, accessBusy, accessError, clearAccessError } = useNexus();
   const [choosingPorts, setChoosingPorts] = useState(false);
   const a = accessOf(p);
   const id = p.projectId;
@@ -87,8 +87,12 @@ export function ProjectAccess({ p, onAdvanced }: { p: ProjectView; onAdvanced?: 
         </Alert>
       )}
       {a.asksFirst && (
-        <Alert tone="warning" title="This project asks before every action">
-          Each edit and command waits for an answer given in a separate terminal program, which Nexus shows when something is waiting. If you would rather not use a terminal, switch to automatic under Advanced permissions.
+        <Alert tone="warning" title="This project asks before every action — that is not available in this release">
+          Answering each request needs a separate terminal program, which this release does not use, so tasks here would wait for an answer nobody can give.{" "}
+          <Button size="sm" variant="primary" disabled={!idle} onClick={() => void switchToAutomaticApproval(id)} aria-label={`Switch ${p.label} to automatic approval`}>
+            Switch to automatic…
+          </Button>{" "}
+          Everything stays inside the permissions below; you confirm the change in a system dialog.
         </Alert>
       )}
       {fullAccess && (
@@ -108,7 +112,7 @@ export function ProjectAccess({ p, onAdvanced }: { p: ProjectView; onAdvanced?: 
           }
         >
           {a.editsDirectly
-            ? "Each change is saved in your project folder as it is made. Nexus keeps the original of every file it changes (30 days) and never touches secrets or .git. It cannot put edited files back with one click yet — keep the project in version control, or work on a copy."
+            ? "Each change is saved in your project folder as it is made. Nexus keeps the original of every file it changes (30 days) and never touches secrets or .git. You can restore its changes from a run's details; files you changed since are left alone."
             : "Nexus changes a throw-away copy. You review the changes and apply them to your folder yourself."}
         </Row>
         <Row

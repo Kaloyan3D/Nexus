@@ -11,6 +11,8 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     globals: true,
+    // packaging/*.test.mjs are node:test files (npm run test:packaging)
+    include: ["src/**/*.test.{ts,tsx}"],
     css: false,
     // jsdom + user-event typing is CPU-bound; under a loaded host (e.g. a
     // parallel cargo build) 5 s default flaked on modelRun/composer tests.

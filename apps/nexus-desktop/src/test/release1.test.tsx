@@ -6,7 +6,7 @@ import { NexusProvider } from "../state/NexusContext";
 import { environmentFindings } from "../features/setup/EnvironmentNotes";
 import { fakeApi, fakeRun } from "./fakeApi";
 import type { NativeApi } from "../lib/api";
-import type { EnvCheck, ExecEffects, JobView, ProjectView, RestorePreview, RuntimeState, ThreadDetail, ThreadMessage, ThreadRunView, ThreadSummary, ToolActivity } from "../lib/contracts";
+import type { EditRestorePreview, EnvCheck, ExecEffects, JobView, ProjectView, RestorePreview, RuntimeState, ThreadDetail, ThreadMessage, ThreadRunView, ThreadSummary, ToolActivity } from "../lib/contracts";
 
 // Release 1 UI contracts. The native layer is a fake: what these tests state is what the PAGE asks for, what
 // it shows, and that it never offers a way to name a path, an address, a digest it did not receive, or to
@@ -148,6 +148,25 @@ describe("Project access in plain words (Projects page)", () => {
     await user.click(p.getByRole("button", { name: "Allow dependency downloads for site" }));
     await new Promise((r) => setTimeout(r, 50));
     expect(allowInstalls).not.toHaveBeenCalled();
+  });
+
+  it("a project that asks before every action says that is unavailable and offers one natively confirmed switch to automatic", async () => {
+    const useAuto = vi.fn(async () => ({}));
+    const user = userEvent.setup();
+    mount(baseApi({
+      projectUseAutomatic: useAuto,
+      projectList: async () => ({ projects: [project({ workspaceMode: "direct", grant: grant({ approval: "ask" }) })], permissions: support({ askAvailable: false, askReason: "needs a separate terminal program" }) }),
+    }), "#/projects");
+    const p = await projectArticle();
+    expect(p.getByText(/asks before every action — that is not available in this release/)).toBeInTheDocument();
+    expect(p.getByText(/Answering each request needs a separate terminal program/)).toBeInTheDocument();
+    expect(useAuto).not.toHaveBeenCalled();
+    await user.click(p.getByRole("button", { name: "Switch site to automatic approval" }));
+    expect(useAuto).toHaveBeenCalledWith(PID);
+    // the advanced editor offers no working "ask" either
+    await user.click(p.getByRole("button", { name: "Permissions for site" }));
+    const opt = p.getByRole("option", { name: /Asks me first/ }) as HTMLOptionElement;
+    expect(opt.disabled).toBe(true);
   });
 
   it("everything granular sits under one Advanced disclosure, and Full Access is flagged where it is on", async () => {
@@ -416,12 +435,54 @@ describe("Recovering what a command changed", () => {
     expect(within(panel).getByText(/may be incomplete. Check your folder yourself/)).toBeInTheDocument();
   });
 
-  it("edits made directly in the folder are not offered a one-click undo that does not exist", async () => {
+  const editsRun = () =>
+    detailWith([act({ tool: "fs_edit", argsSummary: "edit src/a.ts", status: "executed" })], {
+      workspaceKind: "direct",
+      changedFiles: [{ path: "src/a.ts", status: "M", additions: 1, deletions: 1 }],
+      codingOutcome: { change: "applied", verification: "no-test-executed", editsApplied: 2, editsNotApplied: 0, testsExecuted: 0, testsNotExecuted: 0, blockedByApproval: 0, lastExitCode: null, staleAfterEdit: false, uncertainOperations: 0 },
+    });
+  const editsPv = (over: Partial<EditRestorePreview["edits"]> = {}): EditRestorePreview => ({
+    confirmDigest: "edits-1",
+    edits: { dryRun: true, outcome: "partial", refused: null, restored: [{ path: "src/a.ts", detail: "would be put back as it was" }, { path: "src/new.ts", detail: "created by Nexus and unchanged; would be removed" }], skipped: [], conflicted: [{ path: "src/mine.ts", detail: "changed after Nexus wrote it" }], unrecoverable: [], note: "Restoration is not atomic.", ...over },
+  });
+
+  it("file edits made directly in the folder can be reviewed and restored: created files go only if unchanged, files you changed are listed as left alone", async () => {
+    const apply = vi.fn(async () => ({ edits: { ...editsPv().edits, dryRun: false } }));
+    const preview = vi.fn(async () => editsPv());
     const user = userEvent.setup();
-    const d = detailWith([act({ tool: "fs_edit", argsSummary: "edit src/a.ts", status: "executed" })], { workspaceKind: "direct", changedFiles: [{ path: "src/a.ts", status: "M", additions: 1, deletions: 1 }], codingOutcome: { change: "applied", verification: "no-test-executed", editsApplied: 1, editsNotApplied: 0, testsExecuted: 0, testsNotExecuted: 0, blockedByApproval: 0, lastExitCode: null, staleAfterEdit: false, uncertainOperations: 0 } });
-    const panel = await openEvidence(api({}, d), user);
-    expect(within(panel).getByText(/Restoring file edits with one click is not available in this version/)).toBeInTheDocument();
-    expect(within(panel).queryByRole("button", { name: /^Restore/ })).not.toBeInTheDocument();
+    const panel = await openEvidence(api({ editsPreview: preview, editsApply: apply as NativeApi["editsApply"] }, editsRun()), user);
+    const group = within(await within(panel).findByLabelText("File edits"));
+    expect(group.getByText(/2 file edits by Nexus/)).toBeInTheDocument();
+    expect(group.getByText(/originals kept 30 days/)).toBeInTheDocument();
+    expect(preview).not.toHaveBeenCalled(); // opening the panel restores and previews nothing
+    await user.click(group.getByRole("button", { name: "Restore changes…" }));
+    const review = await group.findByRole("group", { name: "Recovery review" });
+    expect(within(review).getByText("src/new.ts")).toBeInTheDocument();
+    expect(within(review).getByText(/Changed since — will be left alone/)).toBeInTheDocument();
+    expect(within(review).getByText("src/mine.ts")).toBeInTheDocument();
+    expect(apply).not.toHaveBeenCalled();
+    await user.click(within(review).getByRole("button", { name: "Restore 2 files…" }));
+    expect(apply).toHaveBeenCalledWith(editsRun().runs[0]!.runId, "edits-1");
+    expect(await within(review).findByText(/2 files restored · 0 already as before · 1 left alone because they changed since/)).toBeInTheDocument();
+  });
+
+  it("a declined confirmation or a stale review restores nothing and says why; an unrecoverable file is labelled honestly", async () => {
+    const apply = vi.fn().mockRejectedValueOnce(declined).mockRejectedValueOnce({ code: "recovery", message: "changed: the files changed since you reviewed this; review it again", class: "refused", retryable: false });
+    const user = userEvent.setup();
+    const panel = await openEvidence(
+      api({ editsPreview: async () => editsPv({ unrecoverable: [{ path: "src/lost.ts", detail: "the kept original is missing or damaged" }] }), editsApply: apply as NativeApi["editsApply"] }, editsRun()),
+      user,
+    );
+    await user.click(await within(panel).findByRole("button", { name: "Restore changes…" }));
+    expect(await within(panel).findByText(/Some changes cannot be restored \(1\)/)).toBeInTheDocument();
+    expect(within(panel).getByText("src/lost.ts")).toBeInTheDocument();
+    await user.click(within(panel).getByRole("button", { name: "Restore 2 files…" }));
+    await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
+    expect(within(panel).queryByText("Nothing was restored")).not.toBeInTheDocument();
+    await user.click(within(panel).getByRole("button", { name: "Restore 2 files…" }));
+    expect(await within(panel).findByText("Nothing was restored")).toBeInTheDocument();
+    expect(within(panel).getByText(/review it again/)).toBeInTheDocument();
+    expect(within(panel).queryByText(/files restored ·/)).not.toBeInTheDocument();
   });
 
   it("a run that worked on a copy has nothing to restore, and says so", async () => {
@@ -449,6 +510,9 @@ describe("What this computer lacks, and what to do about it", () => {
     expect(f(env({ platform: "macos" }))).toEqual([["platform", "warning"]]);
     expect(f(env(), { available: false, reason: "no Landlock" })).toEqual([["sandbox", "warning"]]);
     expect(f(env({ toolchains: [["git", true], ["node", false], ["npm", false], ["python3", false], ["cargo", false]] }))).toEqual([["toolchains", "warning"]]);
+    // with Nexus's own Node.js, a machine without Node is not missing build tools for a website
+    const noNode = env({ toolchains: [["git", true], ["node", false], ["npm", false], ["python3", false], ["cargo", false]] });
+    expect(environmentFindings(noNode, ok, true).map((x) => x.id)).toEqual(["missing-tools"]);
     expect(f(env({ toolchains: [["git", true], ["node", true], ["npm", true], ["python3", false], ["cargo", false]] }))).toEqual([["missing-tools", "info"]]);
     expect(f(env({ opener: null }))).toEqual([["opener", "info"]]);
     const sandbox = environmentFindings(env(), { available: false, reason: "no Landlock" })[0]!;

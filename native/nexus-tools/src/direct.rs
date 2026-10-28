@@ -506,7 +506,7 @@ impl Store {
         Ok(self.read_manifest()?.observed)
     }
 
-    fn read_pre(&self, e: &Entry) -> Option<Vec<u8>> {
+    pub(crate) fn read_pre(&self, e: &Entry) -> Option<Vec<u8>> {
         if !e.existed {
             return None;
         }

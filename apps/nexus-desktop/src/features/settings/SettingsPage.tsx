@@ -120,6 +120,7 @@ export function SettingsPage() {
           <KeyValue
             rows={[
               { label: "Commands in your project", value: permissionSupport?.known ? <Badge tone={permissionSupport.inPlaceAvailable === false ? "warning" : "success"}>{permissionSupport.inPlaceAvailable === false ? "unavailable" : "available"}</Badge> : "—" },
+              { label: "Node.js", value: runtimeState.node ? (runtimeState.node.source === "bundled" ? `${runtimeState.node.version ?? ""} — bundled with Nexus (private; your system is untouched)` : "from this computer (development build)") : "—" },
               { label: "Data folder", value: runtimeState.home ?? "—", mono: true },
             ]}
           />

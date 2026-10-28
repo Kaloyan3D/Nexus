@@ -173,6 +173,7 @@ export interface NexusState {
   allowProjectWork: (projectId: string) => Promise<boolean>;
   allowProjectPreviews: (projectId: string, ports: number[]) => Promise<boolean>;
   revokeProjectPreviews: (projectId: string) => Promise<boolean>;
+  switchToAutomaticApproval: (projectId: string) => Promise<boolean>;
   allowProjectInstalls: (projectId: string, allow: boolean) => Promise<boolean>;
   /** Which of those is in flight (`<action>:<projectId>`), and the last one's error. */
   accessBusy: string | null;
@@ -700,6 +701,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
   );
   const allowProjectWork = useCallback((id: string) => access(`work:${id}`, () => nativeApi.projectAllowWork(id)), [access, nativeApi]);
   const allowProjectPreviews = useCallback((id: string, ports: number[]) => access(`previews:${id}`, () => nativeApi.projectAllowPreviews(id, ports)), [access, nativeApi]);
+  const switchToAutomaticApproval = useCallback((id: string) => access(`approval:${id}`, () => nativeApi.projectUseAutomatic(id)), [access, nativeApi]);
   const revokeProjectPreviews = useCallback((id: string) => access(`previews:${id}`, () => nativeApi.projectRevokePreviews(id)), [access, nativeApi]);
   const projectsRef = useRef<ProjectView[]>([]);
   useEffect(() => {
@@ -944,6 +946,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     allowProjectWork,
     allowProjectPreviews,
     revokeProjectPreviews,
+    switchToAutomaticApproval,
     allowProjectInstalls,
     accessBusy,
     accessError,

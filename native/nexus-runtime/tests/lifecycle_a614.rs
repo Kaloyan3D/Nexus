@@ -44,6 +44,11 @@ fn rig() -> Rig {
         approver: None,
         confine: None,
         egress: None,
+        private_node_dir: None,
+        node_info: nexus_runtime::NodeInfo {
+            source: "system",
+            version: None,
+        },
     };
     Rig {
         _tmp: tmp,

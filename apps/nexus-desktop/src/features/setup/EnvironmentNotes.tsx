@@ -4,7 +4,7 @@ import { Alert } from "../../components/ui/primitives";
 import { useNexus } from "../../state/NexusContext";
 
 /** What a missing system tool means for the person, with the way to fix it. Pure, so it can be tested. */
-export function environmentFindings(env: EnvCheck | null, inPlace: { available: boolean | undefined; reason: string | null | undefined }): Array<{ id: string; tone: "error" | "warning" | "info"; title: string; body: string }> {
+export function environmentFindings(env: EnvCheck | null, inPlace: { available: boolean | undefined; reason: string | null | undefined }, bundledNode = false): Array<{ id: string; tone: "error" | "warning" | "info"; title: string; body: string }> {
   const out: Array<{ id: string; tone: "error" | "warning" | "info"; title: string; body: string }> = [];
   if (!env) return out;
   if (env.platform !== "linux") {
@@ -31,9 +31,11 @@ export function environmentFindings(env: EnvCheck | null, inPlace: { available: 
       body: `${inPlace.reason ?? "The sandbox is not available."} Nexus can still read and edit files and run tests in a temporary copy, but it cannot install dependencies, keep build output, or show a running site. This usually needs a newer Linux kernel with Landlock, or reinstalling Nexus.`,
     });
   }
-  const found = env.toolchains.filter(([, ok]) => ok).map(([n]) => n);
-  const missing = env.toolchains.filter(([, ok]) => !ok).map(([n]) => n);
-  if (!env.toolchains.some(([n, ok]) => ok && ["node", "npm", "python3", "cargo"].includes(n))) {
+  // Nexus brings its own Node.js and npm for projects when the machine has none, so they are never "missing"
+  const toolchains: [string, boolean][] = env.toolchains.map(([n, ok]) => [n, ok || (bundledNode && (n === "node" || n === "npm"))]);
+  const found = toolchains.filter(([, ok]) => ok).map(([n]) => n);
+  const missing = toolchains.filter(([, ok]) => !ok).map(([n]) => n);
+  if (!toolchains.some(([n, ok]) => ok && ["node", "npm", "python3", "cargo"].includes(n))) {
     out.push({
       id: "toolchains",
       tone: "warning",
@@ -61,7 +63,7 @@ export function environmentFindings(env: EnvCheck | null, inPlace: { available: 
 
 /** The facts about this computer that decide what Nexus can do, with what to do about each. Shown only when there is something to say. */
 export function EnvironmentNotes({ onlyBlocking = false }: { onlyBlocking?: boolean }) {
-  const { api, permissionSupport } = useNexus();
+  const { api, permissionSupport, runtimeState } = useNexus();
   const [env, setEnv] = useState<EnvCheck | null>(null);
   useEffect(() => {
     let alive = true;
@@ -74,7 +76,7 @@ export function EnvironmentNotes({ onlyBlocking = false }: { onlyBlocking?: bool
     };
   }, [api]);
   const inPlace = permissionSupport?.known === true ? { available: permissionSupport.inPlaceAvailable, reason: permissionSupport.inPlaceReason } : { available: undefined, reason: undefined };
-  const findings = environmentFindings(env, inPlace).filter((f) => !onlyBlocking || f.tone === "error");
+  const findings = environmentFindings(env, inPlace, runtimeState?.node?.source === "bundled").filter((f) => !onlyBlocking || f.tone === "error");
   if (findings.length === 0) return null;
   return (
     <section className="nv-envnotes" aria-label="About this computer">

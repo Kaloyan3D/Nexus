@@ -122,6 +122,7 @@ fn release1_live_journey() {
     std::env::remove_var("NEXUS_SOCKET");
     std::env::set_var("NEXUS_HOME", &home);
     let rt = Runtime::new();
+    let _stop = rt.guard();
     rt.start_blocking();
     let st = rt.state();
     assert_eq!(st.phase, "ready", "{:?}", st.message);
@@ -487,6 +488,7 @@ fn release1_live_guarded_restore() {
     std::env::remove_var("NEXUS_SOCKET");
     std::env::set_var("NEXUS_HOME", &home);
     let rt = Runtime::new();
+    let _stop = rt.guard();
     rt.start_blocking();
     assert_eq!(rt.state().phase, "ready");
     let yes = ScriptedDialogs {

@@ -40,23 +40,29 @@
       "../../../native/target/release/nexus-approver": "bin/nexus-approver",
       "../../../native/target/release/nexus-confine": "bin/nexus-confine",
       "../../../native/target/release/nexus-egress": "bin/nexus-egress",
-      "../../../config/registry/*.cjs": "repo/config/registry/",
-      "../../../config/registry/modes/*.json": "repo/config/registry/modes/"
+      "resources/node": "node",
+      "resources/repo": "repo"
     },
     "shortDescription": "Nexus - build and fix software with an AI that shows its work",
     "longDescription": "Nexus runs an AI engineering assistant on your computer. Open a project, describe what to build or fix, and Nexus edits, tests and previews it inside the permissions you give, then shows what actually ran.",
     "linux": {
       "deb": {
         "depends": [
+          "libc6 (>= 2.39)",
           "libwebkit2gtk-4.1-0",
           "libgtk-3-0",
-          "nodejs (>= 18)",
+          "bubblewrap",
+          "systemd",
+          "util-linux",
           "zenity | kdialog"
         ],
         "recommends": [
           "xdg-utils",
           "git"
-        ]
+        ],
+        "files": {
+          "/usr/share/doc/nexus/THIRD-PARTY-NOTICES.md": "resources/THIRD-PARTY-NOTICES.md"
+        }
       }
     }
   }
