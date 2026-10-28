@@ -7,6 +7,7 @@ import { useNexus, type PanelKind } from "../../state/NexusContext";
 import { Alert, Badge, Loading, Tabs, type TabDef } from "../../components/ui/primitives";
 import { DiffViewer } from "../conversation/ModelRunPanel";
 import { RecoverySection } from "../recovery/CommandRecovery";
+import { ownLimits } from "../../lib/limits";
 
 const TABS: TabDef[] = [
   { id: "diff", label: "Diff" },
@@ -253,9 +254,7 @@ function SourceTab({ run }: { run: IntentRun }) {
       <dd className="nv-mono">{src?.writeAllow && src.writeAllow.length > 0 ? src.writeAllow.join(", ") : "whole project (minus protected files)"}</dd>
       <dt>Run limits</dt>
       <dd>
-        {intentCodeLimits
-          ? `${intentCodeLimits.maxTurns} turns · ${intentCodeLimits.maxToolCalls} tool calls · ${intentCodeLimits.maxEdits} edits · ${intentCodeLimits.maxTests} commands`
-          : "—"}
+        {intentCodeLimits ? (ownLimits(intentCodeLimits) ?? "none set by you") : "—"}
       </dd>
       <dt>Approval lifetime</dt>
       <dd>{intentCodeLimits?.approvalLifetimeSecs ? `${Math.round(intentCodeLimits.approvalLifetimeSecs / 60 * 10) / 10} min` : "—"}</dd>

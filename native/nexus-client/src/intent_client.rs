@@ -109,28 +109,26 @@ pub struct IntentRun {
     /// Server-managed workspace identity (never a path).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
-    /// Provider calls (model turns) started so far / allowed.
+    /// Provider calls (model turns) started so far, and the limit the person chose (absent = no limit).
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub turn: u32,
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
-    pub max_turns: u32,
-    /// Tool calls proposed so far / allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    /// Tool calls proposed so far, and the limit the person chose (absent = no limit).
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub tool_calls: u32,
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
-    pub max_tool_calls: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_calls: Option<u32>,
     /// Bytes of tool results returned to the model so far.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub tool_result_bytes: u64,
     /// Which policy limit ended the run cleanly (`max-turns`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
-    /// repo-code: approved edit operations used / allowed.
+    /// repo-code: edit operations applied so far (a count, never a quota).
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub edits_used: u32,
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
-    pub max_edits: u32,
-    /// repo-code: approved test/build executions used / allowed.
+    /// repo-code: commands run so far (a count, never a quota).
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub tests_used: u32,
     /// A6.1.4: turns whose conversation was shortened to stay inside the context budget.
@@ -152,8 +150,6 @@ pub struct IntentRun {
     /// What the last recovery was about, for display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_recovery: Option<String>,
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
-    pub max_tests: u32,
     /// repo-code: `pass` / `fail` of the most recent test execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_test_verification: Option<String>,
@@ -211,9 +207,13 @@ pub struct IntentRun {
     /// Plain-language reason shown with an `incomplete` run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_note: Option<String>,
-    /// Bounded, ordered record of every proposed tool call.
+    /// The latest tool calls of the run (a bounded window, so the run record stays small). Every call is kept
+    /// in the run's durable activity log: `activity_total` says how many there are, `activity_page` reads them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_activity: Vec<ToolActivity>,
+    /// Every tool call the run has recorded (`tool_activity` is the latest of them).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub activity_total: u32,
     /// `path:line[-line]` references in the final answer that the Controller
     /// could match against bytes the tools actually returned in this run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -521,55 +521,62 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
     Some(o)
 }
 
-/// The fixed run limits the Desktop uses for `repo-code` (A6.1). They are
-/// defined here, shown to the user before submitting, and cannot be chosen by
-/// the renderer. A live session authorization must allow at least these.
+/// What a `repo-code` run is given per MODEL CALL. Only the output ceiling of one provider request lives
+/// here: it is a parameter of that request (the provider enforces and bills it; it includes the model's
+/// reasoning tokens), not a quota on the work. There is no ceiling on edits, written bytes, commands,
+/// tool calls, model turns or elapsed time: those exist only if the person chose them (`UserLimits`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopCodeLimits {
-    pub max_turns: u32,
-    pub max_tool_calls: u32,
-    pub max_tool_result_bytes: u64,
-    pub max_edits: u32,
-    pub max_tests: u32,
     pub max_output_tokens: u64,
-    pub max_runtime_secs: u64,
 }
 
+/// The strict operator profile's per-call output ceiling (kept byte-identical for the provider-body
+/// baselines).
 pub const DESKTOP_CODE_LIMITS: DesktopCodeLimits = DesktopCodeLimits {
-    max_turns: 12,
-    max_tool_calls: 30,
-    max_tool_result_bytes: 131_072,
-    max_edits: 5,
-    max_tests: 5,
     max_output_tokens: 1024,
-    max_runtime_secs: 1800,
 };
 
-/// A6.1.4 interactive defaults: sensible limits for real engineering, applied
-/// automatically (the user never sets them per task). The output cap is per model
-/// turn and INCLUDES reasoning tokens (measured 738-1793 of 1024-2048 at effort
-/// `low`); 16384 completed 20/20 real requests with at most 2492 used.
+/// The interactive (Desktop) profile's per-call output ceiling. It is per model turn and INCLUDES reasoning
+/// tokens (measured 738-1793 of 1024-2048 at effort `low`); 32768 leaves room for a whole file.
 pub const INTERACTIVE_CODE_LIMITS: DesktopCodeLimits = DesktopCodeLimits {
-    max_turns: 500,
-    max_tool_calls: 4000,
-    max_tool_result_bytes: 256 * 1024 * 1024,
-    max_edits: 2000,
-    max_tests: 1000,
     max_output_tokens: 32_768,
-    max_runtime_secs: 8 * 3600,
 };
 
 impl DesktopCodeLimits {
     pub fn to_intent_limits(self) -> nexus_contracts::intent::IntentLimits {
         nexus_contracts::intent::IntentLimits {
             max_output_tokens: Some(self.max_output_tokens),
-            max_turns: Some(self.max_turns),
-            max_tool_calls: Some(self.max_tool_calls),
-            max_tool_result_bytes: Some(self.max_tool_result_bytes),
-            max_runtime_secs: Some(self.max_runtime_secs),
-            max_edits: Some(self.max_edits),
-            max_tests: Some(self.max_tests),
+            ..Default::default()
+        }
+    }
+}
+
+/// Limits the PERSON chose (Settings) to bound their own cost or time. Every field is optional and the default
+/// is none: Nexus applies no ceiling of its own.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UserLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_calls: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runtime_secs: Option<u64>,
+}
+
+impl UserLimits {
+    /// The run limits to send with a task: the per-call output ceiling plus whatever the person chose.
+    pub fn to_intent_limits(
+        self,
+        per_call: DesktopCodeLimits,
+    ) -> nexus_contracts::intent::IntentLimits {
+        nexus_contracts::intent::IntentLimits {
+            max_output_tokens: Some(per_call.max_output_tokens),
+            max_turns: self.max_turns,
+            max_tool_calls: self.max_tool_calls,
+            max_runtime_secs: self.max_runtime_secs,
+            ..Default::default()
         }
     }
 }
@@ -930,19 +937,27 @@ pub fn diff(socket: &Path, run_id: &str) -> Result<DiffReply, ClientError> {
     )?)
 }
 
-/// The repo-code limits a run will really get (the fixed maximums lowered by
-/// the operator's caps) and how long an approval stays decidable (A6.1.3).
+/// The limits a repo-code run will really get: only what the person (or the operator) chose, nothing built in
+/// (A6.1.3), and how long an approval stays decidable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeConfig {
-    pub limits: DesktopCodeLimits,
+    pub limits: UserLimits,
     pub approval_lifetime_secs: u64,
-    /// The built-in maximums (what the user's own limits are lowered from).
-    #[serde(default)]
-    pub built_in: Option<DesktopCodeLimits>,
+    /// Output ceiling of ONE model call under this broker's profile (a request parameter, not a quota).
+    pub max_output_tokens: u64,
 }
 
-/// Save the user's own (lower) limits; fields left out are reset to the built-in values.
+impl CodeConfig {
+    /// The limits to send with a task under this broker: its per-call output ceiling plus the person's own limits.
+    pub fn intent_limits(&self) -> nexus_contracts::intent::IntentLimits {
+        self.limits.to_intent_limits(DesktopCodeLimits {
+            max_output_tokens: self.max_output_tokens,
+        })
+    }
+}
+
+/// Save the user's own limits; fields left out are cleared (no limit).
 pub fn limits_set(
     socket: &Path,
     limits: &serde_json::Map<String, serde_json::Value>,
@@ -961,6 +976,29 @@ pub fn code_config(socket: &Path) -> Result<CodeConfig, ClientError> {
         "intent-code-config",
         serde_json::json!({}),
         10_000,
+    )?)
+}
+
+/// One page of EVERY tool call of one of THIS client's runs, oldest first (the run view only carries the latest).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityPage {
+    pub total: u32,
+    pub offset: u32,
+    pub activity: Vec<ToolActivity>,
+}
+
+pub fn activity_page(
+    socket: &Path,
+    run_id: &str,
+    offset: u32,
+    limit: u32,
+) -> Result<ActivityPage, ClientError> {
+    decode(call(
+        socket,
+        "intent-activity",
+        serde_json::json!({ "runId": run_id, "offset": offset, "limit": limit }),
+        15_000,
     )?)
 }
 

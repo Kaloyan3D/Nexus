@@ -26,9 +26,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-/// Most distinct paths one task may touch in a direct folder (a bound, not a quota users meet).
-pub const MAX_TOUCHED: usize = 4000;
-/// Largest pre-image kept per file.
+/// Largest pre-image kept per file (ONE file; there is no limit on how many files a task may touch).
 pub const MAX_PRE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_DIFF_BYTES: usize = 256 * 1024;
 pub const MAX_DIFF_FILES: usize = 200;
@@ -204,7 +202,13 @@ fn sha_hex(b: &[u8]) -> String {
     hex::encode(Sha256::digest(b))
 }
 
-/// One task's pre-image store: `<base>/.direct/<task>/{manifest.json,pre/<sha256(path)>}`.
+/// One task's pre-image store: `<base>/.direct/<task>/{manifest.json,pre/<sha256(path)>,ent/<sha256(path)>.json,dirs.jsonl}`.
+///
+/// A task may touch any number of files. Each touched file has its own small record (`ent/`, written once on
+/// first touch and updated in place when an operation is verified), and created folders are appended to
+/// `dirs.jsonl`, so the cost of an operation does not grow with the ones before it and nothing is rewritten
+/// wholesale. `manifest.json` keeps the root and the bounded command observations; stores written before
+/// this layout also keep their entries in it, and both are read.
 #[derive(Debug, Clone)]
 pub struct Store {
     dir: PathBuf,
@@ -244,6 +248,11 @@ impl Store {
             .recursive(true)
             .mode(0o700)
             .create(s.dir.join("pre"))
+            .map_err(io)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(s.ent_dir())
             .map_err(io)?;
         let _g = s.lock()?;
         if s.exists() {
@@ -322,27 +331,166 @@ impl Store {
         Ok(self.read_manifest()?.root)
     }
 
+    fn ent_dir(&self) -> PathBuf {
+        self.dir.join("ent")
+    }
+
+    fn ent_path(&self, path: &str) -> PathBuf {
+        self.ent_dir().join(format!("{}.json", path_key(path)))
+    }
+
+    /// The per-file record of `path`, if the new layout holds one.
+    fn read_ent(&self, path: &str) -> Result<Option<Entry>, DirectError> {
+        let mut raw = String::new();
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(self.ent_path(path));
+        let mut f = match f {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => {
+                return Err(err(
+                    "corrupt",
+                    "a direct workspace file record is unreadable",
+                ))
+            }
+        };
+        (&mut f)
+            .take(64 * 1024)
+            .read_to_string(&mut raw)
+            .map_err(|_| err("corrupt", "a direct workspace file record is unreadable"))?;
+        let e: Entry = serde_json::from_str(&raw)
+            .map_err(|_| err("corrupt", "a direct workspace file record is malformed"))?;
+        if e.path != path {
+            return Err(err(
+                "corrupt",
+                "a direct workspace file record names another path",
+            ));
+        }
+        Ok(Some(e))
+    }
+
+    fn write_ent(&self, e: &Entry) -> Result<(), DirectError> {
+        let io = |e: std::io::Error| err("internal", format!("direct store: {e}"));
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(self.ent_dir())
+            .map_err(io)?;
+        let dest = self.ent_path(&e.path);
+        let tmp = self.ent_dir().join(format!(".tmp-{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+            .map_err(io)?;
+        f.write_all(&serde_json::to_vec(e).map_err(|x| err("internal", x.to_string()))?)
+            .map_err(io)?;
+        f.sync_all().map_err(io)?;
+        std::fs::rename(&tmp, dest).map_err(io)
+    }
+
+    /// Every file this task has touched (both layouts), by path.
     pub fn entries(&self) -> Result<Vec<Entry>, DirectError> {
-        let mut e = self.read_manifest()?.entries;
-        e.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(e)
+        let mut by: std::collections::BTreeMap<String, Entry> = self
+            .read_manifest()?
+            .entries
+            .into_iter()
+            .map(|e| (e.path.clone(), e))
+            .collect();
+        if let Ok(rd) = std::fs::read_dir(self.ent_dir()) {
+            for f in rd.flatten() {
+                let name = f.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') || !name.ends_with(".json") {
+                    continue;
+                }
+                let mut raw = String::new();
+                let ok = std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(f.path())
+                    .and_then(|h| h.take(64 * 1024).read_to_string(&mut raw))
+                    .is_ok();
+                if !ok {
+                    return Err(err(
+                        "corrupt",
+                        "a direct workspace file record is unreadable",
+                    ));
+                }
+                let e: Entry = serde_json::from_str(&raw)
+                    .map_err(|_| err("corrupt", "a direct workspace file record is malformed"))?;
+                if format!("{}.json", path_key(&e.path)) != name {
+                    return Err(err("corrupt", "a direct workspace file record is misfiled"));
+                }
+                by.insert(e.path.clone(), e);
+            }
+        }
+        Ok(by.into_values().collect())
+    }
+
+    fn dirs_file(&self) -> PathBuf {
+        self.dir.join("dirs.jsonl")
+    }
+
+    fn appended_dirs(&self) -> Vec<String> {
+        let mut raw = String::new();
+        let ok = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(self.dirs_file())
+            .and_then(|h| h.take(64 * 1024 * 1024).read_to_string(&mut raw))
+            .is_ok();
+        if !ok {
+            return Vec::new();
+        }
+        raw.lines()
+            .filter_map(|l| serde_json::from_str::<String>(l).ok())
+            .collect()
     }
 
     /// Folders this task created, in creation order.
     pub fn dirs(&self) -> Result<Vec<String>, DirectError> {
-        Ok(self.read_manifest()?.dirs)
-    }
-
-    /// Remember folders the task created (bounded; duplicates ignored).
-    pub fn record_dirs(&self, dirs: &[String]) -> Result<(), DirectError> {
-        let _g = self.lock()?;
-        let mut m = self.read_manifest()?;
-        for d in dirs {
-            if !m.dirs.contains(d) && m.dirs.len() < MAX_TOUCHED {
-                m.dirs.push(d.clone());
+        let mut out = self.read_manifest()?.dirs;
+        for d in self.appended_dirs() {
+            if !out.contains(&d) {
+                out.push(d);
             }
         }
-        self.write_manifest(&m)
+        Ok(out)
+    }
+
+    /// Remember folders the task created (duplicates ignored; appended, never rewritten).
+    pub fn record_dirs(&self, dirs: &[String]) -> Result<(), DirectError> {
+        let _g = self.lock()?;
+        let known = self.dirs()?;
+        let mut add: Vec<&String> = Vec::new();
+        for d in dirs {
+            if !known.contains(d) && !add.contains(&d) {
+                add.push(d);
+            }
+        }
+        if add.is_empty() {
+            return Ok(());
+        }
+        let io = |e: std::io::Error| err("internal", format!("direct store: {e}"));
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(self.dirs_file())
+            .map_err(io)?;
+        let mut buf = String::new();
+        for d in add {
+            buf.push_str(&serde_json::to_string(d).map_err(|e| err("internal", e.to_string()))?);
+            buf.push('\n');
+        }
+        f.write_all(buf.as_bytes()).map_err(io)?;
+        f.sync_all().map_err(io)
     }
 
     /// First touch wins: keep the exact pre-image of `path` the first time it is planned over.
@@ -353,15 +501,10 @@ impl Store {
         mode: Option<u32>,
     ) -> Result<(), DirectError> {
         let _g = self.lock()?;
-        let mut m = self.read_manifest()?;
-        if m.entries.iter().any(|e| e.path == path) {
+        if self.read_ent(path)?.is_some()
+            || self.read_manifest()?.entries.iter().any(|e| e.path == path)
+        {
             return Ok(());
-        }
-        if m.entries.len() >= MAX_TOUCHED {
-            return Err(err(
-                "scope-refused",
-                "this task has already changed the most files a direct task may",
-            ));
         }
         if let Some(b) = pre {
             if b.len() as u64 > MAX_PRE_BYTES {
@@ -388,7 +531,7 @@ impl Store {
             f.sync_all().map_err(io)?;
             std::fs::rename(&tmp, &dest).map_err(io)?;
         }
-        m.entries.push(Entry {
+        self.write_ent(&Entry {
             path: path.to_owned(),
             existed: pre.is_some(),
             sha: pre.map(sha_hex),
@@ -398,13 +541,18 @@ impl Store {
             applied: false,
             first_touch_ms: now_ms(),
             last_post_ms: 0,
-        });
-        self.write_manifest(&m)
+        })
     }
 
     /// Nexus verified an operation on `path`; `post` = sha of its post-image (`None` = deleted).
     pub fn record_post(&self, path: &str, post: Option<&str>) -> Result<(), DirectError> {
         let _g = self.lock()?;
+        if let Some(mut e) = self.read_ent(path)? {
+            e.last_post_sha = post.map(str::to_owned);
+            e.applied = true;
+            e.last_post_ms = now_ms();
+            return self.write_ent(&e);
+        }
         let mut m = self.read_manifest()?;
         match m.entries.iter_mut().find(|e| e.path == path) {
             Some(e) => {
@@ -453,10 +601,8 @@ impl Store {
             ("deleted", &fx.deleted),
         ] {
             for p in &list.paths {
-                let ambiguous = m.entries.iter().any(|e| {
-                    e.path == *p
-                        && e.last_post_ms >= rec.started_ms
-                        && e.last_post_ms <= rec.ended_ms
+                let ambiguous = self.entry_of(&m, p)?.is_some_and(|e| {
+                    e.last_post_ms >= rec.started_ms && e.last_post_ms <= rec.ended_ms
                 });
                 paths.push(ObservedPath {
                     path: p.clone(),
@@ -499,6 +645,14 @@ impl Store {
             m.observed.drain(..over);
         }
         self.write_manifest(&m)
+    }
+
+    /// The record of one file, from either layout.
+    fn entry_of(&self, m: &Manifest, path: &str) -> Result<Option<Entry>, DirectError> {
+        if let Some(e) = self.read_ent(path)? {
+            return Ok(Some(e));
+        }
+        Ok(m.entries.iter().find(|e| e.path == path).cloned())
     }
 
     /// Command observations, oldest first.
@@ -545,11 +699,13 @@ pub fn sweep_old(base: &Path, max_age: std::time::Duration) -> usize {
         if !crate::gitwt::valid_task_id(&name) {
             continue;
         }
-        let manifest = e.path().join("manifest.json");
-        let age = std::fs::symlink_metadata(&manifest)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok());
+        // the store is as recent as its newest part: the manifest, or the per-file records (an operation
+        // verified on a file rewrites its record, not the manifest)
+        let newest = [e.path().join("manifest.json"), e.path().join("ent")]
+            .iter()
+            .filter_map(|p| std::fs::symlink_metadata(p).and_then(|m| m.modified()).ok())
+            .max();
+        let age = newest.and_then(|t| t.elapsed().ok());
         if age.is_some_and(|a| a >= max_age) {
             let meta = base.join(".meta").join(format!("{name}.json"));
             // only a record that says it is a direct task is removed along with its store
@@ -1030,6 +1186,70 @@ mod tests {
     }
 
     #[test]
+    fn a_task_may_touch_far_more_files_than_the_former_4000_limit_and_each_operation_stays_cheap() {
+        let (_proj, _base, store, _root) = setup();
+        let n = 6_000usize;
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            let p = format!("src/gen/file-{i}.ts");
+            store.record_pre(&p, None, None).unwrap();
+            store.record_post(&p, Some(&format!("{i:064x}"))).unwrap();
+            // a second touch of a file never creates another record and keeps the first original
+            store.record_pre(&p, Some(b"later"), None).unwrap();
+        }
+        store
+            .record_dirs(&(0..n).map(|i| format!("src/gen/d{i}")).collect::<Vec<_>>())
+            .unwrap();
+        store.record_dirs(&["src/gen/d1".to_owned()]).unwrap();
+        let all = store.entries().unwrap();
+        assert_eq!(all.len(), n);
+        assert!(all.iter().all(|e| e.applied && !e.existed));
+        assert_eq!(store.dirs().unwrap().len(), n);
+        // not quadratic: 6000 files of record_pre + record_post (the manifest used to be rewritten each time)
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(60),
+            "{:?}",
+            t.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_store_written_before_the_per_file_layout_is_still_read_and_updated() {
+        let (_proj, _base, store, _root) = setup();
+        // a legacy manifest that carries its entries (as every store did until now)
+        let mut m = store.read_manifest().unwrap();
+        m.entries.push(Entry {
+            path: "old.txt".into(),
+            existed: true,
+            sha: Some(sha_hex(b"x")),
+            bytes: 1,
+            mode: Some(0o644),
+            last_post_sha: None,
+            applied: false,
+            first_touch_ms: 1,
+            last_post_ms: 0,
+        });
+        m.dirs.push("old-dir".into());
+        store.write_manifest(&m).unwrap();
+        store.record_pre("new.txt", None, None).unwrap();
+        // the legacy entry is found (first touch wins), updated in its own place, and listed with the new one
+        store.record_pre("old.txt", Some(b"changed"), None).unwrap();
+        store.record_post("old.txt", Some("abc")).unwrap();
+        store.record_post("new.txt", Some("def")).unwrap();
+        let e = store.entries().unwrap();
+        assert_eq!(
+            e.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+            ["new.txt", "old.txt"]
+        );
+        assert_eq!(e[1].sha.as_deref(), Some(sha_hex(b"x").as_str()));
+        assert_eq!(e[1].last_post_sha.as_deref(), Some("abc"));
+        assert_eq!(store.dirs().unwrap(), vec!["old-dir".to_owned()]);
+        // a record that names another path, or is tampered with, is corruption, never silently skipped
+        std::fs::write(store.ent_path("new.txt"), b"{not json").unwrap();
+        assert_eq!(store.entries().unwrap_err().code, "corrupt");
+    }
+
+    #[test]
     fn first_touch_wins_and_the_original_is_kept_outside_the_project() {
         let (proj, base, store, root) = setup();
         std::fs::write(proj.path().join("a.txt"), "one\n").unwrap();
@@ -1175,12 +1395,21 @@ mod tests {
             0
         );
         assert!(store.exists());
-        // an old one goes (its manifest is older than the cutoff), the project never
+        // a store whose manifest is old but whose per-file records are recent is a task still working: kept
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86400);
         let f = std::fs::File::options()
             .write(true)
             .open(store.dir().join("manifest.json"))
             .unwrap();
-        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86400))
+        f.set_modified(old).unwrap();
+        assert_eq!(
+            sweep_old(base.path(), std::time::Duration::from_secs(30 * 86400)),
+            0
+        );
+        // an old one goes (nothing in it is newer than the cutoff), the project never
+        std::fs::File::open(store.dir().join("ent"))
+            .unwrap()
+            .set_modified(old)
             .unwrap();
         assert_eq!(
             sweep_old(base.path(), std::time::Duration::from_secs(30 * 86400)),

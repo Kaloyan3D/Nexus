@@ -115,3 +115,58 @@ describe("a running process's state in words", () => {
     expect(jobStateView(job({ exposed: [{ port: 5173, hostPort: 40000, url: "http://127.0.0.1:40000" }], ready: true })).label).toBe("Running");
   });
 });
+
+import { limitsLine, ownLimits, turnLabel, NO_LIMITS } from "../lib/limits";
+import { refusalInfo, refusalLine, stopNote } from "../lib/refusal";
+import { describeStep } from "../lib/progress";
+
+describe("Nexus has no limits of its own (only the ones a person chose) and says who refused what", () => {
+  it("with nothing chosen there is no limit to show; a chosen limit is shown as the person's own", () => {
+    expect(ownLimits({})).toBeNull();
+    expect(limitsLine({ approvalLifetimeSecs: 300 })).toBe(NO_LIMITS);
+    expect(limitsLine({ maxTurns: 60, maxRuntimeSecs: 5400 })).toBe("Your limits: 60 model turns · 90 min (set in Settings).");
+    expect(turnLabel(12, undefined)).toBe("turn 12");
+    expect(turnLabel(12, 60)).toBe("turn 12 of 60");
+  });
+
+  it("a refusal names its source, whether the task can go on and what to do; unknown codes claim nothing", () => {
+    const ro = refusalInfo("read-only-request")!;
+    expect([ro.source, ro.canContinue]).toEqual(["request", true]);
+    expect(refusalInfo("dev-port-not-authorized")!.source).toBe("permission");
+    expect(refusalInfo("invalid-arguments")!.why).toMatch(/ONE operation/);
+    expect(refusalInfo("budget-exhausted")).toBeNull(); // the generic quota word no longer exists
+    expect(refusalInfo("something-new")).toBeNull();
+    expect(refusalLine({ errorCode: "path-not-in-scope" })).toMatch(/^ — your permissions: /);
+    expect(refusalLine({ errorCode: "something-new" })).toBe("");
+  });
+
+  it("a run stopped at a limit says whose limit it was and that nothing is lost", () => {
+    expect(stopNote({ stopReason: "max-turns", maxTurns: 60 })).toMatch(/limit you set \(60 model turns\).*Nothing is lost/);
+    expect(stopNote({ stopReason: "max-runtime" })).toMatch(/time limit you set/);
+    expect(stopNote({ stopReason: "output-limit" })).toMatch(/provider's output limit for one response/);
+    expect(stopNote({ stopReason: "no-implementation" })).toBeNull();
+    expect(stopNote(null)).toBeNull();
+  });
+});
+
+describe("a refused step in the run's progress", () => {
+  const step = (over: Partial<ToolActivity>) => describeStep({ index: 1, turn: 1, callId: "c", tool: "fs_write", argsSummary: "write src/a.ts", status: "refused", errorCode: null, resultBytes: 0, resultDigest: null, truncated: false, executionId: null, journalSeq: null, argsDigest: null, ...over } as ToolActivity);
+
+  it("names the source, says the task goes on, and tells the person what they can do", () => {
+    const s = step({ errorCode: "invalid-arguments" });
+    expect(s.text).toMatch(/Nexus: .*ONE operation/);
+    expect(s.hint).toMatch(/^The task goes on\. Nothing to do; the model splits/);
+    const ro = step({ errorCode: "read-only-request" });
+    expect(ro.text).toMatch(/your request: this task was started as Review only/);
+    expect(ro.hint).toMatch(/Make changes/);
+    const perm = step({ tool: "proc_run", argsSummary: "npm test", errorCode: "no-grant" });
+    expect(perm.text).toMatch(/Command not run \(no-grant\): npm test — your permissions/);
+  });
+
+  it("never shows a generic budget for anything and claims nothing for a code it does not know", () => {
+    expect(step({ errorCode: "budget-exhausted" }).text).not.toMatch(/budget/i);
+    const unknown = step({ errorCode: "something-new" });
+    expect(unknown.hint).toBeUndefined();
+    expect(step({ status: "executed", errorCode: null, postSha256: "a".repeat(64) }).hint).toBeUndefined();
+  });
+});

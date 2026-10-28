@@ -124,10 +124,10 @@ export function InspectRunSection({ run }: { run: IntentRun }) {
         <Badge tone="purple">Read-only inspection</Badge>
         <Badge tone="neutral">Workspace {run.workspaceId ?? "—"}</Badge>
         <Badge tone="neutral">
-          Turn {run.turn ?? 0}/{run.maxTurns ?? "—"}
+          Turn {run.turn ?? 0}{run.maxTurns ? `/${run.maxTurns}` : ""}
         </Badge>
         <Badge tone="neutral">
-          Tool calls {run.toolCalls ?? 0}/{run.maxToolCalls ?? "—"}
+          Tool calls {run.toolCalls ?? 0}{run.maxToolCalls ? `/${run.maxToolCalls}` : ""}
         </Badge>
         <Badge tone="neutral">{run.toolResultBytes ?? 0} bytes returned to the model</Badge>
       </div>

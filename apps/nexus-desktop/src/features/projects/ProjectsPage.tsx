@@ -5,6 +5,7 @@ import type { ProjectView } from "../../lib/contracts";
 import { Alert, Badge, Button, EmptyState } from "../../components/ui/primitives";
 import { ProjectAccess } from "../access/ProjectAccess";
 import { PreviewsPanel } from "../jobs/PreviewsPanel";
+import { limitsLine } from "../../lib/limits";
 
 /**
  * Read-only: the projects the operator has authorized. Registering a project (a path, a
@@ -328,9 +329,7 @@ export function ProjectsPage() {
         <li>Commands are limited to a short allowlist (cargo check/test/build/fmt, npm test/run build, tsc --noEmit) and run in a sandbox with the network off.</li>
         <li>Protected files (lock files, build scripts, hidden and credential-shaped paths, version-control internals) cannot be written.</li>
         <li>
-          {intentCodeLimits
-            ? `Run limits: ${intentCodeLimits.maxTurns} model turns · ${intentCodeLimits.maxToolCalls} tool calls · ${intentCodeLimits.maxEdits} edits · ${intentCodeLimits.maxTests} commands · ${intentCodeLimits.maxOutputTokens} output tokens per call · ${Math.round(intentCodeLimits.maxToolResultBytes / 1024)} KiB of tool results · ${Math.round(intentCodeLimits.maxRuntimeSecs / 60)} min.`
-            : "Run limits: not reported by the backend."}
+          {intentCodeLimits ? limitsLine(intentCodeLimits) : "Run settings: not reported by the backend."}
         </li>
         <li>Selected source text and command output are sent to the model provider; each model turn is a billable request.</li>
       </ul>

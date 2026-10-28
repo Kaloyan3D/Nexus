@@ -7,6 +7,7 @@ import { useNexus } from "../../state/NexusContext";
 import { ProjectAccess } from "../access/ProjectAccess";
 import { ENGINE_LABEL } from "../engine/EngineChoice";
 import { ModeSwitch } from "../thread/ThreadComposer";
+import { limitsLine } from "../../lib/limits";
 
 export const PROJECT_COMPOSER_PLACEHOLDER = "Describe what to build or fix…";
 
@@ -111,9 +112,7 @@ export function ProjectComposer({ autoFocus = false }: { autoFocus?: boolean }) 
           {showAccess && <ProjectAccess p={project} />}
           <div className="nv-terms__line nv-note">
             {engine ? `Engine: ${engine}. ` : ""}
-            {intentCodeLimits
-              ? `Up to ${intentCodeLimits.maxTurns} model turns, ${intentCodeLimits.maxEdits} edits and ${intentCodeLimits.maxTests} test runs · ${Math.round(intentCodeLimits.maxRuntimeSecs / 60)} min per task.`
-              : "Run limits unavailable — the runtime did not report them, so Run is disabled."}
+            {intentCodeLimits ? limitsLine(intentCodeLimits) : "The runtime did not report its settings, so Run is disabled."}
           </div>
           {runtimeState?.updatePending && <Alert tone="info" title="Nexus was updated">A task is still running. Nexus restarts by itself when it finishes; new tasks can start right after.</Alert>}
         </section>

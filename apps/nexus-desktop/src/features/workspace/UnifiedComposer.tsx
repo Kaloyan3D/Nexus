@@ -5,6 +5,7 @@ import { Alert, Button } from "../../components/ui/primitives";
 import type { ThreadMode } from "../../lib/contracts";
 import { ModeSwitch } from "../thread/ThreadComposer";
 import { EngineChoice } from "../engine/EngineChoice";
+import { limitsLine } from "../../lib/limits";
 
 export const COMPOSER_PLACEHOLDER = "Describe the task…";
 
@@ -252,9 +253,7 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
             </span>
           </div>
           <div className="nv-terms__line nv-note">
-            {intentCodeLimits
-              ? `Up to ${intentCodeLimits.maxTurns} model turns, ${intentCodeLimits.maxEdits} edits and ${intentCodeLimits.maxTests} test runs · ${Math.round(intentCodeLimits.maxRuntimeSecs / 60)} min`
-              : "Run limits unavailable — the runtime did not report them, so Run is disabled."}
+            {intentCodeLimits ? limitsLine(intentCodeLimits) : "The runtime did not report its settings, so Run is disabled."}
           </div>
           {runtimeState?.updatePending && <Alert tone="info" title="Nexus was updated">A task is still running. Nexus restarts by itself when it finishes; new tasks can start right after.</Alert>}
           {!consentGiven && <Alert tone="warning" title="Autonomous work is not allowed yet">Finish setup first (connect OpenCode Go and allow autonomous work).</Alert>}
@@ -270,10 +269,7 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
             </span>
           </div>
           <div className="nv-terms__line nv-note">
-            Run limits:{" "}
-            {intentCodeLimits
-              ? `${intentCodeLimits.maxTurns} model turns · ${intentCodeLimits.maxToolCalls} tool calls · ${intentCodeLimits.maxEdits} edits · ${intentCodeLimits.maxTests} commands · ${intentCodeLimits.maxOutputTokens} output tokens per call · ${Math.round(intentCodeLimits.maxToolResultBytes / 1024)} KiB of tool results · ${Math.round(intentCodeLimits.maxRuntimeSecs / 60)} min`
-              : "unavailable (the backend did not report limits, so submitting is disabled)"}
+            {intentCodeLimits ? limitsLine(intentCodeLimits) : "The backend did not report its settings, so submitting is disabled."}
             {intentCodeLimits?.approvalLifetimeSecs
               ? ` · each approval stays open ${Math.round((intentCodeLimits.approvalLifetimeSecs / 60) * 10) / 10} min`
               : ""}

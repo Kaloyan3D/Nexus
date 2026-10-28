@@ -31,7 +31,7 @@ describe("Direct Workspace smoke findings (steps and outcome wording)", () => {
 
   it("a request refused before any approval shows its own error code, never 'approval refused'", () => {
     const s = describeStep(w({}));
-    expect(s.text).toBe("Edit not applied (not-found): src/index.js — the file or folder does not exist");
+    expect(s.text).toBe("Edit not applied (not-found): src/index.js — Nexus: the file or folder does not exist");
     expect(s.text).not.toMatch(/approval/);
     expect(s.tone).toBe("failed");
   });

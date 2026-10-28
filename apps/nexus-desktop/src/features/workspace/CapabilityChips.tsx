@@ -5,6 +5,7 @@ import { ArrowUp, Ban, Code2, FileText, Globe, Loader2, Paperclip, Search, Send,
 import { useEffect, useRef, useState } from "react";
 import { useNexus } from "../../state/NexusContext";
 import { Alert, Badge, Button, Kbd, modKeys } from "../../components/ui/primitives";
+import { ownLimits } from "../../lib/limits";
 
 const TOOLS = [
   { id: "code", label: "Code", icon: Code2 },
@@ -331,9 +332,7 @@ export function Composer() {
             <dd className="nv-mono">{source.sourceId} (registered by the operator; not a typed path)</dd>
             <dt>Run limits</dt>
             <dd>
-              {intentCodeLimits
-                ? `${intentCodeLimits.maxTurns} model turns · ${intentCodeLimits.maxToolCalls} tool calls · ${intentCodeLimits.maxEdits} edits · ${intentCodeLimits.maxTests} commands · ${intentCodeLimits.maxOutputTokens} output tokens per call · ${Math.round(intentCodeLimits.maxToolResultBytes / 1024)} KiB of tool results · ${Math.round(intentCodeLimits.maxRuntimeSecs / 60)} min`
-                : "unavailable (the backend did not report limits, so submitting is disabled)"}
+              {intentCodeLimits ? (ownLimits(intentCodeLimits) ?? "none set by you") : "unavailable (the backend did not report its settings, so submitting is disabled)"}
             </dd>
           </dl>
           <p className="nv-note" aria-label="Prompt fingerprint">

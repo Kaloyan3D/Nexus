@@ -63,23 +63,25 @@ check('attempt-add refuses a foreign instance, a model-only task and hostile ids
   assert.equal(run(['attempt-add', d, 'INTENT-99999', t.taskInstanceId]).ok, false);
 });
 
-check('the attempt count is bounded far above any run (a 92-turn task with recoveries must not hit it)', () => {
+check('the number of attempts of a task is NOT bounded (no quota; the ledger is append-only)', () => {
   const d = tmp();
   const t = run(['task-create', d, 'repo-inspect']);
-  // a long task: 96 attempts already (the former limit) and the next one still works
   for (let i = 0; i < 100; i++) assert.equal(run(['attempt-add', d, t.taskId, t.taskInstanceId]).ok, true);
-  // seed the ledger just below the bound instead of spawning thousands of processes
+  // seed the ledger far beyond the former limits (96, then 5000) instead of spawning thousands of processes
   const f = path.join(d, '.ai-harness', 'runs', t.taskId, 'attempts.jsonl');
   const first = attempts(d, t.taskId)[0];
   const lines = [];
-  for (let i = 1; i <= 4999; i++) lines.push(JSON.stringify(Object.assign({}, first, { attemptId: t.taskId + '-A' + i, sequence: i })));
+  for (let i = 1; i <= 6000; i++) lines.push(JSON.stringify(Object.assign({}, first, { attemptId: t.taskId + '-A' + i, sequence: i })));
   fs.writeFileSync(f, lines.join('\n') + '\n');
-  const last = run(['attempt-add', d, t.taskId, t.taskInstanceId]);
-  assert.equal(last.ok, true);
-  assert.equal(last.sequence, 5000);
-  const over = run(['attempt-add', d, t.taskId, t.taskInstanceId]);
-  assert.equal(over.ok, false);
-  assert.equal(over.code, 'too-many-attempts');
+  const next = run(['attempt-add', d, t.taskId, t.taskInstanceId]);
+  assert.equal(next.ok, true);
+  assert.equal(next.sequence, 6001);
+  const again = run(['attempt-add', d, t.taskId, t.taskInstanceId]);
+  assert.equal(again.ok, true);
+  assert.equal(again.sequence, 6002);
+  // appended, never rewritten: the earlier lines are byte-identical
+  const now = fs.readFileSync(f, 'utf8');
+  assert.ok(now.startsWith(lines.join('\n') + '\n'));
 });
 
 const issuance = () => ({

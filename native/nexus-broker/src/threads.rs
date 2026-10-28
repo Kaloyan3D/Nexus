@@ -1830,8 +1830,8 @@ pub fn send(b: &Arc<Broker>, client: &str, params: &Value) -> CmdResult {
             .cfg
             .code_caps
             .with_user_limits(&b.cfg.state_dir)
-            .effective(true)
-            .to_intent_limits(),
+            .effective()
+            .to_intent_limits(nexus_client::intent_client::INTERACTIVE_CODE_LIMITS),
         response_mode: nexus_contracts::intent::ResponseMode::Stream,
         client_label: Some("nexus-conversation".to_owned()),
     };

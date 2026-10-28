@@ -2,7 +2,7 @@ import { ResumeControl } from "../engine/ResumeControl";
 import { EngineActivity } from "../engine/EngineActivity";
 import { Archive, CheckCircle2, ChevronDown, ChevronRight, CircleSlash, FileText, Loader2, Lock, Plus, TriangleAlert } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { IntentRun, ThreadDetail, ThreadFinding, ThreadMessage, ThreadRunView } from "../../lib/contracts";
+import type { IntentRun, ToolActivity, ThreadDetail, ThreadFinding, ThreadMessage, ThreadRunView } from "../../lib/contracts";
 import { relativeTime } from "../../lib/format";
 import { MarkdownLite } from "../../lib/markdown";
 import { modelStateView } from "../../lib/modelRun";
@@ -16,6 +16,8 @@ import { ThreadComposer } from "./ThreadComposer";
 import { RunNeeds } from "../access/RunNeeds";
 import { PreviewsPanel } from "../jobs/PreviewsPanel";
 import { useThread } from "./useThread";
+import { turnLabel } from "../../lib/limits";
+import { stopNote } from "../../lib/refusal";
 
 const STEP_ICON: Record<StepTone, typeof CheckCircle2> = {
   done: CheckCircle2,
@@ -33,8 +35,30 @@ const WORKSPACE_LABEL: Record<string, string> = {
   direct: "Edits your project folder directly",
 };
 
-function Steps({ run, limit }: { run: IntentRun; limit?: number }) {
-  const steps = (run.toolActivity ?? []).map(describeStep);
+/** The steps the run record carries (the latest) plus, on request, the earlier ones from the run's durable log. */
+function useEarlierSteps(run: IntentRun | null) {
+  const { api } = useNexus();
+  const [earlier, setEarlier] = useState<ToolActivity[]>([]);
+  const [busy, setBusy] = useState(false);
+  const total = run?.activityTotal ?? 0;
+  const latest = run?.toolActivity?.length ?? 0;
+  const missing = Math.max(0, total - latest - earlier.length);
+  const loadMore = async () => {
+    if (!run || busy || missing === 0) return;
+    setBusy(true);
+    try {
+      // the log is oldest-first: the part not in the record is its beginning
+      const page = await api.runActivity(run.runId, earlier.length, Math.min(200, missing));
+      setEarlier((e) => [...e, ...page.activity]);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { earlier, missing, busy, loadMore };
+}
+
+function Steps({ run, limit, earlier }: { run: IntentRun; limit?: number; earlier?: ToolActivity[] }) {
+  const steps = [...(earlier ?? []), ...(run.toolActivity ?? [])].map(describeStep);
   const shown = limit ? steps.slice(-limit) : steps;
   if (shown.length === 0) return <p className="nv-note">No tool has been used yet.</p>;
   return (
@@ -44,6 +68,7 @@ function Steps({ run, limit }: { run: IntentRun; limit?: number }) {
         return (
           <li key={s.key} className={`nv-step nv-step--${s.tone}`}>
             <Icon size={13} aria-hidden="true" /> <span>{s.text}</span>
+            {s.hint && <span className="nv-note"> · {s.hint}</span>}
           </li>
         );
       })}
@@ -64,6 +89,9 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
   const ownEdits = r.digest?.editsApplied ?? run?.codingOutcome?.editsApplied ?? 0;
   const elapsed = live && run ? Math.max(0, Math.round((now - run.createdAtMs) / 1000)) : null;
   const steps = run?.toolActivity ?? [];
+  const more = useEarlierSteps(run);
+  const total = Math.max(run?.activityTotal ?? 0, steps.length);
+  const limitNote = stopNote(run);
   const note = run?.workspaceRelation ? (WORKSPACE_LABEL[run.workspaceRelation] ?? null) : null;
   return (
     <section className="nv-run" aria-label={`Run ${r.n}`}>
@@ -109,6 +137,11 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
           {run?.workspaceNote ? ` — ${run.workspaceNote}` : ""}
         </p>
       )}
+      {!live && limitNote && (
+        <p className="nv-note" role="note">
+          {limitNote}
+        </p>
+      )}
       {isLast && !live && run && run.state !== "completed" && <ResumeControl runId={run.runId} />}
       {run && <EngineActivity runId={run.runId} live={live} />}
       {live && run && (
@@ -116,7 +149,7 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
           <div className="nv-runprogress__now">
             <Loader2 size={14} className="nv-spin" aria-hidden="true" /> <strong>Now:</strong> {nowLine(run.state, run.pendingApproval?.target ?? null)}
             <span className="nv-note nv-runprogress__turn">
-              turn {run.turn ?? 0} of {run.maxTurns ?? "—"}
+              {turnLabel(run.turn, run.maxTurns)}
             </span>
           </div>
           {run.workspaceKind === "direct" && <p className="nv-note">Editing your project folder directly: every change below is already saved in your files.</p>}
@@ -133,10 +166,18 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
       {!live && run && steps.length > 0 && (
         <div className="nv-run__steps">
           <Button variant="ghost" size="sm" aria-expanded={open} onClick={() => setOpen((o) => !o)} icon={open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}>
-            {steps.length} step{steps.length === 1 ? "" : "s"}
+            {total} step{total === 1 ? "" : "s"}
             {ownEdits > 0 ? ` · ${ownEdits} edit${ownEdits === 1 ? "" : "s"}` : ""}
           </Button>
-          {open && <Steps run={run} />}
+          {open && more.missing > 0 && (
+            <p className="nv-note">
+              The latest {steps.length} steps are listed; {more.missing} earlier {more.missing === 1 ? "step is" : "steps are"} kept in the run's record.{" "}
+              <button type="button" className="nv-linkbtn" disabled={more.busy} onClick={() => void more.loadMore()}>
+                {more.busy ? "Loading…" : `Show ${Math.min(200, more.missing)} earlier`}
+              </button>
+            </p>
+          )}
+          {open && <Steps run={run} earlier={more.earlier} />}
         </div>
       )}
       {!live && run && (files.length > 0 || hasCmd || ownEdits > 0) && !r.readOnly && (

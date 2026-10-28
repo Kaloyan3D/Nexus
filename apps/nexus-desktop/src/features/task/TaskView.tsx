@@ -13,6 +13,7 @@ import { ConversationPanel } from "../conversation/ConversationPanel";
 import { useConversation } from "../conversation/useConversation";
 import { CancelModelRunButton, InspectRunSection, ModelRunPanel, ToolCallsTable, useModelRunStatus } from "../conversation/ModelRunPanel";
 import { ApprovalBanner } from "./ApprovalBanner";
+import { turnLabel } from "../../lib/limits";
 
 const STEP_ICON: Record<StepTone, typeof CheckCircle2> = {
   done: CheckCircle2,
@@ -302,7 +303,7 @@ export function TaskView({ summary }: { summary: ModelConversationSummary }) {
             <Loader2 size={14} className="nv-spin" aria-hidden="true" /> <strong>Now:</strong> {nowLine(state, pending?.target ?? pending?.tool ?? null)}
             {record && (
               <span className="nv-note nv-runprogress__turn">
-                turn {record.turn ?? 0} of {record.maxTurns ?? "—"}
+                {turnLabel(record.turn, record.maxTurns)}
               </span>
             )}
           </div>

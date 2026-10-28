@@ -21,3 +21,17 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 fs2 = "0.4"
+
+# Dependencies that do real work in every operation (SQLite, hashing, JSON) are optimized even in the dev/test
+# profile: the Kernel's chain checks scan growing tables, and an unoptimized SQLite made a long task's tests
+# ~10x slower than the shipped (release) build. Behaviour is identical; only the speed of the tests changes.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 2
+[profile.dev.package.rusqlite]
+opt-level = 2
+[profile.dev.package.sha2]
+opt-level = 2
+[profile.dev.package.hmac]
+opt-level = 2
+[profile.dev.package.serde_json]
+opt-level = 2

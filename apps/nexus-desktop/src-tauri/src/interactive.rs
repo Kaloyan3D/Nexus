@@ -1194,8 +1194,7 @@ pub fn code_submit(
     let sock = ic::default_broker_socket();
     let limits = ic::code_config(&sock)
         .map_err(|e| e.message)?
-        .limits
-        .to_intent_limits();
+        .intent_limits();
     let intent = NexusIntentV1 {
         schema_version: 1,
         request_id: ic::fresh_key("gui"),

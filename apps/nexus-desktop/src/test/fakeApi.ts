@@ -266,7 +266,7 @@ export function fakeApi(over: Partial<NativeApi> = {}): NativeApi {
       run: fakeRun({ runId: "run_" + "b".repeat(32), requestId: key, conversationId: null, state: "preparing", intentType: "repo-inspect" }),
     }),
     intentCodeSources: async () => [],
-    intentCodeLimits: async () => ({ maxTurns: 12, maxToolCalls: 30, maxToolResultBytes: 131072, maxEdits: 5, maxTests: 5, maxOutputTokens: 1024, maxRuntimeSecs: 1800, approvalLifetimeSecs: 300 }),
+    intentCodeLimits: async () => ({ approvalLifetimeSecs: 300 }),
     runtimeState: async () => ({ mode: "external" as const, phase: "ready" as const, message: null, home: null, providerConnected: true, consent: { given: true, providerId: null, remoteModelId: null, text: null }, canOpenProjects: false }),
     runtimeStart: async () => undefined,
     providerConnect: async () => ({ verified: true, checks: [] }),
@@ -300,6 +300,7 @@ export function fakeApi(over: Partial<NativeApi> = {}): NativeApi {
       replay: false,
       run: fakeRun({ runId: "run_" + "c".repeat(32), requestId: key, conversationId: null, state: "preparing", intentType: "repo-code" }),
     }),
+    runActivity: async () => ({ total: 0, offset: 0, activity: [] }),
     intentDiff: async (id: string) => ({
       run: fakeRun({ runId: id, intentType: "repo-code" }),
       baseCommit: "0".repeat(40),

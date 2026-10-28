@@ -1,6 +1,8 @@
-//! A6.1: the Desktop's fixed `repo-code` limits are a valid, in-ceiling intent
-//! and cannot be widened by anything the renderer sends.
-use nexus_client::intent_client::{DesktopCodeLimits, DESKTOP_CODE_LIMITS};
+//! `repo-code` limits: Nexus sends only a per-call output ceiling and whatever the person chose; there is
+//! no built-in ceiling on edits, tests, bytes, tool calls, turns or time.
+use nexus_client::intent_client::{
+    DesktopCodeLimits, UserLimits, DESKTOP_CODE_LIMITS, INTERACTIVE_CODE_LIMITS,
+};
 use nexus_client::intent_contract::NexusIntentV1;
 
 fn intent_json(limits: serde_json::Value) -> serde_json::Value {
@@ -12,38 +14,41 @@ fn intent_json(limits: serde_json::Value) -> serde_json::Value {
 }
 
 #[test]
-fn the_desktop_limits_are_accepted_by_the_intent_contract() {
+fn the_profile_limits_carry_only_the_per_call_output_ceiling_and_are_accepted_by_the_contract() {
     let l = serde_json::to_value(DESKTOP_CODE_LIMITS.to_intent_limits()).unwrap();
+    // nothing else is sent: Nexus has no ceiling of its own on edits, tests, bytes, tool calls, turns or time
+    assert_eq!(l, serde_json::json!({"maxOutputTokens": 1024}));
     let i = NexusIntentV1::parse(&intent_json(l)).expect("valid repo-code intent");
-    assert_eq!(i.limits.max_edits, Some(DESKTOP_CODE_LIMITS.max_edits));
-    assert_eq!(i.limits.max_tests, Some(DESKTOP_CODE_LIMITS.max_tests));
-    assert_eq!(i.limits.max_turns, Some(12));
-    assert_eq!(i.limits.max_tool_calls, Some(30));
-    assert_eq!(i.limits.max_tool_result_bytes, Some(131_072));
     assert_eq!(i.limits.max_output_tokens, Some(1024));
+    assert!(i.limits.max_turns.is_none() && i.limits.max_tool_calls.is_none());
+    assert!(i.limits.max_tool_result_bytes.is_none() && i.limits.max_runtime_secs.is_none());
+    // the interactive profile's per-call ceiling is larger (whole files), still just one request parameter
+    assert_eq!(INTERACTIVE_CODE_LIMITS.max_output_tokens, 32_768);
 }
 
 #[test]
-fn the_desktop_limits_are_conservative_and_serialize_for_the_renderer() {
-    let d: DesktopCodeLimits = DESKTOP_CODE_LIMITS;
-    assert!(d.max_turns <= 16 && d.max_tool_calls <= 30 && d.max_edits <= 5 && d.max_tests <= 5);
-    assert!(
-        d.max_output_tokens <= 1024
-            && d.max_tool_result_bytes <= 131_072
-            && d.max_runtime_secs <= 1800
+fn a_persons_own_limits_are_the_only_limits_that_reach_the_intent() {
+    let mine = UserLimits {
+        max_turns: Some(40),
+        max_tool_calls: None,
+        max_runtime_secs: Some(3600),
+    };
+    let l = serde_json::to_value(mine.to_intent_limits(INTERACTIVE_CODE_LIMITS)).unwrap();
+    assert_eq!(
+        l,
+        serde_json::json!({"maxOutputTokens": 32768, "maxTurns": 40, "maxRuntimeSecs": 3600})
     );
-    let v = serde_json::to_value(d).unwrap();
-    for k in [
-        "maxTurns",
-        "maxToolCalls",
-        "maxToolResultBytes",
-        "maxEdits",
-        "maxTests",
-        "maxOutputTokens",
-        "maxRuntimeSecs",
-    ] {
-        assert!(v[k].is_u64(), "{k}");
-    }
+    assert!(NexusIntentV1::parse(&intent_json(l)).is_ok());
+    // none chosen = none sent; and the renderer-facing view serialises with no fields at all
+    assert_eq!(
+        serde_json::to_value(UserLimits::default()).unwrap(),
+        serde_json::json!({})
+    );
+    let v = serde_json::to_value(DesktopCodeLimits {
+        max_output_tokens: 7,
+    })
+    .unwrap();
+    assert_eq!(v, serde_json::json!({"maxOutputTokens": 7}));
 }
 
 #[test]

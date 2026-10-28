@@ -45,9 +45,7 @@ function codeRun(over: Partial<IntentRun> = {}): IntentRun {
     turn: 7,
     maxTurns: 12,
     editsUsed: 2,
-    maxEdits: 5,
     testsUsed: 2,
-    maxTests: 5,
     lastTestVerification: "pass",
     worktreeCommit: "c".repeat(40),
     changedFiles: [{ path: "src/lib.rs", status: "M", additions: 1, deletions: 1 }],
@@ -185,7 +183,9 @@ describe("Code in copy: composer (A6.1.2)", () => {
     expect(within(terms).getByText(/registered by the operator, not a typed path/)).toBeInTheDocument();
     expect(within(terms).getByText(/pinned to ababababab/)).toBeInTheDocument();
     expect(within(terms).getByText(/writes limited to src\//)).toBeInTheDocument();
-    expect(within(terms).getByText(/12 model turns · 30 tool calls · 5 edits · 5 commands · 1024 output tokens per call · 128 KiB of tool results · 30 min/)).toBeInTheDocument();
+    // no built-in quota is shown: with nothing set by the person there is no limit
+    expect(within(terms).getByText(/No limit on steps, edits or time/)).toBeInTheDocument();
+    expect(within(terms).queryByText(/model turns|edits ·|KiB of tool results/)).not.toBeInTheDocument();
     const sel = screen.getByLabelText("Project") as HTMLSelectElement;
     expect(Array.from(sel.options).map((o) => o.textContent)).toEqual(["synthetic-test", "other"]);
     expect(screen.queryByPlaceholderText(/path/i)).not.toBeInTheDocument();
@@ -251,7 +251,7 @@ describe("Code in copy: composer (A6.1.2)", () => {
     const radio = await screen.findByRole("radio", { name: "Code in copy" });
     await waitFor(() => expect(radio).toBeEnabled());
     await user.click(radio);
-    expect(await screen.findByText(/did not report limits, so submitting is disabled/)).toBeInTheDocument();
+    expect(await screen.findByText(/did not report its settings, so submitting is disabled/)).toBeInTheDocument();
     await user.type(screen.getByLabelText("Task prompt"), "x");
     await user.click(screen.getByRole("checkbox", { name: "Acknowledge disclosure" }));
     expect(screen.getByRole("button", { name: "Start coding" })).toBeDisabled();
@@ -542,11 +542,11 @@ describe("Evidence panel (A6.1.2)", () => {
     expect(await within(panel).findByLabelText("Working copy")).toHaveTextContent(/removed by the operator/);
   });
 
-  it("the Source tab shows the approval lifetime and the lowered run limits the broker reports", async () => {
-    const { user } = await openRun(passedRun(), { intentCodeLimits: (async () => ({ maxTurns: 6, maxToolCalls: 30, maxToolResultBytes: 131072, maxEdits: 2, maxTests: 1, maxOutputTokens: 1024, maxRuntimeSecs: 1800, approvalLifetimeSecs: 120 })) as NativeApi["intentCodeLimits"] });
+  it("the Source tab shows the approval lifetime and only the limits the person chose", async () => {
+    const { user } = await openRun(passedRun(), { intentCodeLimits: (async () => ({ maxTurns: 6, maxToolCalls: 30, maxRuntimeSecs: 1800, approvalLifetimeSecs: 120 })) as NativeApi["intentCodeLimits"] });
     await user.click(await screen.findByRole("button", { name: "Source" }));
     const panel = await screen.findByRole("dialog", { name: "Evidence panel" });
-    expect(within(panel).getByText("6 turns · 30 tool calls · 2 edits · 1 commands")).toBeInTheDocument();
+    expect(within(panel).getByText("6 model turns · 30 tool calls · 30 min")).toBeInTheDocument();
     expect(within(panel).getByText("2 min")).toBeInTheDocument();
   });
 
