@@ -791,9 +791,10 @@ impl Runtime {
                 g.fs = "workspace".into();
                 g
             }
-            Some(_) => {
-                return Err("not-available: this project has Full Access; reduce it in Advanced permissions".into())
-            }
+            Some(_) => return Err(
+                "not-available: this project has Full Access; reduce it in Advanced permissions"
+                    .into(),
+            ),
             None => GrantDraft {
                 fs: "workspace".into(),
                 net: "offline".into(),
@@ -849,12 +850,7 @@ impl Runtime {
 
     /// Where a running development server can be seen, resolved by the BROKER from its own job record
     /// (never from an address the renderer supplies), then opened in the default browser.
-    pub fn preview_open(
-        &self,
-        d: &dyn Dialogs,
-        job_id: &str,
-        port: u16,
-    ) -> Result<String, String> {
+    pub fn preview_open(&self, d: &dyn Dialogs, job_id: &str, port: u16) -> Result<String, String> {
         let st = ic::job_status(&self.sock(), job_id).map_err(|e| e.message)?;
         if st["state"] != "running" {
             return Err("this server is not running any more".into());
@@ -884,13 +880,22 @@ impl Runtime {
         if let Some(why) = r["refused"].as_str() {
             return Err(format!("refused: {why}"));
         }
-        let digest = pv["confirmDigest"].as_str().ok_or("no confirmation digest")?;
+        let digest = pv["confirmDigest"]
+            .as_str()
+            .ok_or("no confirmation digest")?;
         if digest != reviewed_digest {
-            return Err("changed: the files changed since you reviewed this recovery; review it again".into());
+            return Err(
+                "changed: the files changed since you reviewed this recovery; review it again"
+                    .into(),
+            );
         }
         let list = |k: &str| -> Vec<String> {
             r[k].as_array()
-                .map(|a| a.iter().filter_map(|i| i["path"].as_str().map(str::to_owned)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|i| i["path"].as_str().map(str::to_owned))
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         let part = |title: &str, k: &str| -> String {
@@ -899,7 +904,11 @@ impl Runtime {
                 return String::new();
             }
             let shown: Vec<String> = l.iter().take(15).map(|p| format!("  {p}")).collect();
-            let more = if l.len() > 15 { format!("\n  … and {} more", l.len() - 15) } else { String::new() };
+            let more = if l.len() > 15 {
+                format!("\n  … and {} more", l.len() - 15)
+            } else {
+                String::new()
+            };
             format!("\n{title} ({}):\n{}{more}\n", l.len(), shown.join("\n"))
         };
         let text = format!(
@@ -984,7 +993,10 @@ impl GrantDraft {
     /// (never extended); an ended grant is not amended - the person sets permissions up again.
     pub fn from_view(g: &serde_json::Value) -> Result<GrantDraft, String> {
         if g["status"] != "active" {
-            return Err("ended: these permissions were revoked or have expired; set them up again first".into());
+            return Err(
+                "ended: these permissions were revoked or have expired; set them up again first"
+                    .into(),
+            );
         }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -993,7 +1005,11 @@ impl GrantDraft {
         let s = |k: &str, d: &str| g[k].as_str().unwrap_or(d).to_owned();
         let ports = |v: &serde_json::Value| -> Vec<u16> {
             v.as_array()
-                .map(|a| a.iter().filter_map(|x| x.as_u64().and_then(|n| u16::try_from(n).ok())).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_u64().and_then(|n| u16::try_from(n).ok()))
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         let hosts = g["netPolicy"]["hosts"]
@@ -1006,7 +1022,10 @@ impl GrantDraft {
                         Some(if p.is_empty() {
                             host.to_owned()
                         } else {
-                            format!("{host}:{}", p.iter().map(u16::to_string).collect::<Vec<_>>().join(","))
+                            format!(
+                                "{host}:{}",
+                                p.iter().map(u16::to_string).collect::<Vec<_>>().join(",")
+                            )
                         })
                     })
                     .collect()
@@ -1072,7 +1091,7 @@ pub fn environment_check() -> EnvCheck {
 }
 
 const DIRECT_TITLE: &str = "Let Nexus edit this folder directly?";
-const DIRECT_TEXT: &str = "Yes: Nexus reads, creates, changes and deletes files in this project folder itself. Each change is on disk as soon as it is made, your editor and terminal see it at once, and there is no patch to apply afterwards. Nexus still cannot leave the folder, touch secrets or .git, or overwrite a file you changed since it read it, and it keeps the original of every file it changes.\n\nNo: Nexus works in a throw-away copy and you review and apply its patch yourself.\n\nYou can change this later in the project's settings; it applies to new tasks only.";
+const DIRECT_TEXT: &str = "Yes: Nexus reads, creates, changes and deletes files in this project folder itself. Each change is on disk as soon as it is made, your editor and terminal see it at once, and there is no patch to apply afterwards. Nexus still cannot leave the folder, touch secrets or .git, or overwrite a file you changed since it read it, and it keeps the original of every file it changes for 30 days. Putting edited files back is manual in this version, so keep the project in version control.\n\nNo: Nexus works in a throw-away copy and you review and apply its patch yourself.\n\nYou can change this later in the project's settings; it applies to new tasks only.";
 
 /// The Desktop's coding submission: text + project identity only. The limits are the
 /// broker's (never the renderer's). Shared by the Tauri command and the acceptance runner

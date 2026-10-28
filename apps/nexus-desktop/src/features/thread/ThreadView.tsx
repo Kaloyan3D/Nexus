@@ -7,7 +7,7 @@ import { relativeTime } from "../../lib/format";
 import { MarkdownLite } from "../../lib/markdown";
 import { modelStateView } from "../../lib/modelRun";
 import { countSteps, describeStep, nowLine, type StepTone } from "../../lib/progress";
-import { outcomeView } from "../../lib/runKind";
+import { runResult, RESULT_WORD } from "../../lib/outcome";
 import { stickToBottom, useNow } from "../../lib/useViewport";
 import { Alert, Badge, Button, Loading, StatusDot } from "../../components/ui/primitives";
 import { useNexus } from "../../state/NexusContext";
@@ -51,58 +51,6 @@ function Steps({ run, limit }: { run: IntentRun; limit?: number }) {
   );
 }
 
-/** What the runtime verified about THIS run (its receipts) - never the conversation's state. */
-function evidenceBadge(r: ThreadRunView): { label: string; tone: "success" | "warning" | "error" | "neutral"; detail: string } | null {
-  const run = r.run;
-  if (!run) return null;
-  if (r.readOnly) {
-    const wrote = (run.toolActivity ?? []).some((a) => (a.tool === "fs_write" || a.tool === "fs_edit") && a.status === "executed");
-    const tried = (run.toolActivity ?? []).filter((a) => (a.tool === "fs_write" || a.tool === "fs_edit") && a.status === "refused").length;
-    if (wrote) return { label: "Read-only run changed a file — report this", tone: "error", detail: "The runtime recorded an executed edit in a read-only run." };
-    return {
-      label: tried > 0 ? `Read-only · ${tried} edit attempt${tried === 1 ? "" : "s"} refused · no file changed` : "Read-only · no file changed",
-      tone: "success",
-      detail: "The runtime refuses every edit and write in a read-only request.",
-    };
-  }
-  // The task asked for an implementation: say what the runtime found, not what the model said.
-  if (run.completion === "incomplete") {
-    const kept = run.codingOutcome?.editsApplied ?? 0;
-    return {
-      label: kept > 0 ? `Incomplete · ${kept} change${kept === 1 ? "" : "s"} kept, work not finished` : "Incomplete · nothing changed, nothing verified",
-      tone: "warning",
-      detail: run.completionNote ?? "The model ended before finishing the work.",
-    };
-  }
-  if (run.completion === "failing-checks") {
-    const n = run.unresolvedFailedChecks ?? run.codingOutcome?.checksFailedUnresolved ?? 0;
-    return {
-      label: `Changes made · ${n || "some"} check${n === 1 ? "" : "s"} failed, not verified`,
-      tone: "warning",
-      detail: run.completionNote ?? "Verification commands failed and were never re-run successfully; the change is blocked or unverified, not passed.",
-    };
-  }
-  if (run.completion === "unexecuted-claims") {
-    return { label: "Not verified · a command did not run", tone: "warning", detail: run.completionNote ?? "A command in this run was refused, failed or never executed, so its claimed result is not evidence. Passing checks elsewhere in the run do not cover it." };
-  }
-  if (run.completion === "no-change-reported") {
-    return { label: "Completed · no change was made", tone: "warning", detail: "The request asked for an implementation, but no file was changed and no check ran. Read the answer to see why." };
-  }
-  if (run.completion === "no-change-verified") {
-    return { label: "No change needed · checks passed", tone: "success", detail: "Nothing was changed; the relevant check passed (a verified no-op)." };
-  }
-  const v = outcomeView(run);
-  if (v && run.state === "cancelled") {
-    // The recorded result stays as it is; only the wording stops implying the task was finished.
-    return {
-      label: v.label.replace(/^Tests passed/, "Last test command passed").replace(/^Tests failed/, "Last test command failed"),
-      tone: v.tone,
-      detail: `${v.detail} The run was cancelled before it finished: this is the last test command's result, not a completed task.`,
-    };
-  }
-  return v ? { label: v.label, tone: v.tone, detail: v.detail } : null;
-}
-
 function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; detail: ThreadDetail }) {
   const { openPanel, projects } = useNexus();
   const run = r.run;
@@ -110,7 +58,7 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
   const [open, setOpen] = useState(false);
   const v = modelStateView(run?.stopReason === "no-implementation" ? "incomplete" : (run?.state ?? r.state));
   const live = run !== null && !run.terminal;
-  const ev = evidenceBadge(r);
+  const ev = runResult(r);
   const files = run?.changedFiles ?? [];
   const hasCmd = (run?.toolActivity ?? []).some((a) => a.tool === "proc_run");
   const ownEdits = r.digest?.editsApplied ?? run?.codingOutcome?.editsApplied ?? 0;
@@ -134,7 +82,7 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
         </Badge>
         {ev && (
           <Badge tone={ev.tone} title={ev.detail}>
-            {ev.label}
+            <strong>{RESULT_WORD[ev.category]}</strong> · {ev.label}
           </Badge>
         )}
         {run && (run.providerId || run.remoteModelId) && (

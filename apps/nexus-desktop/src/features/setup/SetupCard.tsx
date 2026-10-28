@@ -1,6 +1,7 @@
 import { Check, Circle, Loader2 } from "lucide-react";
 import { useNexus } from "../../state/NexusContext";
 import { Alert, Button } from "../../components/ui/primitives";
+import { startupHelp } from "../../lib/startupHelp";
 import { EnvironmentNotes } from "./EnvironmentNotes";
 
 type StepState = "done" | "active" | "todo";
@@ -58,16 +59,24 @@ export function SetupCard() {
       <EnvironmentNotes />
       <ol className="nv-setup__steps">
         <Step state={ready ? "done" : rt.phase === "error" ? "todo" : "active"} title={ready ? "Nexus is running on this computer" : rt.phase === "error" ? "Nexus could not start" : "Starting Nexus…"}>
-          {rt.phase === "error" && (
-            <div className="nv-setup__act">
-              <Alert tone="error" title="Startup failed">
-                {rt.message ?? "The runtime did not start."} If this keeps happening, reinstall Nexus or move its data folder{rt.home ? ` (${rt.home})` : ""} aside and start again; your projects are not stored there.
-              </Alert>
-              <Button onClick={() => void retryRuntime()} disabled={setupBusy === "start"}>
-                Try again
-              </Button>
-            </div>
-          )}
+          {rt.phase === "error" && (() => {
+            const help = startupHelp(rt.message);
+            return (
+              <div className="nv-setup__act">
+                <Alert tone="error" title="Startup failed">
+                  <strong>{help.title}.</strong> {rt.message ?? "The runtime did not start."}
+                  <ol className="nv-list">
+                    {help.steps.map((st) => (
+                      <li key={st}>{st}</li>
+                    ))}
+                  </ol>
+                </Alert>
+                <Button onClick={() => void retryRuntime()} disabled={setupBusy === "start"}>
+                  Try again
+                </Button>
+              </div>
+            );
+          })()}
         </Step>
         <Step state={!ready ? "todo" : connected ? "done" : "active"} title={connected ? "OpenCode Go is connected" : "Connect OpenCode Go"}>
           {ready && !connected && (

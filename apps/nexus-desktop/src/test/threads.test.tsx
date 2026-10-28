@@ -259,7 +259,7 @@ describe("Persistent conversations (A7.1)", () => {
     d.runs[1]!.run = { ...d.runs[1]!.run!, completion: "no-change-reported", codingOutcome: null };
     mount(base({ threadGet: async () => d }), `#/workspace/c/${T1}`);
     const run2 = await screen.findByRole("region", { name: "Run 2" });
-    expect(within(run2).getByText("Completed · no change was made")).toBeInTheDocument();
+    expect(within(run2).getByText(/Completed · no change was made/)).toBeInTheDocument();
   });
 
   it("the mode switch sends the user's choice; Auto is the default", async () => {

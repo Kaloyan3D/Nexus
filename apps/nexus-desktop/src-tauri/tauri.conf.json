@@ -31,6 +31,33 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png"]
+    "icon": [
+      "icons/icon.png"
+    ],
+    "resources": {
+      "../../../native/target/release/nexusd": "bin/nexusd",
+      "../../../native/target/release/nexus-broker": "bin/nexus-broker",
+      "../../../native/target/release/nexus-approver": "bin/nexus-approver",
+      "../../../native/target/release/nexus-confine": "bin/nexus-confine",
+      "../../../native/target/release/nexus-egress": "bin/nexus-egress",
+      "../../../config/registry/*.cjs": "repo/config/registry/",
+      "../../../config/registry/modes/*.json": "repo/config/registry/modes/"
+    },
+    "shortDescription": "Nexus - build and fix software with an AI that shows its work",
+    "longDescription": "Nexus runs an AI engineering assistant on your computer. Open a project, describe what to build or fix, and Nexus edits, tests and previews it inside the permissions you give, then shows what actually ran.",
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "nodejs (>= 18)",
+          "zenity | kdialog"
+        ],
+        "recommends": [
+          "xdg-utils",
+          "git"
+        ]
+      }
+    }
   }
 }

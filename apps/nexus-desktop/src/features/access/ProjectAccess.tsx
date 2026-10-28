@@ -86,6 +86,11 @@ export function ProjectAccess({ p, onAdvanced }: { p: ProjectView; onAdvanced?: 
           Nexus is using the safe defaults. Allow what you need again below.
         </Alert>
       )}
+      {a.asksFirst && (
+        <Alert tone="warning" title="This project asks before every action">
+          Each edit and command waits for an answer given in a separate terminal program, which Nexus shows when something is waiting. If you would rather not use a terminal, switch to automatic under Advanced permissions.
+        </Alert>
+      )}
       {fullAccess && (
         <Alert tone="warning" title="This project has Full Access">
           Commands run as you with no sandbox. Reduce this under Advanced permissions if you did not mean it.
@@ -103,7 +108,7 @@ export function ProjectAccess({ p, onAdvanced }: { p: ProjectView; onAdvanced?: 
           }
         >
           {a.editsDirectly
-            ? "Each change is saved in your project folder as it is made. Nexus keeps the original of every file it changes and never touches secrets or .git."
+            ? "Each change is saved in your project folder as it is made. Nexus keeps the original of every file it changes (30 days) and never touches secrets or .git. It cannot put edited files back with one click yet — keep the project in version control, or work on a copy."
             : "Nexus changes a throw-away copy. You review the changes and apply them to your folder yourself."}
         </Row>
         <Row

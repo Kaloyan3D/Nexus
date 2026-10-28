@@ -1314,23 +1314,61 @@ fn internal() -> UiError {
     }
 }
 
+/// Where an installed Nexus keeps the programs it needs: the bundle's resource directory holds `bin/` (the
+/// runtime, broker, sandbox launch gate and network gatekeeper) and `repo/config/registry/` (the Registry
+/// bridge). `None` unless both are really there, so a development checkout is never mistaken for a bundle.
+pub fn bundled_layout(
+    resource_dir: &std::path::Path,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let bin = resource_dir.join("bin");
+    let repo = resource_dir.join("repo");
+    (bin.join("nexusd").is_file()
+        && bin.join("nexus-broker").is_file()
+        && repo
+            .join("config/registry/native-intent-bridge.cjs")
+            .is_file())
+    .then_some((bin, repo))
+}
+
+/// Point the runtime at the bundled programs, unless an operator or a developer already named others.
+/// Must run before the runtime is created (it discovers its programs once).
+fn use_bundled_programs(resource_dir: &std::path::Path) {
+    let Some((bin, repo)) = bundled_layout(resource_dir) else {
+        return;
+    };
+    if std::env::var_os("NEXUS_BIN_DIR").is_none() {
+        std::env::set_var("NEXUS_BIN_DIR", bin);
+    }
+    if std::env::var_os("NEXUS_REPO_ROOT").is_none() {
+        std::env::set_var("NEXUS_REPO_ROOT", repo);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // A6.1.4: unless an operator-run broker is named, this app owns the runtime. The
-    // runtime object sets the socket environment BEFORE the client config resolves.
-    let runtime = Arc::new(interactive::Runtime::new());
-    interactive::install(runtime.clone());
-    runtime.watch_for_updates();
-    runtime.start_async();
-    let cfg = ClientConfig::resolve(None, None, false).expect("client configuration");
-    let rt_exit = runtime.clone();
     tauri::Builder::default()
-        .manage(runtime)
-        .manage::<Arc<dyn dialogs::Dialogs>>(Arc::new(dialogs::SystemDialogs))
-        .manage(AppState {
-            cfg,
-            mock_running: AtomicBool::new(false),
-            mock_counter: AtomicU64::new(0),
+        .setup(|app| {
+            use tauri::Manager;
+            // An installed build finds its programs in its own resources (nothing to configure); a
+            // development checkout keeps finding them in native/target.
+            if let Ok(res) = app.path().resource_dir() {
+                use_bundled_programs(&res);
+            }
+            // A6.1.4: unless an operator-run broker is named, this app owns the runtime. The
+            // runtime object sets the socket environment BEFORE the client config resolves.
+            let runtime = Arc::new(interactive::Runtime::new());
+            interactive::install(runtime.clone());
+            runtime.watch_for_updates();
+            runtime.start_async();
+            let cfg = ClientConfig::resolve(None, None, false).expect("client configuration");
+            app.manage(runtime);
+            app.manage::<Arc<dyn dialogs::Dialogs>>(Arc::new(dialogs::SystemDialogs));
+            app.manage(AppState {
+                cfg,
+                mock_running: AtomicBool::new(false),
+                mock_counter: AtomicU64::new(0),
+            });
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             app_info,
@@ -1404,11 +1442,45 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building Nexus")
-        .run(move |_app, event| {
+        .run(move |app, event| {
             if let tauri::RunEvent::Exit = event {
-                rt_exit.shutdown();
+                use tauri::Manager;
+                if let Some(rt) = app.try_state::<Arc<interactive::Runtime>>() {
+                    rt.shutdown();
+                }
             }
         });
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::bundled_layout;
+
+    #[test]
+    fn an_installed_layout_needs_the_programs_and_the_bridge_and_nothing_else_counts() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(
+            bundled_layout(d.path()).is_none(),
+            "an empty directory is not a bundle"
+        );
+        std::fs::create_dir_all(d.path().join("bin")).unwrap();
+        std::fs::write(d.path().join("bin/nexusd"), "x").unwrap();
+        std::fs::write(d.path().join("bin/nexus-broker"), "x").unwrap();
+        assert!(
+            bundled_layout(d.path()).is_none(),
+            "programs without the Registry bridge cannot run"
+        );
+        std::fs::create_dir_all(d.path().join("repo/config/registry")).unwrap();
+        std::fs::write(
+            d.path()
+                .join("repo/config/registry/native-intent-bridge.cjs"),
+            "x",
+        )
+        .unwrap();
+        let (bin, repo) = bundled_layout(d.path()).expect("complete bundle");
+        assert_eq!(bin, d.path().join("bin"));
+        assert_eq!(repo, d.path().join("repo"));
+    }
 }
 
 #[cfg(test)]
