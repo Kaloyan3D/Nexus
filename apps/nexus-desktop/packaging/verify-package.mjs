@@ -20,6 +20,8 @@ import path from 'node:path'
 const here = path.dirname(new URL(import.meta.url).pathname)
 export const PIN = JSON.parse(fs.readFileSync(path.join(here, 'node-runtime.json'), 'utf8'))
 const LIB = 'usr/lib/Nexus'
+/** Files the Registry bridge READS at run time (not require()d, so no static scan finds them). */
+export const BRIDGE_DATA = ['config/model-registry.json', 'config/engineering-profiles.json', 'config/muse-profiles.json']
 export const PROGRAMS = ['nexusd', 'nexus-broker', 'nexus-approver', 'nexus-confine', 'nexus-egress']
 
 const sha = (f) => createHash('sha256').update(fs.readFileSync(f)).digest('hex')
@@ -130,7 +132,7 @@ export function verifyTree(data, control, { runNode = true } = {}) {
 
   // the Registry bridge and the scripts the runtime launches, with everything they require
   const repo = `${LIB}/repo`
-  const entries = ['config/registry/native-intent-bridge.cjs', 'scripts/Setup-NativeOpenCodeGo.cjs', 'scripts/Verify-NativeOpenCodeGoRoute.cjs']
+  const entries = ['config/registry/native-intent-bridge.cjs', 'scripts/Setup-NativeOpenCodeGo.cjs', 'scripts/Verify-NativeOpenCodeGoRoute.cjs', ...BRIDGE_DATA]
   const seen = new Set()
   const queue = [...entries]
   while (queue.length) {
@@ -144,6 +146,9 @@ export function verifyTree(data, control, { runNode = true } = {}) {
   if (!fs.existsSync(modes) || fs.readdirSync(modes).filter((f) => f.endsWith('.json')).length < 5) bad.push('repo/config/registry/modes: engineering mode definitions missing (need >= 5)')
   if (!fs.existsSync(path.join(data, repo, 'config/registry/modes/engineering-v2-adaptive.json'))) bad.push('repo/config/registry/modes/engineering-v2-adaptive.json missing (Nexus Adaptive)')
 
+  if (runNode && fs.existsSync(path.join(data, nd, 'bin/node')) && fs.existsSync(path.join(data, repo, 'config/registry/native-intent-bridge.cjs'))) {
+    bad.push(...bridgeSelfTest(path.join(data, repo), path.join(data, nd, 'bin/node')))
+  }
   need('usr/share/doc/nexus/THIRD-PARTY-NOTICES.md', 'third-party notices')
   const notices = path.join(data, 'usr/share/doc/nexus/THIRD-PARTY-NOTICES.md')
   if (fs.existsSync(notices)) {
@@ -153,6 +158,34 @@ export function verifyTree(data, control, { runNode = true } = {}) {
   const desktop = fs.existsSync(path.join(data, 'usr/share/applications')) ? fs.readdirSync(path.join(data, 'usr/share/applications')).filter((f) => f.endsWith('.desktop')) : []
   if (desktop.length === 0) bad.push('missing: .desktop launcher')
   if (!fs.existsSync(path.join(data, 'usr/share/icons'))) bad.push('missing: application icon')
+  return bad
+}
+
+/**
+ * Execute the packaged bridge with the packaged Node against a throw-away data directory: provider setup (no
+ * network, no key), then the catalog. A file the bridge needs but the package lacks fails HERE, not on a customer's
+ * first launch. Returns problems.
+ */
+export function bridgeSelfTest(repoDir, nodeBin) {
+  const bad = []
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'nxbridge-'))
+  try {
+    const run = (args) => execFileSync(nodeBin, args, { cwd: repoDir, env: { PATH: '/usr/bin:/bin' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 }).toString()
+    try {
+      run([path.join(repoDir, 'scripts/Setup-NativeOpenCodeGo.cjs'), '--data-root', data, '--apply'])
+    } catch (e) {
+      bad.push(`bridge self-test: provider setup script failed (${(e.stderr?.toString() || e.message).split('\n')[0]})`)
+      return bad
+    }
+    try {
+      const out = JSON.parse(run([path.join(repoDir, 'config/registry/native-intent-bridge.cjs'), 'catalog', repoDir, data]))
+      if (out.ok !== true || !Array.isArray(out.targets) || out.targets.length === 0) bad.push(`bridge self-test: catalog is not ok (${JSON.stringify(out).slice(0, 160)})`)
+    } catch (e) {
+      bad.push(`bridge self-test: the bridge failed (${(e.stderr?.toString() || e.message).split('\n')[0]})`)
+    }
+  } finally {
+    fs.rmSync(data, { recursive: true, force: true })
+  }
   return bad
 }
 

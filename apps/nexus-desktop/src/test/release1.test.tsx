@@ -495,6 +495,22 @@ describe("Recovering what a command changed", () => {
 
 // ---- this computer ---------------------------------------------------------------------------------------
 
+describe("The status pill speaks about Nexus itself", () => {
+  it("a freshly installed Nexus whose provider is not connected yet is 'ready', never 'broker unreachable'", async () => {
+    mount(baseApi({
+      runtimeState: async () => ({ ...rt(), providerConnected: false, consent: { given: false, providerId: null, remoteModelId: null, text: null }, node: { source: "bundled", version: "v24.22.1" } }),
+      intentModels: async () => { throw { code: "internal", message: "Registry target unavailable", class: "refused", retryable: false }; },
+    }));
+    const pill = await screen.findByRole("button", { name: /Nexus ready/ });
+    expect(pill).toBeInTheDocument();
+    expect(screen.queryByText(/broker unreachable/)).not.toBeInTheDocument();
+    await userEvent.setup().click(pill);
+    const pop = await screen.findByRole("dialog", { name: "Nexus status" });
+    expect(within(pop).getByText("not connected yet")).toBeInTheDocument();
+    expect(within(pop).getByText(/v24.22.1 \(bundled with Nexus\)/)).toBeInTheDocument();
+  });
+});
+
 describe("What this computer lacks, and what to do about it", () => {
   const env = (over: Partial<EnvCheck> = {}): EnvCheck => ({ platform: "linux", dialogTool: "zenity", opener: "xdg-open", toolchains: [["git", true], ["node", true], ["npm", true], ["python3", true], ["cargo", true]], ...over });
   const ok: { available: boolean | undefined; reason: string | null | undefined } = { available: true, reason: null };

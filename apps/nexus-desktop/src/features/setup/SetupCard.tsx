@@ -56,7 +56,7 @@ export function SetupCard() {
     <section className="nv-setup" aria-label="Set up Nexus">
       <h1 className="nv-hero">Set up Nexus</h1>
       <p className="nv-note">You do this once. After that: open a project, describe what to build or fix, and watch it happen.</p>
-      <EnvironmentNotes />
+      <EnvironmentNotes hideInfo />
       <ol className="nv-setup__steps">
         <Step state={ready ? "done" : rt.phase === "error" ? "todo" : "active"} title={ready ? "Nexus is running on this computer" : rt.phase === "error" ? "Nexus could not start" : "Starting Nexus…"}>
           {rt.phase === "error" && (() => {
