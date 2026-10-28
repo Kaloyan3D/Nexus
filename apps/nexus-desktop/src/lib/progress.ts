@@ -1,5 +1,6 @@
 import type { ToolActivity } from "./contracts";
 import { toolKind } from "./runKind";
+import { refusalInfo, refusalLine } from "./refusal";
 
 export type StepTone = "done" | "blocked" | "failed" | "uncertain" | "active";
 
@@ -8,6 +9,8 @@ export interface Step {
   tone: StepTone;
   /** Plain-language line. Built from receipts (status/approval/verdict), never from model text. */
   text: string;
+  /** For a refused step: whether the task goes on and what the person can do (from the refusal code, never model text). */
+  hint?: string;
 }
 
 /** Plain words for the error codes a tool refusal carries (the code itself is always shown too). */
@@ -25,6 +28,8 @@ const CODE_WORDS: Record<string, string> = {
 };
 
 function why(code: string | null | undefined): string {
+  const r = refusalLine({ errorCode: code ?? null });
+  if (r) return r;
   return code && CODE_WORDS[code] ? ` — ${CODE_WORDS[code]}` : "";
 }
 
@@ -48,6 +53,12 @@ function target(a: ToolActivity): string {
 
 /** One plain-language progress step per model-proposed tool call. */
 export function describeStep(a: ToolActivity): Step {
+  const s = describeStepText(a);
+  const info = a.status === "refused" || a.status === "failed" ? refusalInfo(a.errorCode) : null;
+  return info ? { ...s, hint: `${info.canContinue ? "The task goes on. " : ""}${info.action}` } : s;
+}
+
+function describeStepText(a: ToolActivity): Step {
   const kind = toolKind(a.tool);
   const key = `${a.index}`;
   if (a.status === "uncertain") return { key, tone: "uncertain", text: `${a.tool === "proc_run" ? "Command" : "Edit"} outcome unknown: ${target(a)}` };
@@ -55,7 +66,7 @@ export function describeStep(a: ToolActivity): Step {
   if (kind === "read") {
     const verb = a.tool === "fs_list" ? "Listed" : a.tool === "fs_search" ? "Searched" : "Read";
     if (a.status === "executed") return { key, tone: "done", text: `${verb} ${target(a)}` };
-    return { key, tone: "blocked", text: `${verb} ${target(a)} refused${a.errorCode ? ` (${a.errorCode})` : ""}` };
+    return { key, tone: "blocked", text: `${verb} ${target(a)} refused${a.errorCode ? ` (${a.errorCode})` : ""}${why(a.errorCode)}` };
   }
   if (kind === "write") {
     if (a.status === "executed" && a.postSha256) return { key, tone: "done", text: `Edit applied: ${target(a)}` };
@@ -70,7 +81,7 @@ export function describeStep(a: ToolActivity): Step {
     }
     if (a.status === "executed" && a.verification === "fail") return { key, tone: "failed", text: `Ran ${a.argsSummary} · failed · exit ${a.exitCode ?? "?"}` };
     if (blocked) return { key, tone: "blocked", text: `Command not run (${approvalWords(a)}): ${a.argsSummary}` };
-    return { key, tone: "failed", text: `Command not run${a.errorCode ? ` (${a.errorCode})` : ""}: ${a.argsSummary}` };
+    return { key, tone: "failed", text: `Command not run${a.errorCode ? ` (${a.errorCode})` : ""}: ${a.argsSummary}${why(a.errorCode)}` };
   }
   if (a.tool === "muse_update_reasoning_state") {
     // A control-plane CLAIM from the model (phase, findings). It changes no file and never sets an effort: the host's

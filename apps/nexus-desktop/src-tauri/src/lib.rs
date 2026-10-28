@@ -381,16 +381,15 @@ async fn intent_code_sources(
     .map_err(|_| internal())?
 }
 
-/// The limits a Desktop coding task will really get plus the approval lifetime
-/// (A6.1.3): the fixed maximums lowered by the operator's caps, read from the
-/// broker. Shown before submitting; never renderer-controlled.
+/// The limits a Desktop coding task will really get plus the approval lifetime (A6.1.3): only what the
+/// person (Settings) or the operator chose, read from the broker. Nexus has no limit of its own, so with
+/// none chosen every field is absent. Never renderer-controlled.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CodeLimitsView {
     #[serde(flatten)]
-    limits: nexus_client::intent_client::DesktopCodeLimits,
+    limits: nexus_client::intent_client::UserLimits,
     approval_lifetime_secs: u64,
-    built_in: Option<nexus_client::intent_client::DesktopCodeLimits>,
 }
 
 #[tauri::command]
@@ -402,7 +401,6 @@ async fn intent_code_limits() -> Result<CodeLimitsView, UiError> {
         .map(|c| CodeLimitsView {
             limits: c.limits,
             approval_lifetime_secs: c.approval_lifetime_secs,
-            built_in: c.built_in,
         })
         .map_err(|e| backend::ui_error(&e))
     })
@@ -446,8 +444,7 @@ async fn intent_code_submit(
                 &nexus_client::intent_client::default_broker_socket(),
             )
             .map_err(|e| backend::ui_error(&e))?
-            .limits
-            .to_intent_limits(),
+            .intent_limits(),
             response_mode: ResponseMode::Stream,
             client_label: Some("nexus-desktop".to_owned()),
         };
@@ -806,8 +803,8 @@ async fn exec_restore_apply(
     .map_err(|m| ui_msg("recovery", m))
 }
 
-/// Settings: the user's own, lower run limits. Everything is optional; leaving a field out
-/// resets it to the built-in value. The broker clamps to 1..=built-in.
+/// Settings: the user's OWN optional limits (to bound their cost or time). Leaving a field out clears it;
+/// with none set Nexus applies no limit.
 #[tauri::command]
 async fn code_limits_set(
     limits: serde_json::Map<String, serde_json::Value>,
@@ -1228,6 +1225,27 @@ async fn intent_diff(run_id: String) -> Result<nexus_client::intent_client::Diff
     .map_err(|_| internal())?
 }
 
+/// One page of EVERY tool call of one of this user's runs (the run view carries only the latest ones).
+/// Read-only; the broker checks that the run is this user's.
+#[tauri::command]
+async fn intent_activity(
+    run_id: String,
+    offset: u32,
+    limit: u32,
+) -> Result<nexus_client::intent_client::ActivityPage, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::activity_page(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+            offset,
+            limit.min(200),
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
 /// The final text of a finished run, as the broker recorded it (the report or summary).
 #[tauri::command]
 async fn intent_result(run_id: String) -> Result<String, UiError> {
@@ -1458,6 +1476,7 @@ pub fn run() {
             intent_code_limits,
             intent_code_submit,
             intent_diff,
+            intent_activity,
             intent_copy,
             intent_status,
             intent_result,
@@ -1574,6 +1593,7 @@ mod authz_tests {
         "intent_code_limits",
         "intent_code_submit",
         "intent_diff",
+        "intent_activity",
         "intent_copy",
         "intent_status",
         "intent_result",
@@ -1946,7 +1966,7 @@ mod authz_tests {
                         serde_json::json!({"run": run, "baseCommit": "abc", "files": [{"path": "src/lib.rs", "status": "M", "additions": 1, "deletions": 1}], "filesTruncated": false, "diff": "--- a\n+++ b\n", "diffDigest": "d", "diffTruncated": false})
                     }
                     "intent-code-config" => {
-                        serde_json::json!({"limits": {"maxTurns": 12, "maxToolCalls": 30, "maxToolResultBytes": 131072, "maxEdits": 5, "maxTests": 5, "maxOutputTokens": 1024, "maxRuntimeSecs": 1800}, "approvalLifetimeSecs": 300})
+                        serde_json::json!({"limits": {"maxTurns": 40}, "maxOutputTokens": 1024, "approvalLifetimeSecs": 300})
                     }
                     "intent-copy" => {
                         serde_json::json!({"retained": true, "active": false, "projectId": "proj", "baseCommit": "abc", "ageMs": 5, "approxBytes": 1024})
@@ -1967,7 +1987,10 @@ mod authz_tests {
         assert_eq!(src[0].source_id, "proj");
         // the limits shown to the user are the backend constants (no broker round trip)
         let lim = tauri::async_runtime::block_on(super::intent_code_limits()).unwrap();
-        assert_eq!(lim.limits.max_edits, 5);
+        // only what the person chose is a limit; Nexus has none of its own
+        assert_eq!(lim.limits.max_turns, Some(40));
+        assert_eq!(lim.limits.max_tool_calls, None);
+        assert_eq!(lim.limits.max_runtime_secs, None);
         assert_eq!(lim.approval_lifetime_secs, 300);
         let r = tauri::async_runtime::block_on(super::intent_code_submit(
             "fix the test".into(),
@@ -2014,14 +2037,10 @@ mod authz_tests {
         assert_eq!(i["workspaceId"], "proj");
         assert_eq!(
             i["limits"],
-            serde_json::to_value(
-                nexus_client::intent_client::DESKTOP_CODE_LIMITS.to_intent_limits()
-            )
-            .unwrap(),
-            "limits are the broker's reported set (not renderer-controlled)"
+            serde_json::json!({"maxOutputTokens": 1024, "maxTurns": 40}),
+            "limits are the broker's reported set (not renderer-controlled); there is no edit/test/byte quota"
         );
-        assert_eq!(i["limits"]["maxEdits"], 5);
-        assert_eq!(i["limits"]["maxTests"], 5);
+        assert!(i["limits"].get("maxEdits").is_none() && i["limits"].get("maxTests").is_none());
         let src = include_str!("lib.rs");
         let (prod, _) = src.split_once("#[cfg(test)]").unwrap();
         for forbidden in [

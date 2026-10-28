@@ -17,6 +17,7 @@ import type {
   ConnectReport,
   CopyInfo,
   DesktopCodeLimits,
+  ActivityPage,
   DiffReply,
   IntentCancelReply,
   IntentRun,
@@ -94,6 +95,8 @@ export interface NativeApi {
   ): Promise<IntentSubmitReply>;
   /** A5.6: read-only change set of this user's repo-code run. */
   intentDiff(runId: string): Promise<DiffReply>;
+  /** One page of EVERY tool call of a run (the run view carries only the latest). */
+  runActivity(runId: string, offset: number, limit: number): Promise<ActivityPage>;
   intentCopy(runId: string): Promise<CopyInfo>;
   /** A6.1.4: the native runtime's state (interactive profile) or `external`. */
   runtimeState(): Promise<RuntimeState>;
@@ -234,6 +237,7 @@ export const tauriApi: NativeApi = {
   intentCodeSubmit: (prompt, sourceId, idempotencyKey) =>
     invoke<IntentSubmitReply>("intent_code_submit", { prompt, sourceId, idempotencyKey }),
   intentDiff: (runId) => invoke<DiffReply>("intent_diff", { runId }),
+  runActivity: (runId, offset, limit) => invoke<ActivityPage>("intent_activity", { runId, offset, limit }),
   intentCopy: (runId) => invoke<CopyInfo>("intent_copy", { runId }),
   runtimeState: () => invoke<RuntimeState>("runtime_state"),
   runtimeStart: () => invoke<void>("runtime_start"),
@@ -352,6 +356,7 @@ export const unavailableApi: NativeApi = {
   codeLimitsSet: () => Promise.reject(notInShell),
   intentCodeSubmit: () => Promise.reject(notInShell),
   intentDiff: () => Promise.reject(notInShell),
+  runActivity: () => Promise.reject(notInShell),
   intentCopy: () => Promise.reject(notInShell),
   runtimeState: () => Promise.reject(notInShell),
   runtimeStart: () => Promise.reject(notInShell),

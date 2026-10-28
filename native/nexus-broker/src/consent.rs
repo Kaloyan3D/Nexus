@@ -25,11 +25,9 @@ use std::path::{Path, PathBuf};
 pub const CONSENT_FILE: &str = "provider-consent.json";
 pub const AUDIT_FILE: &str = "live-auth-audit.jsonl";
 
-/// Interactive ceilings (per run). The user never sets these per task.
-pub const MAX_TURNS: u32 = 2000;
-pub const MAX_TOOL_CALLS: u32 = 10_000;
+/// Largest output a single provider call may ask for (a parameter of that request, not a quota on the work).
+/// There is no ceiling on how many turns, tool calls or result bytes a run may use.
 pub const MAX_OUTPUT_TOKENS: u64 = 131_072;
-pub const MAX_TOOL_RESULT_BYTES: u64 = 512 * 1024 * 1024;
 /// A consent older than this must be given again.
 pub const CONSENT_TTL_MS: u64 = 90 * 24 * 3600 * 1000;
 
@@ -214,14 +212,8 @@ pub fn authorize_run(
     if a.prompt.trim().is_empty() || a.workspace_id.is_empty() {
         return refuse("a run needs a task text and a project");
     }
-    if a.max_turns == 0 || a.max_turns > MAX_TURNS {
-        return refuse("requested turn limit exceeds the interactive ceiling");
-    }
-    if a.max_tool_calls > MAX_TOOL_CALLS {
-        return refuse("requested tool-call limit exceeds the interactive ceiling");
-    }
-    if a.max_tool_result_bytes > MAX_TOOL_RESULT_BYTES {
-        return refuse("requested tool-result byte limit exceeds the interactive ceiling");
+    if a.max_turns == Some(0) || a.max_tool_calls == Some(0) || a.max_tool_result_bytes == Some(0) {
+        return refuse("a limit, when one is set, must be at least 1");
     }
     match a.max_output_tokens {
         Some(n) if (1..=MAX_OUTPUT_TOKENS).contains(&n) => {}
@@ -264,10 +256,10 @@ mod tests {
             remote_model_id: "muse-spark-1.3-contributor",
             workspace_id: "proj",
             prompt,
-            max_turns: 60,
-            max_tool_calls: 200,
+            max_turns: Some(60),
+            max_tool_calls: Some(200),
             max_output_tokens: Some(16_384),
-            max_tool_result_bytes: 512 * 1024,
+            max_tool_result_bytes: Some(512 * 1024),
             direct: false,
         }
     }
@@ -375,25 +367,34 @@ mod tests {
         let mut a = att("x");
         a.intent_type = "repo-inspect";
         assert!(authorize_run(d.path(), &a, "r").is_err());
-        // above the interactive ceilings, empty task, unstated output limit
+        // above the per-call output ceiling, unstated output limit, a zero limit, empty task
         for mutate in [
-            (|a: &mut SessionAttempt| a.max_turns = MAX_TURNS + 1) as fn(&mut SessionAttempt),
-            |a| a.max_tool_calls = MAX_TOOL_CALLS + 1,
-            |a| a.max_output_tokens = Some(MAX_OUTPUT_TOKENS + 1),
+            (|a: &mut SessionAttempt| a.max_output_tokens = Some(MAX_OUTPUT_TOKENS + 1))
+                as fn(&mut SessionAttempt),
             |a| a.max_output_tokens = None,
-            |a| a.max_tool_result_bytes = MAX_TOOL_RESULT_BYTES + 1,
-            |a| a.max_turns = 0,
+            |a| a.max_turns = Some(0),
+            |a| a.max_tool_calls = Some(0),
+            |a| a.max_tool_result_bytes = Some(0),
         ] {
             let mut a = att("x");
             mutate(&mut a);
             assert!(authorize_run(d.path(), &a, "r").is_err());
         }
         assert!(authorize_run(d.path(), &att("   "), "r").is_err());
+        // there is NO ceiling on turns, tool calls or result bytes: a person's limit of any size, or none, is fine
+        let mut a = att("x");
+        a.max_turns = Some(5_000_000);
+        a.max_tool_calls = Some(90_000_000);
+        a.max_tool_result_bytes = Some(1 << 40);
+        assert!(authorize_run(d.path(), &a, "r").is_ok());
+        let mut a = att("x");
+        (a.max_turns, a.max_tool_calls, a.max_tool_result_bytes) = (None, None, None);
+        assert!(authorize_run(d.path(), &a, "r").is_ok());
         // audit: one line per granted run + the consent, none of them contain the prompt
         let log = std::fs::read_to_string(d.path().join(AUDIT_FILE)).unwrap();
         assert_eq!(
             log.lines().filter(|l| l.contains("run-authorized")).count(),
-            3
+            5
         );
         assert!(log.contains("consent-granted") && log.contains(&c.consent_id));
         assert!(!log.contains("fix it"));

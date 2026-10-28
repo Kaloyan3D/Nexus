@@ -1287,12 +1287,12 @@ fn write_scope_refusal(
     ))
 }
 
-/// Limits of the automated workspace policy (A6.1.4). The rules themselves are
-/// code (below), not configuration, so a config file can never widen them.
+/// The automated workspace policy's bound (A6.1.4). The rules themselves are code (below), not
+/// configuration, so a config file can never widen them. There is no quota on how many edits or commands a
+/// task may make (it used to be 5000 / 2000): only the size of ONE file's result, which the whole-file
+/// atomic write has to hold in memory.
 #[derive(Debug, Clone)]
 pub struct AutonomousConfig {
-    pub max_edits_per_task: u32,
-    pub max_commands_per_task: u32,
     pub max_write_bytes: u64,
 }
 
@@ -1301,8 +1301,6 @@ pub const AUTONOMOUS_POLICY_ID: &str = "autonomous-workspace/v1";
 impl Default for AutonomousConfig {
     fn default() -> Self {
         Self {
-            max_edits_per_task: 5000,
-            max_commands_per_task: 2000,
             max_write_bytes: 2 * 1024 * 1024,
         }
     }
@@ -1315,8 +1313,6 @@ fn autonomous_policy_digest(
 ) -> String {
     let mut v = serde_json::json!({
         "id": AUTONOMOUS_POLICY_ID,
-        "maxEditsPerTask": c.max_edits_per_task,
-        "maxCommandsPerTask": c.max_commands_per_task,
         "maxWriteBytes": c.max_write_bytes,
         "protectedNames": nexus_tools::protect::PROTECTED_NAMES,
         "tools": ["fs.write", "fs.edit", "proc.run"],
@@ -1466,9 +1462,6 @@ fn evaluate_autonomous_policy(
         .unwrap_or((u32::MAX, u32::MAX));
     match (sub.tool_id.as_str(), sub.scope.as_str()) {
         ("fs.write" | "fs.edit", "write") => {
-            if edits >= cfg.max_edits_per_task {
-                return Err("the per-task edit budget of the workspace policy is exhausted".into());
-            }
             if sub.paths.len() != 1 {
                 return Err("exactly one file per edit".into());
             }
@@ -1504,7 +1497,7 @@ fn evaluate_autonomous_policy(
             }
             let mut facts = serde_json::json!({
                 "copy": task, "project": project, "tool": sub.tool_id, "path": path,
-                "postImageBytes": post, "editsSoFar": edits, "maxEdits": cfg.max_edits_per_task,
+                "postImageBytes": post, "editsSoFar": edits,
             });
             if let Some(g) = &frozen {
                 facts["grant"] = grant_declaration(g);
@@ -1512,11 +1505,6 @@ fn evaluate_autonomous_policy(
             Ok(facts)
         }
         ("proc.run", "process") => {
-            if commands >= cfg.max_commands_per_task {
-                return Err(
-                    "the per-task command budget of the workspace policy is exhausted".into(),
-                );
-            }
             let sandbox = sub.operation.get("sandbox");
             let net = sandbox
                 .and_then(|s| s.get("network"))
@@ -1581,7 +1569,7 @@ fn evaluate_autonomous_policy(
             let mut facts = serde_json::json!({
                 "copy": task, "project": project, "tool": sub.tool_id,
                 "program": sub.operation.get("program"), "argvDigest": argv_digest,
-                "commandsSoFar": commands, "maxCommands": cfg.max_commands_per_task,
+                "commandsSoFar": commands,
             });
             if task_scope != nexus_tools::exec_contract::FsScope::Scratch {
                 facts["fsScope"] = task_scope.as_str().into();
@@ -6164,8 +6152,6 @@ mod isolation_tests {
         // the scratch-only digest is the historical one (no extra key)
         let historical = sha256_hex_str(&nexus_contracts::canonical_json(&serde_json::json!({
             "id": AUTONOMOUS_POLICY_ID,
-            "maxEditsPerTask": c.max_edits_per_task,
-            "maxCommandsPerTask": c.max_commands_per_task,
             "maxWriteBytes": c.max_write_bytes,
             "protectedNames": nexus_tools::protect::PROTECTED_NAMES,
             "tools": ["fs.write", "fs.edit", "proc.run"],
@@ -6270,22 +6256,18 @@ mod isolation_tests {
     }
 
     #[test]
-    fn the_automated_policy_budgets_are_per_task_and_a_swapped_copy_is_refused() {
+    fn the_automated_policy_has_no_per_task_quota_only_a_per_file_size_and_a_swapped_copy_is_refused(
+    ) {
         let (d, keep, task, digest) = policy_rig(&[]);
         let cfg = AutonomousConfig {
-            max_edits_per_task: 2,
-            max_commands_per_task: 1,
             max_write_bytes: 1000,
         };
+        // a task that already made a hundred thousand edits and commands is not refused for it
         d.autonomous_counters
             .lock()
             .unwrap()
-            .insert(task.clone(), (2, 1));
-        assert!(
-            evaluate_autonomous_policy(&d, &cfg, &edit(&task, &digest, "src/a.rs", 1))
-                .unwrap_err()
-                .contains("budget")
-        );
+            .insert(task.clone(), (100_000, 100_000));
+        assert!(evaluate_autonomous_policy(&d, &cfg, &edit(&task, &digest, "src/a.rs", 1)).is_ok());
         assert!(evaluate_autonomous_policy(
             &d,
             &cfg,
@@ -6298,9 +6280,8 @@ mod isolation_tests {
                 proc_op("none", false, "none")
             )
         )
-        .unwrap_err()
-        .contains("budget"));
-        d.autonomous_counters.lock().unwrap().clear();
+        .is_ok());
+        // ONE file's result must still fit in memory for the atomic whole-file write
         assert!(
             evaluate_autonomous_policy(&d, &cfg, &edit(&task, &digest, "src/a.rs", 1001)).is_err()
         );

@@ -24,14 +24,6 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-pub const DEFAULT_CODE_TURNS: u32 = 12;
-pub const DEFAULT_CODE_TOOL_CALLS: u32 = 30;
-pub const DEFAULT_CODE_RUNTIME_SECS: u64 = 1800;
-pub const DEFAULT_CODE_RESULT_BYTES: u64 = 512 * 1024;
-pub const DEFAULT_MAX_EDITS: u32 = 5;
-pub const DEFAULT_MAX_TESTS: u32 = 5;
-/// Aggregate bytes the agent may publish across all approved writes.
-pub const MAX_TOTAL_WRITE_BYTES: u64 = 128 * 1024;
 /// How long one approval request lives (the human decides within this).
 pub const APPROVAL_TTL_MS: i64 = 300_000;
 /// Sandbox wall-clock for one test/build execution.
@@ -39,11 +31,11 @@ pub const PROC_WALL_MS: u64 = 120_000;
 /// Longest we wait for the reviewer, even with a long approval TTL.
 pub const APPROVAL_POLL: Duration = Duration::from_millis(150);
 
+/// What this run may do, decided BEFORE a proposal reaches the Kernel. There is deliberately no count or byte
+/// quota here: how many edits, how much source, how many commands a task needs is the task's business.
+/// What stays is the operator's write scope and the read-only request.
 #[derive(Debug, Clone)]
 pub struct CodePolicy {
-    pub max_edits: u32,
-    pub max_tests: u32,
-    pub max_total_write_bytes: u64,
     /// Operator-configured write scope for this source (A6.1). Empty = the
     /// whole project (minus the always-protected files). Entries ending in
     /// `/` are directory prefixes, anything else is one exact file.
@@ -52,11 +44,8 @@ pub struct CodePolicy {
     pub read_only: bool,
 }
 
-pub fn resolve_policy(intent: &NexusIntentV1, write_allow: &[String]) -> CodePolicy {
+pub fn resolve_policy(_intent: &NexusIntentV1, write_allow: &[String]) -> CodePolicy {
     CodePolicy {
-        max_edits: intent.limits.max_edits.unwrap_or(DEFAULT_MAX_EDITS),
-        max_tests: intent.limits.max_tests.unwrap_or(DEFAULT_MAX_TESTS),
-        max_total_write_bytes: MAX_TOTAL_WRITE_BYTES,
         write_allow: write_allow.to_vec(),
         read_only: false,
     }
@@ -263,7 +252,10 @@ pub fn validate_code_proposal_in(
                 if c.len() > rt::MODEL_MAX_WRITE_CHARS {
                     return Err(refusal(
                         "invalid-arguments",
-                        format!("content may not exceed {} bytes", rt::MODEL_MAX_WRITE_CHARS),
+                        format!(
+                            "one fs_write may carry at most {} bytes. That is a limit of a single operation, not of the task: write the file in parts (create it with the first part, then add each next part with fs_edit by replacing its last line with that line plus the part), or split it into several modules",
+                            rt::MODEL_MAX_WRITE_CHARS
+                        ),
                     ));
                 }
                 c.len() as u64
@@ -274,7 +266,10 @@ pub fn validate_code_proposal_in(
                 if n == 0 || n > rt::MODEL_MAX_EDITS {
                     return Err(refusal(
                         "invalid-arguments",
-                        format!("edits must contain 1..={} operations", rt::MODEL_MAX_EDITS),
+                        format!(
+                            "one fs_edit must contain 1..={} operations. That is a limit of a single call, not of the task: send the operations in several fs_edit calls, each applied to the file as the previous one left it",
+                            rt::MODEL_MAX_EDITS
+                        ),
                     ));
                 }
                 edits
@@ -524,7 +519,7 @@ pub fn request_and_wait(
     b: &Broker,
     run_id: &str,
     flag: &AtomicBool,
-    deadline: Instant,
+    deadline: Option<Instant>,
     params: &Value,
     ai_origin: &str,
     tool_label: &str,
@@ -536,11 +531,9 @@ pub fn request_and_wait(
         .approval_ttl_ms
         .unwrap_or(APPROVAL_TTL_MS)
         .clamp(1_000, APPROVAL_TTL_MS)
-        .min(
-            deadline
-                .saturating_duration_since(Instant::now())
-                .as_millis() as i64,
-        );
+        .min(deadline.map_or(i64::MAX, |d| {
+            d.saturating_duration_since(Instant::now()).as_millis() as i64
+        }));
     if ttl < 1_000 {
         return ApprovalOutcome::Refused {
             code: "max-runtime".into(),
@@ -624,7 +617,7 @@ pub fn request_and_wait(
             clear(b);
             return ApprovalOutcome::Cancelled { approval_id: id };
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
             revoke("run-time-budget");
             clear(b);
             return ApprovalOutcome::TimedOut { approval_id: id };
@@ -1085,15 +1078,16 @@ mod tests {
     }
 
     #[test]
-    fn policy_defaults_only_tighten() {
+    fn a_policy_has_no_count_or_byte_quota() {
+        // Edits, written bytes and commands are not limited by the policy; only the operator's write scope
+        // and the read-only request matter (the former 5 edits / 5 commands / 128 KiB quotas are gone).
         let i = NexusIntentV1::parse(&json!({
             "schemaVersion": 1, "requestId": "r1", "idempotencyKey": "idem-0001",
             "intentType": "repo-code", "content": "x", "workspaceId": "w",
-            "limits": {"maxEdits": 2, "maxTests": 3},
         }))
         .unwrap();
-        let p = resolve_policy(&i, &[]);
-        assert_eq!((p.max_edits, p.max_tests), (2, 3));
-        assert_eq!(p.max_total_write_bytes, MAX_TOTAL_WRITE_BYTES);
+        let p = resolve_policy(&i, &["src/".to_owned()]);
+        assert_eq!(p.write_allow, vec!["src/".to_owned()]);
+        assert!(!p.read_only);
     }
 }

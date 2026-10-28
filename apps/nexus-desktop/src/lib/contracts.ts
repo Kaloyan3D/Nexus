@@ -398,6 +398,7 @@ export interface IntentRun {
   turn?: number;
   maxTurns?: number;
   toolCalls?: number;
+  /** Limits the PERSON chose (absent = no limit; Nexus has none of its own). */
   maxToolCalls?: number;
   toolResultBytes?: number;
   stopReason?: string | null;
@@ -407,9 +408,12 @@ export interface IntentRun {
   // ---- A5.6 repo-code progress (absent for other run types) ----
   /** A6.1.1: verified outcome of a coding run (absent for other run types and for older brokers). */
   codingOutcome?: CodingOutcome | null;
+  /** Edits applied so far (a count, never a quota). */
   editsUsed?: number;
-  maxEdits?: number;
+  /** Commands run so far (a count, never a quota). */
   testsUsed?: number;
+  /** Every tool call the run recorded; `toolActivity` is only the latest ones (read the rest with `runActivity`). */
+  activityTotal?: number;
   /** Turns whose conversation was shortened to stay inside the model context budget. */
   contextCompactions?: number;
   /** Provider interruptions the broker recovered from by itself. */
@@ -418,7 +422,6 @@ export interface IntentRun {
   continuedAs?: string | null;
   autoAdopt?: string | null;
   lastRecovery?: string | null;
-  maxTests?: number;
   /** `pass` / `fail` of the most recent approved test or build command. */
   lastTestVerification?: string | null;
   /** The operation currently waiting for an INDEPENDENT approver. */
@@ -490,19 +493,23 @@ export interface PendingApproval {
   createdAtMs?: number | null;
 }
 
-/** The fixed run limits a Desktop coding task uses (defined by the backend, not the renderer). */
+/**
+ * What bounds a coding task. Nexus has NO limit of its own on steps, edits, written bytes, commands or time; these
+ * are only the limits the person (Settings) or the operator chose to bound cost or time. Absent = no limit.
+ */
 export interface DesktopCodeLimits {
-  maxTurns: number;
-  maxToolCalls: number;
-  maxToolResultBytes: number;
-  maxEdits: number;
-  maxTests: number;
-  maxOutputTokens: number;
-  maxRuntimeSecs: number;
+  maxTurns?: number;
+  maxToolCalls?: number;
+  maxRuntimeSecs?: number;
   /** How long an approval stays decidable (broker-defined; operators can only shorten it). */
   approvalLifetimeSecs?: number;
-  /** The built-in maximums the user's own limits are lowered from. */
-  builtIn?: DesktopCodeLimits | null;
+}
+
+/** One page of every tool call of a run, oldest first. */
+export interface ActivityPage {
+  total: number;
+  offset: number;
+  activity: ToolActivity[];
 }
 
 /** Read-only facts about a run's retained isolated working copy (never a path). */

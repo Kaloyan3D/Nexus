@@ -197,12 +197,15 @@ pub struct LiveSessionAuthorization {
     pub remote_model_id: String,
     pub workspace_id: String,
     pub prompt_sha256: String,
-    /// Maximum provider calls (one per model turn) in the session.
-    pub max_turns: u32,
-    pub max_tool_calls: u32,
+    /// Maximum provider calls (one per model turn) in the session, if the operator chose one.
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub max_tool_calls: Option<u32>,
     /// Output-token ceiling for EACH provider call.
     pub max_output_tokens: u64,
-    pub max_tool_result_bytes: u64,
+    #[serde(default)]
+    pub max_tool_result_bytes: Option<u64>,
     pub billable_acknowledged: bool,
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
@@ -223,10 +226,10 @@ pub fn write_session_record(
     remote_model_id: &str,
     workspace_id: &str,
     prompt: &str,
-    max_turns: u32,
-    max_tool_calls: u32,
+    max_turns: Option<u32>,
+    max_tool_calls: Option<u32>,
     max_output_tokens: u64,
-    max_tool_result_bytes: u64,
+    max_tool_result_bytes: Option<u64>,
     ttl_secs: u64,
     acknowledged: bool,
 ) -> Result<LiveSessionAuthorization, String> {
@@ -254,10 +257,10 @@ pub fn write_session_record_for(
     remote_model_id: &str,
     workspace_id: &str,
     prompt: &str,
-    max_turns: u32,
-    max_tool_calls: u32,
+    max_turns: Option<u32>,
+    max_tool_calls: Option<u32>,
     max_output_tokens: u64,
-    max_tool_result_bytes: u64,
+    max_tool_result_bytes: Option<u64>,
     ttl_secs: u64,
     acknowledged: bool,
 ) -> Result<LiveSessionAuthorization, String> {
@@ -276,23 +279,29 @@ pub fn write_session_record_for(
     if intent_type != "repo-inspect" && intent_type != "repo-code" {
         return Err("a session record is only for repo-inspect or repo-code".into());
     }
-    let (turn_cap, call_cap) = if intent_type == "repo-code" {
-        (24, 80)
-    } else {
-        (12, 40)
+    // repo-code has NO built-in ceiling: an operator may state limits (to bound their own spend) or leave
+    // them out. repo-inspect, the small read-only product, keeps its fixed bounds and needs them stated.
+    let code = intent_type == "repo-code";
+    let bound = |name: &str, v: Option<u64>, min: u64, max: u64| -> Result<(), String> {
+        match v {
+            None if code => Ok(()),
+            None => Err(format!("{name} is required for repo-inspect")),
+            Some(n) if n >= 1 && (code || (min..=max).contains(&n)) => Ok(()),
+            Some(_) if code => Err(format!("{name} must be at least 1")),
+            Some(_) => Err(format!("{name} must be {min}..{max}")),
+        }
     };
-    if !(1..=turn_cap).contains(&max_turns) {
-        return Err(format!("--max-turns must be 1..{turn_cap}"));
-    }
-    if !(1..=call_cap).contains(&max_tool_calls) {
-        return Err(format!("--max-tool-calls must be 1..{call_cap}"));
-    }
+    bound("--max-turns", max_turns.map(u64::from), 1, 12)?;
+    bound("--max-tool-calls", max_tool_calls.map(u64::from), 1, 40)?;
     if !(16..=8192).contains(&max_output_tokens) {
         return Err("--max-output-tokens must be 16..8192 per call".into());
     }
-    if !(1024..=2 * 1024 * 1024).contains(&max_tool_result_bytes) {
-        return Err("--max-tool-result-bytes must be 1024..2097152".into());
-    }
+    bound(
+        "--max-tool-result-bytes",
+        max_tool_result_bytes,
+        1024,
+        2 * 1024 * 1024,
+    )?;
     if ttl_secs == 0 || ttl_secs > MAX_TTL_SECS {
         return Err(format!("--expires-in-secs must be 1..{MAX_TTL_SECS}"));
     }
@@ -339,10 +348,11 @@ pub struct SessionAttempt<'a> {
     pub remote_model_id: &'a str,
     pub workspace_id: &'a str,
     pub prompt: &'a str,
-    pub max_turns: u32,
-    pub max_tool_calls: u32,
+    /// Limits the run asked for (the person's own, if any). `None` = no limit.
+    pub max_turns: Option<u32>,
+    pub max_tool_calls: Option<u32>,
     pub max_output_tokens: Option<u64>,
-    pub max_tool_result_bytes: u64,
+    pub max_tool_result_bytes: Option<u64>,
     /// Direct Workspace: the run edits the project's real folder. The standing consent must then be
     /// one that was given for the text that says so.
     pub direct: bool,
@@ -403,13 +413,23 @@ pub fn consume_session(
     if rec.prompt_sha256 != prompt_digest(a.prompt) {
         return refuse("live session authorization was issued for a different task text");
     }
-    if a.max_turns == 0 || a.max_turns > rec.max_turns {
+    // A limit the run asks for must fit inside the one the operator authorized; a run that asks for none
+    // is simply bound by the operator's (the caller applies `rec`'s limits). No limit authorized = none.
+    let within = |asked: Option<u64>, allowed: Option<u64>| match (asked, allowed) {
+        (Some(0), _) => false,
+        (Some(a), Some(l)) => a <= l,
+        _ => true,
+    };
+    if !within(a.max_turns.map(u64::from), rec.max_turns.map(u64::from)) {
         return refuse("requested turn limit exceeds the authorized session budget");
     }
-    if a.max_tool_calls > rec.max_tool_calls {
+    if !within(
+        a.max_tool_calls.map(u64::from),
+        rec.max_tool_calls.map(u64::from),
+    ) {
         return refuse("requested tool-call limit exceeds the authorized session budget");
     }
-    if a.max_tool_result_bytes > rec.max_tool_result_bytes {
+    if !within(a.max_tool_result_bytes, rec.max_tool_result_bytes) {
         return refuse("requested tool-result byte limit exceeds the authorized session budget");
     }
     match a.max_output_tokens {
@@ -542,7 +562,20 @@ mod tests {
     }
 
     fn sess(d: &Path, prompt: &str) {
-        write_session_record(d, P, M, "demo", prompt, 5, 10, 512, 65536, 600, true).unwrap();
+        write_session_record(
+            d,
+            P,
+            M,
+            "demo",
+            prompt,
+            Some(5),
+            Some(10),
+            512,
+            Some(65536),
+            600,
+            true,
+        )
+        .unwrap();
     }
     fn sa<'a>(prompt: &'a str) -> SessionAttempt<'a> {
         SessionAttempt {
@@ -551,10 +584,10 @@ mod tests {
             remote_model_id: M,
             workspace_id: "demo",
             prompt,
-            max_turns: 5,
-            max_tool_calls: 10,
+            max_turns: Some(5),
+            max_tool_calls: Some(10),
             max_output_tokens: Some(512),
-            max_tool_result_bytes: 65536,
+            max_tool_result_bytes: Some(65536),
             direct: false,
         }
     }
@@ -593,10 +626,10 @@ mod tests {
     fn session_mismatches_and_over_budget_requests_refuse_and_consume() {
         type Mut = Box<dyn Fn(&mut SessionAttempt<'static>)>;
         let cases: Vec<(&str, Mut)> = vec![
-            ("turns", Box::new(|a| a.max_turns = 6)),
-            ("zero turns", Box::new(|a| a.max_turns = 0)),
-            ("tools", Box::new(|a| a.max_tool_calls = 11)),
-            ("bytes", Box::new(|a| a.max_tool_result_bytes = 65537)),
+            ("turns", Box::new(|a| a.max_turns = Some(6))),
+            ("zero turns", Box::new(|a| a.max_turns = Some(0))),
+            ("tools", Box::new(|a| a.max_tool_calls = Some(11))),
+            ("bytes", Box::new(|a| a.max_tool_result_bytes = Some(65537))),
             ("tokens", Box::new(|a| a.max_output_tokens = Some(513))),
             ("no tokens", Box::new(|a| a.max_output_tokens = None)),
             ("workspace", Box::new(|a| a.workspace_id = "other")),
@@ -620,7 +653,20 @@ mod tests {
     #[test]
     fn a_repo_inspect_session_record_never_authorizes_repo_code_and_vice_versa() {
         let d = tempfile::tempdir().unwrap();
-        write_session_record(d.path(), P, M, "demo", "task", 5, 10, 512, 65536, 600, true).unwrap();
+        write_session_record(
+            d.path(),
+            P,
+            M,
+            "demo",
+            "task",
+            Some(5),
+            Some(10),
+            512,
+            Some(65536),
+            600,
+            true,
+        )
+        .unwrap();
         let mut a = sa("task");
         a.intent_type = "repo-code";
         assert!(consume_session(d.path(), &a)
@@ -635,19 +681,19 @@ mod tests {
             M,
             "demo",
             "task",
-            12,
-            30,
+            Some(12),
+            Some(30),
             1024,
-            262144,
+            Some(262144),
             600,
             true,
         )
         .unwrap();
         let mut ok = sa("task");
-        ok.max_turns = 12;
-        ok.max_tool_calls = 30;
+        ok.max_turns = Some(12);
+        ok.max_tool_calls = Some(30);
         ok.max_output_tokens = Some(1024);
-        ok.max_tool_result_bytes = 262144;
+        ok.max_tool_result_bytes = Some(262144);
         assert!(
             consume_session(d.path(), &ok).is_err(),
             "inspect type presented to a code record"
@@ -659,10 +705,10 @@ mod tests {
             M,
             "demo",
             "task",
-            12,
-            30,
+            Some(12),
+            Some(30),
             1024,
-            262144,
+            Some(262144),
             600,
             true,
         )
@@ -676,10 +722,10 @@ mod tests {
             M,
             "demo",
             "t",
-            1,
-            1,
+            Some(1),
+            Some(1),
             64,
-            2048,
+            Some(2048),
             60,
             true
         )
@@ -713,10 +759,10 @@ mod tests {
                     M,
                     "demo",
                     "t",
-                    bad.0,
-                    bad.1,
+                    Some(bad.0),
+                    Some(bad.1),
                     bad.2,
-                    bad.3,
+                    Some(bad.3),
                     600,
                     true
                 )
@@ -724,13 +770,34 @@ mod tests {
                 "{bad:?}"
             );
         }
-        assert!(
-            write_session_record(d.path(), P, M, "demo", "t", 5, 10, 512, 65536, 600, false)
-                .is_err()
-        );
-        let mut rec =
-            write_session_record(d.path(), P, M, "demo", "t", 5, 10, 512, 65536, 600, true)
-                .unwrap();
+        assert!(write_session_record(
+            d.path(),
+            P,
+            M,
+            "demo",
+            "t",
+            Some(5),
+            Some(10),
+            512,
+            Some(65536),
+            600,
+            false
+        )
+        .is_err());
+        let mut rec = write_session_record(
+            d.path(),
+            P,
+            M,
+            "demo",
+            "t",
+            Some(5),
+            Some(10),
+            512,
+            Some(65536),
+            600,
+            true,
+        )
+        .unwrap();
         rec.expires_at_ms = 1;
         std::fs::write(
             session_record_path(d.path()),
@@ -741,6 +808,100 @@ mod tests {
             .unwrap_err()
             .1
             .contains("expired"));
+    }
+
+    #[test]
+    fn a_repo_code_session_record_has_no_built_in_ceiling_and_a_limit_free_run_is_bound_by_its_stated_limits(
+    ) {
+        // an operator may authorize far more than the former 24 turns / 80 tool calls, or state no limit
+        let d = tempfile::tempdir().unwrap();
+        let rec = write_session_record_for(
+            "repo-code",
+            d.path(),
+            P,
+            M,
+            "demo",
+            "task",
+            Some(100_000),
+            Some(1_000_000),
+            1024,
+            None,
+            600,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            (rec.max_turns, rec.max_tool_result_bytes),
+            (Some(100_000), None)
+        );
+        std::fs::remove_file(session_record_path(d.path())).unwrap();
+        write_session_record_for(
+            "repo-code",
+            d.path(),
+            P,
+            M,
+            "demo",
+            "task",
+            None,
+            None,
+            1024,
+            None,
+            600,
+            true,
+        )
+        .unwrap();
+        let mut a = sa("task");
+        a.intent_type = "repo-code";
+        (a.max_turns, a.max_tool_calls, a.max_tool_result_bytes) = (None, None, None);
+        let got = consume_session(d.path(), &a)
+            .expect("a run that asks for no limit under a record that states none");
+        assert_eq!((got.max_turns, got.max_tool_calls), (None, None));
+        // zero is never a limit; repo-inspect, the small read-only product, still has its bounds and needs them stated
+        assert!(write_session_record_for(
+            "repo-code",
+            d.path(),
+            P,
+            M,
+            "demo",
+            "t",
+            Some(0),
+            None,
+            1024,
+            None,
+            600,
+            true
+        )
+        .is_err());
+        assert!(write_session_record_for(
+            "repo-inspect",
+            d.path(),
+            P,
+            M,
+            "demo",
+            "t",
+            None,
+            Some(5),
+            1024,
+            Some(4096),
+            600,
+            true
+        )
+        .is_err());
+        assert!(write_session_record_for(
+            "repo-inspect",
+            d.path(),
+            P,
+            M,
+            "demo",
+            "t",
+            Some(13),
+            Some(5),
+            1024,
+            Some(4096),
+            600,
+            true
+        )
+        .is_err());
     }
 
     #[test]

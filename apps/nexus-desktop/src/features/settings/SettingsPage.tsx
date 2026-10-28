@@ -4,16 +4,15 @@ import { EnvironmentNotes } from "../setup/EnvironmentNotes";
 import { useNexus } from "../../state/NexusContext";
 import { absoluteTime } from "../../lib/format";
 import { Alert, Badge, Button, KeyValue } from "../../components/ui/primitives";
+import { ownLimits } from "../../lib/limits";
 
-const LIMIT_FIELDS: { key: "maxTurns" | "maxToolCalls" | "maxEdits" | "maxTests" | "maxRuntimeSecs"; label: string }[] = [
+const LIMIT_FIELDS: { key: "maxTurns" | "maxToolCalls" | "maxRuntimeSecs"; label: string }[] = [
   { key: "maxTurns", label: "Model turns" },
   { key: "maxToolCalls", label: "Tool calls" },
-  { key: "maxEdits", label: "File changes" },
-  { key: "maxTests", label: "Commands" },
   { key: "maxRuntimeSecs", label: "Run time (seconds)" },
 ];
 
-/** Advanced: lower the automatic limits. Nothing here needs to be touched for ordinary use. */
+/** Optional: bound your own cost or time. Nexus has no limit of its own, so with nothing set a task runs until it is done. */
 function AdvancedLimits() {
   const { intentCodeLimits, saveCodeLimits } = useNexus();
   const [draft, setDraft] = useState<Record<string, string>>({});
@@ -25,24 +24,24 @@ function AdvancedLimits() {
     try {
       await saveCodeLimits(out);
       setDraft({});
-      setMsg(reset ? "Limits reset to the built-in values." : "Saved. New tasks use these limits.");
+      setMsg(reset ? "Limits removed: tasks run until they are done or you press Stop." : "Saved. New tasks use these limits.");
     } catch (e) {
       setMsg(e instanceof Error ? e.message : "Could not save the limits.");
     }
   };
   return (
     <details className="nv-details" style={{ marginTop: 10 }}>
-      <summary>Advanced: run limits</summary>
-      <p className="nv-note">Nexus sizes these generously by itself; lower them only if you want shorter, cheaper runs. They apply to new tasks.</p>
+      <summary>Optional: limit your own cost or time</summary>
+      <p className="nv-note">Nexus never limits how many steps, edits, commands or minutes a task needs. Each model turn is a billable request, so you may set a limit of your own here; it applies to new tasks. Leave these empty for no limit, and press Stop to end any task.</p>
       <div className="nv-heading__meta" style={{ flexWrap: "wrap", gap: 8 }}>
         {LIMIT_FIELDS.map((f) => (
           <label key={f.key} className="nv-note">
             {f.label}{" "}
-            <input type="number" min={1} aria-label={f.label} style={{ width: 90 }} placeholder={String(intentCodeLimits[f.key])} value={draft[f.key] ?? ""} onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })} />
+            <input type="number" min={1} aria-label={f.label} style={{ width: 90 }} placeholder={intentCodeLimits[f.key] ? String(intentCodeLimits[f.key]) : "no limit"} value={draft[f.key] ?? ""} onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })} />
           </label>
         ))}
         <Button size="sm" onClick={() => void save(false)}>Save</Button>
-        <Button size="sm" variant="ghost" onClick={() => void save(true)}>Reset</Button>
+        <Button size="sm" variant="ghost" onClick={() => void save(true)}>Remove limits</Button>
       </div>
       {msg && <p className="nv-note" role="status">{msg}</p>}
     </details>
@@ -104,7 +103,7 @@ export function SettingsPage() {
             <KeyValue
               rows={[
                 { label: "Data folder", value: runtimeState.home ?? "—", mono: true },
-                { label: "Run limits (automatic)", value: intentCodeLimits ? `${intentCodeLimits.maxTurns} turns · ${intentCodeLimits.maxToolCalls} tool calls · ${intentCodeLimits.maxEdits} edits · ${intentCodeLimits.maxTests} test runs · ${intentCodeLimits.maxOutputTokens} output tokens/turn · ${Math.round(intentCodeLimits.maxRuntimeSecs / 60)} min` : "—" },
+                { label: "Your run limits", value: intentCodeLimits ? (ownLimits(intentCodeLimits) ?? "none (Nexus applies no limit of its own)") : "—" },
                 { label: "Message", value: runtimeState.message ?? "—" },
               ]}
             />

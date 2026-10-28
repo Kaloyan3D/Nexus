@@ -505,7 +505,6 @@ const INTENT_HELP: &str = "nexus intent <submit|status|result|follow|cancel|list
           repo-code = controlled coding in an ISOLATED COPY (A5.6): every edit and command needs an\n\
           independent approval (nexus-approver); nothing is committed, pushed or merged.\n\
           --workspace ID (an identity from `workspaces` / `code-sources`, never a path)\n\
-          [--max-edits N] [--max-tests N]   repo-code only\n\
           [--max-turns N] [--max-tool-calls N] [--max-tool-result-bytes N] [--max-runtime-secs N]\n\
           --follow emits NDJSON events: submitted, state, tool (every proposed/executed call), text, end\n\
   workspaces                        list the read-only workspace identities this client may inspect\n\
@@ -846,8 +845,6 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
                         max_tool_calls: num_flag("--max-tool-calls")?.map(|n| n as u32),
                         max_tool_result_bytes: num_flag("--max-tool-result-bytes")?,
                         max_runtime_secs: num_flag("--max-runtime-secs")?,
-                        max_edits: num_flag("--max-edits")?.map(|n| n as u32),
-                        max_tests: num_flag("--max-tests")?.map(|n| n as u32),
                     },
                     response_mode: if args.iter().any(|a| a == "--wait") {
                         nexus_client::intent_contract::ResponseMode::Final
@@ -2211,7 +2208,7 @@ fn cmd_code(args: &[String], cfg: &ClientConfig) -> ExitCode {
         content,
         model,
         workspace_id: Some(project.clone()),
-        limits: conf.limits.to_intent_limits(),
+        limits: conf.intent_limits(),
         response_mode: nexus_client::intent_contract::ResponseMode::Stream,
         client_label: Some("nexus-cli-code".to_owned()),
     };

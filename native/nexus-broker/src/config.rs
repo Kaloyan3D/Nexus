@@ -20,31 +20,18 @@ pub struct WorkspaceSpec {
     pub write_allow: Vec<String>,
 }
 
-/// Operator-selected LOWER bounds for repo-code runs (A6.1.3). Each cap can only
-/// tighten the fixed Desktop maximums (12 turns, 30 tool calls, 5 edits,
-/// 5 commands, 30 minutes); `validate` refuses anything that would raise one.
-/// The cap is applied by the broker to every run, whatever the client sent.
+/// Limits an OPERATOR chose for repo-code runs (A6.1.3, `--code-cap-*`). The default is none: Nexus has no
+/// built-in ceiling on turns, tool calls, edits, written bytes, commands or elapsed time. A cap exists only
+/// because a person or operator asked for one (cost control); the broker applies it to every run, whatever
+/// the client sent, and the user's own limits (Settings) can only tighten it further.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CodeCaps {
     pub max_turns: Option<u32>,
     pub max_tool_calls: Option<u32>,
-    pub max_edits: Option<u32>,
-    pub max_tests: Option<u32>,
     pub max_runtime_secs: Option<u64>,
 }
 
-/// The fixed maximums caps can only lower: the strict-profile acceptance limits, or the
-/// interactive profile's engineering defaults.
-fn base_limits(interactive: bool) -> nexus_client::intent_client::DesktopCodeLimits {
-    if interactive {
-        nexus_client::intent_client::INTERACTIVE_CODE_LIMITS
-    } else {
-        nexus_client::intent_client::DESKTOP_CODE_LIMITS
-    }
-}
-
-/// File inside the broker state directory with the limits the USER chose in Settings
-/// (lower than the built-in ones; never required).
+/// File inside the broker state directory with the limits the USER chose in Settings (never required).
 pub const USER_LIMITS_FILE: &str = "user-limits.json";
 
 impl CodeCaps {
@@ -57,62 +44,38 @@ impl CodeCaps {
         else {
             return out;
         };
-        let lower = |cur: Option<u64>, key: &str| -> Option<u64> {
-            match (cur, v.get(key).and_then(|x| x.as_u64())) {
+        let tighter = |cur: Option<u64>, key: &str| -> Option<u64> {
+            match (cur, v.get(key).and_then(|x| x.as_u64()).filter(|n| *n >= 1)) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (None, b) => b,
                 (a, None) => a,
             }
         };
-        out.max_turns = lower(self.max_turns.map(u64::from), "maxTurns").map(|n| n as u32);
-        out.max_tool_calls =
-            lower(self.max_tool_calls.map(u64::from), "maxToolCalls").map(|n| n as u32);
-        out.max_edits = lower(self.max_edits.map(u64::from), "maxEdits").map(|n| n as u32);
-        out.max_tests = lower(self.max_tests.map(u64::from), "maxTests").map(|n| n as u32);
-        out.max_runtime_secs = lower(self.max_runtime_secs, "maxRuntimeSecs");
+        out.max_turns = tighter(self.max_turns.map(u64::from), "maxTurns")
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+        out.max_tool_calls = tighter(self.max_tool_calls.map(u64::from), "maxToolCalls")
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+        out.max_runtime_secs = tighter(self.max_runtime_secs, "maxRuntimeSecs");
         out
     }
-}
 
-impl CodeCaps {
-    pub fn validate(&self, interactive: bool) -> Result<(), String> {
-        let m = base_limits(interactive);
-        let chk = |name: &str, v: Option<u64>, max: u64| match v {
+    /// A cap must be a positive number; there is no maximum to stay under.
+    pub fn validate(&self) -> Result<(), String> {
+        let chk = |name: &str, v: Option<u64>| match v {
             Some(0) => Err(format!("{name} must be at least 1")),
-            Some(n) if n > max => Err(format!(
-                "{name} {n} exceeds the fixed maximum {max}; operators can only lower limits"
-            )),
             _ => Ok(()),
         };
-        chk("turns", self.max_turns.map(u64::from), m.max_turns.into())?;
-        chk(
-            "tool calls",
-            self.max_tool_calls.map(u64::from),
-            m.max_tool_calls.into(),
-        )?;
-        chk("edits", self.max_edits.map(u64::from), m.max_edits.into())?;
-        chk(
-            "commands",
-            self.max_tests.map(u64::from),
-            m.max_tests.into(),
-        )?;
-        chk("runtime seconds", self.max_runtime_secs, m.max_runtime_secs)
+        chk("turns", self.max_turns.map(u64::from))?;
+        chk("tool calls", self.max_tool_calls.map(u64::from))?;
+        chk("runtime seconds", self.max_runtime_secs)
     }
 
-    /// The limits a run will actually get: the fixed maximums lowered by the caps.
-    pub fn effective(&self, interactive: bool) -> nexus_client::intent_client::DesktopCodeLimits {
-        let m = base_limits(interactive);
-        nexus_client::intent_client::DesktopCodeLimits {
-            max_turns: self.max_turns.map_or(m.max_turns, |c| c.min(m.max_turns)),
-            max_tool_calls: self
-                .max_tool_calls
-                .map_or(m.max_tool_calls, |c| c.min(m.max_tool_calls)),
-            max_edits: self.max_edits.map_or(m.max_edits, |c| c.min(m.max_edits)),
-            max_tests: self.max_tests.map_or(m.max_tests, |c| c.min(m.max_tests)),
-            max_runtime_secs: self
-                .max_runtime_secs
-                .map_or(m.max_runtime_secs, |c| c.min(m.max_runtime_secs)),
-            ..m
+    /// The limits a run will actually get: exactly the caps, nothing more.
+    pub fn effective(&self) -> nexus_client::intent_client::UserLimits {
+        nexus_client::intent_client::UserLimits {
+            max_turns: self.max_turns,
+            max_tool_calls: self.max_tool_calls,
+            max_runtime_secs: self.max_runtime_secs,
         }
     }
 }

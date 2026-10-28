@@ -927,8 +927,8 @@ impl Broker {
                 .cfg
                 .code_caps
                 .with_user_limits(&self.cfg.state_dir)
-                .effective(true)
-                .to_intent_limits(),
+                .effective()
+                .to_intent_limits(nexus_client::intent_client::INTERACTIVE_CODE_LIMITS),
             response_mode: nexus_contracts::intent::ResponseMode::Stream,
             client_label: Some("nexus-continuation".to_owned()),
         };
@@ -1796,6 +1796,18 @@ impl Broker {
                     .collect::<Vec<_>>(),
             })),
             "intent-diff" => self.diff(client, run_id),
+            "intent-activity" => {
+                let rec = self.owned(client, run_id)?;
+                let off = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+                let lim = params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(100)
+                    .clamp(1, 200);
+                let (total, page) =
+                    crate::inspect::read_activity(&self.cfg.state_dir, &rec.run.run_id, off, lim);
+                Ok(json!({ "total": total, "offset": off, "activity": page }))
+            }
             "intent-copy" => self.copy_info(client, run_id),
             "intent-engine" => self.engine_summary(client, run_id),
             "intent-resumable" => self.resumable(client, run_id),
@@ -1827,19 +1839,12 @@ impl Broker {
                 Ok(json!({ "revoked": crate::consent::revoke(&self.cfg.state_dir, client) }))
             }
             "intent-limits-set" => {
-                // The user's own, LOWER limits (Settings). Each field is optional; null or
-                // absent resets it. Values are clamped to 1..=the built-in maximum.
-                let base = self.cfg.code_caps.effective(self.cfg.interactive);
+                // The user's OWN limits (Settings), to bound their cost or time. Each field is optional;
+                // absent or null clears it (= no limit). Nexus has no ceiling of its own to clamp to.
                 let mut out = serde_json::Map::new();
-                for (k, max) in [
-                    ("maxTurns", u64::from(base.max_turns)),
-                    ("maxToolCalls", u64::from(base.max_tool_calls)),
-                    ("maxEdits", u64::from(base.max_edits)),
-                    ("maxTests", u64::from(base.max_tests)),
-                    ("maxRuntimeSecs", base.max_runtime_secs),
-                ] {
+                for k in ["maxTurns", "maxToolCalls", "maxRuntimeSecs"] {
                     if let Some(n) = params.get(k).and_then(|v| v.as_u64()) {
-                        out.insert(k.to_owned(), json!(n.clamp(1, max)));
+                        out.insert(k.to_owned(), json!(n.max(1)));
                     }
                 }
                 let path = self.cfg.state_dir.join(crate::config::USER_LIMITS_FILE);
@@ -1850,17 +1855,20 @@ impl Broker {
                         .map_err(|e| ("internal", format!("cannot save limits: {e}")))?;
                 }
                 Ok(json!({
-                    "limits": self.cfg.code_caps.with_user_limits(&self.cfg.state_dir).effective(self.cfg.interactive),
-                    "builtIn": base,
+                    "limits": self.cfg.code_caps.with_user_limits(&self.cfg.state_dir).effective(),
                 }))
             }
             "intent-code-config" => Ok(json!({
-                "builtIn": self.cfg.code_caps.effective(self.cfg.interactive),
+                "maxOutputTokens": if self.cfg.interactive {
+                    nexus_client::intent_client::INTERACTIVE_CODE_LIMITS.max_output_tokens
+                } else {
+                    nexus_client::intent_client::DESKTOP_CODE_LIMITS.max_output_tokens
+                },
                 "limits": self
                     .cfg
                     .code_caps
                     .with_user_limits(&self.cfg.state_dir)
-                    .effective(self.cfg.interactive),
+                    .effective(),
                 "approvalLifetimeSecs": self
                     .cfg
                     .approval_ttl_ms
@@ -2112,7 +2120,7 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
     let threads = crate::threads::ThreadStore::open(&cfg.state_dir)
         .map_err(|e| format!("conversation store: {e}"))?;
     let lock = crate::state_lock::StateLock::acquire(&cfg.state_dir)?;
-    cfg.code_caps.validate(cfg.interactive)?;
+    cfg.code_caps.validate()?;
     if cfg.project_registry.is_some() && !cfg.code_sources.is_empty() {
         return Err("--project-registry and --code-source are mutually exclusive".into());
     }

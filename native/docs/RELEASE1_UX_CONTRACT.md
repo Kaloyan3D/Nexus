@@ -14,7 +14,7 @@ ledger, Control Room, Mock runs, Sentry (labelled *not connected*: no backend ex
 | Workspace (idle) | start work | Setup card until ready → project composer (project, task, *Auto / Review only / Make changes*, Run) → one sentence on what Nexus may do here (expands to the four choices) → processes running now → recent conversations |
 | Workspace (conversation) | follow and steer | messages, runs with result word + badges, live progress, steps, on-demand permission cards, Diff / Test output / Evidence & recovery, Resume, running processes, composer (always available; Stop while running) |
 | Projects | manage access | per project: four plain choices, running processes, **Advanced permissions** (one disclosure) |
-| Settings | connection and machine | provider + autonomy, engine, run limits (advanced), this computer, version, advanced diagnostics |
+| Settings | connection and machine | provider + autonomy, engine, optional limits of your own cost or time (none by default; Nexus has no limit of its own), this computer, version, advanced diagnostics |
 
 No model, route, request-mode, path, limit, digest or approval control exists in the ordinary composer.
 

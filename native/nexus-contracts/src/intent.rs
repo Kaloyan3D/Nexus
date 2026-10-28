@@ -70,9 +70,9 @@ pub struct ModelSelection {
     pub mode_id: Option<String>,
 }
 
-/// Explicit, bounded limits. They can only tighten broker/Registry limits.
-/// The loop limits are meaningful only for `repo-inspect` (A5.5) and are
-/// refused on `model-only`.
+/// Optional limits a person or operator CHOSE for one run. Absent = no limit: Nexus never invents a
+/// ceiling on how much engineering work a `repo-code` run may do. (`repo-inspect`, the read-only
+/// inspection product, keeps its own small fixed bounds.) The loop limits are refused on `model-only`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IntentLimits {
@@ -90,12 +90,6 @@ pub struct IntentLimits {
     /// Maximum wall-clock seconds for the whole run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_runtime_secs: Option<u64>,
-    /// `repo-code` only: maximum approved edit/write operations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_edits: Option<u32>,
-    /// `repo-code` only: maximum approved test/build executions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tests: Option<u32>,
 }
 
 impl IntentLimits {
@@ -104,10 +98,6 @@ impl IntentLimits {
             || self.max_tool_calls.is_some()
             || self.max_tool_result_bytes.is_some()
             || self.max_runtime_secs.is_some()
-    }
-
-    fn has_code_limits(&self) -> bool {
-        self.max_edits.is_some() || self.max_tests.is_some()
     }
 }
 
@@ -120,14 +110,6 @@ pub const INTENT_REPO_INSPECT: &str = "repo-inspect";
 /// additional operator authority (a code source, write and process policy,
 /// independent approvals); a `repo-inspect` right never implies it.
 pub const INTENT_REPO_CODE: &str = "repo-code";
-
-/// Hard ceilings for `repo-code` (policy may be lower).
-pub const MAX_CODE_TURNS: u32 = 2000;
-pub const MAX_CODE_TOOL_CALLS: u32 = 10_000;
-pub const MAX_CODE_RESULT_BYTES: u64 = 512 * 1024 * 1024;
-pub const MAX_CODE_RUNTIME_SECS: u64 = 86_400;
-pub const MAX_CODE_EDITS: u32 = 5000;
-pub const MAX_CODE_TESTS: u32 = 2000;
 
 /// Hard ceilings a client may request for the loop (policy may be lower).
 pub const MAX_INSPECT_TURNS: u32 = 12;
@@ -235,53 +217,40 @@ impl NexusIntentV1 {
                 "loop limits are only valid for repo-inspect and repo-code",
             ));
         }
-        if !code && self.limits.has_code_limits() {
-            return Err(IntentError::new(
-                "bad-intent",
-                "edit and test limits are only valid for repo-code",
-            ));
-        }
-        let ceil = |a: u64, b: u64| if code { b } else { a };
+        // `repo-inspect` keeps its fixed bounds; a `repo-code` limit is whatever the person chose
+        // (any positive number): there is no product ceiling to exceed.
+        let ceil = |a: u64| if code { u64::MAX } else { a };
         for (name, v, max) in [
             (
                 "maxTurns",
                 self.limits.max_turns.map(u64::from),
-                ceil(u64::from(MAX_INSPECT_TURNS), u64::from(MAX_CODE_TURNS)),
+                ceil(u64::from(MAX_INSPECT_TURNS)),
             ),
             (
                 "maxToolCalls",
                 self.limits.max_tool_calls.map(u64::from),
-                ceil(
-                    u64::from(MAX_INSPECT_TOOL_CALLS),
-                    u64::from(MAX_CODE_TOOL_CALLS),
-                ),
+                ceil(u64::from(MAX_INSPECT_TOOL_CALLS)),
             ),
             (
                 "maxToolResultBytes",
                 self.limits.max_tool_result_bytes,
-                ceil(MAX_INSPECT_RESULT_BYTES, MAX_CODE_RESULT_BYTES),
+                ceil(MAX_INSPECT_RESULT_BYTES),
             ),
             (
                 "maxRuntimeSecs",
                 self.limits.max_runtime_secs,
-                ceil(MAX_INSPECT_RUNTIME_SECS, MAX_CODE_RUNTIME_SECS),
-            ),
-            (
-                "maxEdits",
-                self.limits.max_edits.map(u64::from),
-                u64::from(MAX_CODE_EDITS),
-            ),
-            (
-                "maxTests",
-                self.limits.max_tests.map(u64::from),
-                u64::from(MAX_CODE_TESTS),
+                ceil(MAX_INSPECT_RUNTIME_SECS),
             ),
         ] {
             if let Some(n) = v {
                 if n == 0 || n > max {
                     return Err(IntentError::new(
                         "bad-intent",
-                        format!("limits.{name} is out of range (1..={max})"),
+                        if max == u64::MAX {
+                            format!("limits.{name} must be at least 1 (omit it for no limit)")
+                        } else {
+                            format!("limits.{name} is out of range (1..={max})")
+                        },
                     ));
                 }
             }
@@ -587,26 +556,29 @@ mod tests {
             "needs a workspace"
         );
         v["workspaceId"] = serde_json::json!("demo");
-        v["limits"] = serde_json::json!({"maxTurns": 12, "maxToolCalls": 30, "maxEdits": 5, "maxTests": 5, "maxRuntimeSecs": 1800});
+        v["limits"] =
+            serde_json::json!({"maxTurns": 12, "maxToolCalls": 30, "maxRuntimeSecs": 1800});
         let i = NexusIntentV1::parse(&v).expect("valid repo-code");
-        assert_eq!(i.limits.max_edits, Some(5));
-        // code ceilings are higher than inspect's, but still bounded
-        v["limits"]["maxTurns"] = serde_json::json!(2001);
+        assert_eq!(i.limits.max_turns, Some(12));
+        // Release "no artificial limits": a repo-code limit is whatever the person chose; there is no
+        // product ceiling above it, only "at least 1". Edit/test/write quotas no longer exist at all.
+        v["limits"] = serde_json::json!({"maxTurns": 1_000_000, "maxToolCalls": 50_000_000, "maxRuntimeSecs": 31_536_000});
+        assert!(NexusIntentV1::parse(&v).is_ok());
+        v["limits"] = serde_json::json!({"maxTurns": 0});
         assert!(NexusIntentV1::parse(&v).is_err());
-        v["limits"] = serde_json::json!({"maxEdits": 5001});
-        assert!(NexusIntentV1::parse(&v).is_err());
-        v["limits"] = serde_json::json!({"maxTests": 0});
-        assert!(NexusIntentV1::parse(&v).is_err());
-        // edit/test limits exist for repo-code only
-        for t in ["model-only", "repo-inspect"] {
-            let mut w = base();
-            w["intentType"] = serde_json::json!(t);
-            if t == "repo-inspect" {
-                w["workspaceId"] = serde_json::json!("demo");
-            }
-            w["limits"] = serde_json::json!({"maxEdits": 1});
-            assert!(NexusIntentV1::parse(&w).is_err(), "{t}");
+        for gone in ["maxEdits", "maxTests", "maxWriteBytes"] {
+            v["limits"] = serde_json::json!({ gone: 5 });
+            assert!(
+                NexusIntentV1::parse(&v).is_err(),
+                "{gone} is not a limit any more"
+            );
         }
+        // repo-inspect (the read-only product) keeps its small fixed bounds
+        let mut w = base();
+        w["intentType"] = serde_json::json!("repo-inspect");
+        w["workspaceId"] = serde_json::json!("demo");
+        w["limits"] = serde_json::json!({"maxTurns": 13});
+        assert!(NexusIntentV1::parse(&w).is_err());
         // the model/client can never supply or elevate permissions
         let mut v = base();
         v["intentType"] = serde_json::json!("repo-code");

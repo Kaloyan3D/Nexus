@@ -22,7 +22,7 @@ fn usage() -> i32 {
     eprintln!("         [--workspace ID=ABS_PATH]... [--workspace-allow ID=UID,UID]...   (A5.5 repo-inspect workspaces)");
     eprintln!("         [--project-snapshots DIR]   (A6.1.4: let the Desktop open project folders; Nexus keeps owned snapshots here)");
     eprintln!("         [--interactive-profile]   (A6.1.4: per-run provider authorization from a one-time user consent; no manual session records)");
-    eprintln!("         [--code-cap-turns N] [--code-cap-tool-calls N] [--code-cap-edits N] [--code-cap-commands N] [--code-cap-minutes N]   (A6.1.3: LOWER the fixed repo-code limits 12/30/5/5/30; cannot raise them)");
+    eprintln!("         [--code-cap-turns N] [--code-cap-tool-calls N] [--code-cap-minutes N]   (optional: cap repo-code runs; with none given there is no ceiling)");
     eprintln!("         [--project-registry DIR [--project-registry-owner-uid UID[,UID]]]   (A6.1.3: coding projects from the operator registry; exclusive with --code-source)");
     eprintln!("         [--code-source ID=ABS_PATH]... [--code-allow ID=UID,UID]... [--code-commit ID=SHA40]... [--code-write-allow ID=PATH[,PATH]]...   (A5.6 repo-code sources; the daemon also needs --enable-repo-code --worktree-root)");
     eprintln!("Runs as the issuer identity. Refuses to start unless the daemon has the model pilot enabled.");
@@ -259,6 +259,16 @@ fn authorize_live_session(args: &[String]) -> i32 {
                 .parse()
                 .map_err(|_| format!("{n} must be a number"))
         };
+        // Optional: repo-code has no built-in ceiling (leave a limit out for none); repo-inspect requires them.
+        let opt = |n: &str| -> Result<Option<u64>, String> {
+            match get(n) {
+                None => Ok(None),
+                Some(v) => v
+                    .parse()
+                    .map(Some)
+                    .map_err(|_| format!("{n} must be a number")),
+            }
+        };
         nexus_broker::live_auth::write_session_record_for(
             &get("--intent-type").unwrap_or_else(|| "repo-inspect".to_owned()),
             &state,
@@ -266,25 +276,26 @@ fn authorize_live_session(args: &[String]) -> i32 {
             &get("--model").ok_or("--model is required")?,
             &get("--workspace").ok_or("--workspace is required")?,
             &prompt,
-            num("--max-turns")? as u32,
-            num("--max-tool-calls")? as u32,
+            opt("--max-turns")?.map(|n| n as u32),
+            opt("--max-tool-calls")?.map(|n| n as u32),
             num("--max-output-tokens")?,
-            num("--max-tool-result-bytes")?,
+            opt("--max-tool-result-bytes")?,
             num("--expires-in-secs")?,
             args.iter().any(|a| a == "--acknowledge-billable"),
         )
     })();
+    let show = |v: Option<u64>| v.map_or("none".to_owned(), |n| n.to_string());
     match r {
         Ok(rec) => {
             println!(
                 "authorized ONE live {} SESSION: provider={} model={} workspace={} promptSha256={} maxTurns={} maxToolCalls={} maxOutputTokensPerCall={} maxToolResultBytes={} expiresAtMs={}",
                 rec.intent_type, rec.provider_id, rec.remote_model_id, rec.workspace_id, rec.prompt_sha256,
-                rec.max_turns, rec.max_tool_calls, rec.max_output_tokens, rec.max_tool_result_bytes,
+                show(rec.max_turns.map(u64::from)), show(rec.max_tool_calls.map(u64::from)), rec.max_output_tokens, show(rec.max_tool_result_bytes),
                 rec.expires_at_ms
             );
             println!(
-                "up to {} billable provider calls; selected repository contents{} will be sent to the provider",
-                rec.max_turns,
+                "{} billable provider calls; selected repository contents{} will be sent to the provider",
+                rec.max_turns.map_or("an unlimited number of".to_owned(), |n| format!("up to {n}")),
                 if rec.intent_type == "repo-code" { " and build/test command output" } else { "" }
             );
             0
@@ -506,8 +517,6 @@ fn run() -> i32 {
                 nexus_broker::CodeCaps {
                     max_turns: num("--code-cap-turns")?.map(|v| v as u32),
                     max_tool_calls: num("--code-cap-tool-calls")?.map(|v| v as u32),
-                    max_edits: num("--code-cap-edits")?.map(|v| v as u32),
-                    max_tests: num("--code-cap-commands")?.map(|v| v as u32),
                     max_runtime_secs: num("--code-cap-minutes")?.map(|m| m * 60),
                 }
             },

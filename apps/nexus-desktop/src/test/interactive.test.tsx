@@ -47,7 +47,7 @@ function mount(api: NativeApi, hash = "#") {
 }
 
 const sources = [{ sourceId: "tinycsv-6c94b7", label: "tinycsv", managed: true, kinds: ["rust"], pinnedCommit: "6da8a77a6e300d4b04f361b42bca66c1a8d173a6" }];
-const limits = { maxTurns: 60, maxToolCalls: 300, maxToolResultBytes: 2097152, maxEdits: 60, maxTests: 40, maxOutputTokens: 16384, maxRuntimeSecs: 3600 };
+const limits = { maxTurns: 60, maxToolCalls: 300, maxRuntimeSecs: 3600 };
 
 describe("First-run setup (A6.1.4)", () => {
   it("walks start -> connect -> consent; each privileged step is a request for a NATIVE dialog", async () => {
@@ -178,7 +178,7 @@ describe("Run on a project without ceremony (A6.1.4)", () => {
     await waitFor(() => expect(run).toBeEnabled());
     const terms = screen.getByLabelText("What Nexus may do here");
     expect(within(terms).getByText(/Nexus works on a copy and you apply its changes/)).toBeInTheDocument();
-    expect(within(terms).getByText(/60 model turns, 60 edits and 40 test runs/)).toBeInTheDocument();
+    expect(within(terms).getByText(/Your limits: 60 model turns · 300 tool calls · 60 min/)).toBeInTheDocument();
     await user.click(run);
     await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
     const sent = submit.mock.calls[0]![0];

@@ -2006,7 +2006,9 @@ fn a56_cancelling_while_an_approval_is_pending_revokes_it_and_a_late_approval_is
 }
 
 #[test]
-fn a56_budgets_cap_edits_and_commands_even_when_every_request_is_approved() {
+fn rel2_there_is_no_edit_or_command_quota_every_approved_request_runs() {
+    // This was `a56_budgets_cap_edits_and_commands...`: a run was refused its 2nd edit and 2nd command by a
+    // per-run budget (5 edits / 5 commands, and 128 KiB written in all). Those quotas no longer exist.
     if !sandbox_ready() {
         return;
     }
@@ -2014,49 +2016,38 @@ fn a56_budgets_cap_edits_and_commands_even_when_every_request_is_approved() {
         r#"{"path":"src/extra.rs","content":"pub fn x() {}\n","mode":"create"}"#
             .replace("extra", &format!("extra{n}"))
     };
+    let check = || {
+        (
+            "proc_run",
+            r#"{"program":"cargo","args":["check","--offline"]}"#.to_owned(),
+        )
+    };
     let calls = vec![
         ("fs_write", e(1)),
         ("fs_write", e(2)),
-        (
-            "proc_run",
-            r#"{"program":"cargo","args":["check","--offline"]}"#.to_owned(),
-        ),
-        (
-            "proc_run",
-            r#"{"program":"cargo","args":["check","--offline"]}"#.to_owned(),
-        ),
+        check(),
+        check(),
+        ("fs_write", e(3)),
     ];
-    let fx = fixture(script(calls, "stopped at my budget"));
+    let fx = fixture(script(calls, "all done"));
     let appr = Approver::start(&fx, approve_all());
-    let b = fx.start("budget");
+    let b = fx.start("noquota");
     let run = submit_wait(
         b.socket_path(),
-        &code_intent("go", "a56-budget-00001", |l| {
-            l.max_edits = Some(1);
-            l.max_tests = Some(1);
-        }),
-        120,
+        &code_intent("go", "rel2-noquota-0001", |_| {}),
+        180,
     );
     assert_eq!(run.state, "completed", "{run:?}");
     let st = statuses(&run);
-    assert_eq!(st[0].1, "executed");
-    assert_ne!(
-        st[1].1, "executed",
-        "second edit exceeds the budget: {st:?}"
+    assert!(
+        st.iter().all(|s| s.1 == "executed"),
+        "nothing is refused for how many edits/commands there already were: {st:?}"
     );
-    assert_eq!(st[2].1, "executed");
-    assert_ne!(
-        st[3].1, "executed",
-        "second command exceeds the budget: {st:?}"
-    );
-    assert_eq!(run.edits_used, 1);
-    assert_eq!(run.tests_used, 1);
-    assert_eq!(
-        appr.reviewed().len(),
-        2,
-        "over-budget proposals never reach an approver"
-    );
-    assert!(!working_copy(&fx).unwrap().join("src/extra2.rs").exists());
+    assert_eq!((run.edits_used, run.tests_used), (3, 2));
+    assert_eq!(run.max_turns, None, "no limit was chosen, so none exists");
+    assert_eq!(run.max_tool_calls, None);
+    assert_eq!(appr.reviewed().len(), 5);
+    assert!(working_copy(&fx).unwrap().join("src/extra3.rs").exists());
     b.shutdown();
 }
 
@@ -3110,14 +3101,8 @@ fn a61_desktop_path_shows_the_pending_operation_survives_reconnect_and_ends_with
         run.coding_outcome.as_ref().map(|o| o.verification.as_str()),
         Some("verified-passed")
     );
-    assert_eq!(
-        (run.max_turns, run.max_edits, run.max_tests),
-        (
-            ic::DESKTOP_CODE_LIMITS.max_turns,
-            ic::DESKTOP_CODE_LIMITS.max_edits,
-            ic::DESKTOP_CODE_LIMITS.max_tests
-        )
-    );
+    // the Desktop's limits are only the per-call output ceiling: no turn/tool/edit/command limit exists
+    assert_eq!((run.max_turns, run.max_tool_calls), (None, None));
     let d = ic::diff(&sock, &run.run_id).unwrap();
     assert!(d.diff.contains("+    a + b"));
     drop(appr);
@@ -4329,8 +4314,7 @@ fn a613_another_owners_run_and_copy_are_invisible_for_diff_and_copy_info() {
 // ─── A6.1.3 operator limits ──────────────────────────────────────────────────
 
 #[test]
-fn a613_operator_caps_lower_the_limits_even_when_the_client_asks_for_the_maximum_and_never_raise_them(
-) {
+fn a613_operator_caps_are_optional_bind_a_run_that_states_no_limit_and_have_no_maximum() {
     if !sandbox_ready() {
         return;
     }
@@ -4350,71 +4334,68 @@ fn a613_operator_caps_lower_the_limits_even_when_the_client_asks_for_the_maximum
             r#"{"program":"cargo","args":["check","--offline"]}"#.to_owned(),
         ),
     ];
-    let fx = fixture(script(calls, "stopped at the operator's budget"));
+    let fx = fixture(script(calls, "stopped at the operator's cap"));
     let appr = Approver::start(&fx, approve_all());
     let mut c = fx.config("caps");
+    // an operator who WANTS to bound a run (cost control) can: only turns, tool calls and time, nothing else
     c.code_caps = nexus_broker::CodeCaps {
-        max_edits: Some(1),
-        max_tests: Some(1),
+        max_tool_calls: Some(3),
         max_turns: Some(8),
         ..Default::default()
     };
     c.approval_ttl_ms = Some(120_000);
     let b = nexus_broker::start(c).expect("starts");
-    // what the Desktop shows: the lowered limits and the approval lifetime
+    // what the Desktop shows: exactly the caps, nothing built in
     let cfg = ic::code_config(b.socket_path()).unwrap();
     assert_eq!(
         (
-            cfg.limits.max_edits,
-            cfg.limits.max_tests,
-            cfg.limits.max_turns
+            cfg.limits.max_turns,
+            cfg.limits.max_tool_calls,
+            cfg.limits.max_runtime_secs
         ),
-        (1, 1, 8)
-    );
-    assert_eq!(
-        cfg.limits.max_tool_calls,
-        ic::DESKTOP_CODE_LIMITS.max_tool_calls
+        (Some(8), Some(3), None)
     );
     assert_eq!(cfg.approval_lifetime_secs, 120);
-    // the client asks for the fixed MAXIMUM (as the Desktop does): the cap still wins
+    // the client states no limit (as the Desktop does): the operator's cap still binds, as a clean stop
     let run = submit_wait(
         b.socket_path(),
         &desktop_code_intent("go", "a613-caps-00000001"),
         150,
     );
-    assert_eq!(run.state, "completed", "{run:?}");
-    assert_eq!(run.max_edits, 1);
-    assert_eq!(run.max_tests, 1);
-    assert_eq!(run.max_turns, 8);
-    assert_eq!((run.edits_used, run.tests_used), (1, 1));
-    assert_eq!(
-        appr.reviewed().len(),
-        2,
-        "over-budget proposals never reach an approver"
-    );
+    assert_eq!(run.state, "limit-reached", "{run:?}");
+    assert_eq!(run.stop_reason.as_deref(), Some("max-tool-calls"));
+    assert_eq!((run.max_turns, run.max_tool_calls), (Some(8), Some(3)));
+    assert_eq!((run.edits_used, run.tests_used), (2, 1));
+    assert_eq!(appr.reviewed().len(), 3);
     b.shutdown();
-    // operators cannot raise a limit
+    // a cap must be a positive number; there is no maximum to stay under
     for bad in [
         nexus_broker::CodeCaps {
-            max_turns: Some(13),
+            max_turns: Some(0),
             ..Default::default()
         },
         nexus_broker::CodeCaps {
-            max_edits: Some(6),
-            ..Default::default()
-        },
-        nexus_broker::CodeCaps {
-            max_runtime_secs: Some(1801),
-            ..Default::default()
-        },
-        nexus_broker::CodeCaps {
-            max_tests: Some(0),
+            max_runtime_secs: Some(0),
             ..Default::default()
         },
     ] {
         let mut c = fx.config("capsbad");
         c.code_caps = bad;
         assert!(nexus_broker::start(c).is_err());
+    }
+    for fine in [
+        nexus_broker::CodeCaps {
+            max_turns: Some(1_000_000),
+            max_runtime_secs: Some(10_000_000),
+            ..Default::default()
+        },
+        nexus_broker::CodeCaps::default(),
+    ] {
+        let mut c = fx.config("capsfine");
+        c.code_caps = fine;
+        nexus_broker::start(c)
+            .expect("a positive cap is accepted")
+            .shutdown();
     }
 }
 
@@ -4808,11 +4789,6 @@ fn a613_rehearsal_acceptance_project() {
     let mut c = fx.config("acc");
     c.code_sources = Vec::new();
     c.project_registry = Some((rd.clone(), nexus_tools::registry::Trust::default()));
-    c.code_caps = nexus_broker::CodeCaps {
-        max_edits: Some(4),
-        max_tests: Some(3),
-        ..Default::default()
-    };
     let b = nexus_broker::start(c).expect("starts");
     let prompt = std::fs::read_to_string(std::env::var("NEXUS_A613_PROMPT").unwrap_or_else(|_| {
         format!(
@@ -4849,7 +4825,7 @@ fn a613_rehearsal_acceptance_project() {
         ("verified-passed", 3, 2, false),
         "{o:?}"
     );
-    assert_eq!((run.max_edits, run.max_tests, run.max_turns), (4, 3, 12));
+    assert_eq!((run.max_turns, run.max_tool_calls), (None, None));
     let mut files: Vec<_> = run.changed_files.iter().map(|f| f.path.as_str()).collect();
     files.sort();
     assert_eq!(files, ["src/parser.rs", "src/stats.rs", "src/table.rs"]);
@@ -5887,7 +5863,8 @@ fn a71_one_conversation_reviews_then_fixes_what_f1_means_then_explains_f2_read_o
         .find(|a| a.tool == "fs_edit")
         .expect("the model tried an edit");
     assert_eq!(edit.status, "refused", "{edit:?}");
-    assert_eq!(edit.error_code.as_deref(), Some("budget-exhausted"));
+    // an honest reason: the REQUEST was read-only (it used to be reported as an exhausted "budget")
+    assert_eq!(edit.error_code.as_deref(), Some("read-only-request"));
     assert_eq!(r3.edits_used, 0);
     assert!(r3
         .tool_activity
@@ -6943,104 +6920,6 @@ fn a71_two_conversations_running_at_the_same_time_keep_separate_messages_runs_an
     assert_eq!(
         std::fs::read_to_string(fx.repo.join("src/lib.rs")).unwrap(),
         FAILING_BODY
-    );
-    b.shutdown();
-}
-
-#[test]
-fn a71_a_task_that_reaches_the_controllers_attempt_bound_ends_as_a_clean_limit_with_its_reason() {
-    if !sandbox_ready() {
-        return;
-    }
-    // every request asks for another read; the first one is held back so the test can fill the
-    // task's attempt ledger to the bound before the second turn asks for its attempt
-    let responder: Responder = Arc::new(|n, _body| {
-        let resp = format!("resp_{n}");
-        let frames = call_frames(
-            &resp,
-            n,
-            &format!("c{n}"),
-            "fs_read",
-            r#"{"path":"src/lib.rs"}"#,
-        );
-        if n == 0 {
-            Answer::Slow {
-                frames,
-                gap_ms: 0,
-                hold_ms: 4_000,
-            }
-        } else {
-            Answer::Frames(frames)
-        }
-    });
-    let fx = fixture_autonomous(responder);
-    let b = interactive_broker(&fx, "a71-bound");
-    let sock = b.socket_path().to_owned();
-    let s = tsend(
-        &sock,
-        None,
-        "proj",
-        "Read the library over and over",
-        "edit",
-        "continue",
-        "a71-bound-000001",
-    )
-    .unwrap();
-    let rid = s["run"]["runId"].as_str().unwrap().to_owned();
-    let tid = s["threadId"].as_str().unwrap().to_owned();
-    let end = Instant::now() + Duration::from_secs(60);
-    let task = loop {
-        let r = ic::status(&sock, &rid).unwrap();
-        if let (Some(t), "request-started" | "streaming" | "executing") =
-            (r.task_id.clone(), r.state.as_str())
-        {
-            if r.conversation_id.is_some() {
-                break t;
-            }
-        }
-        assert!(Instant::now() < end, "run never started: {r:?}");
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    let file = fx
-        .tmp
-        .path()
-        .join("intent-ledger/.ai-harness/runs")
-        .join(&task)
-        .join("attempts.jsonl");
-    let first: Value = serde_json::from_str(
-        std::fs::read_to_string(&file)
-            .unwrap()
-            .lines()
-            .next()
-            .unwrap(),
-    )
-    .unwrap();
-    let mut lines = String::new();
-    for i in 1..=5000 {
-        let mut a = first.clone();
-        a["attemptId"] = json!(format!("{task}-A{i}"));
-        a["sequence"] = json!(i);
-        lines.push_str(&a.to_string());
-        lines.push('\n');
-    }
-    std::fs::write(&file, lines).unwrap();
-    let r = wait_terminal(&sock, &rid, 120);
-    assert_eq!(
-        r.state, "limit-reached",
-        "a bound is a clean stop, not a failure: {r:?}"
-    );
-    assert_eq!(r.stop_reason.as_deref(), Some("max-attempts"));
-    assert!(r.error_code.as_deref() != Some("too-many-attempts"));
-    // the work and the answer slot are kept in the conversation, which is usable again
-    let t = wait_folded(&sock, &tid, 1);
-    assert_eq!(t["runs"][0]["state"], "limit-reached");
-    assert!(
-        t["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m["kind"] == "note" && m["text"].as_str().unwrap().contains("limit")),
-        "{t}"
     );
     b.shutdown();
 }
@@ -21174,6 +21053,918 @@ fn aj_an_existing_conversation_keeps_its_signals_catalog() {
             "grandfathered run was offered job tools: {names:?}"
         );
         assert!(names.contains(&"muse_update_reasoning_state"), "{names:?}");
+    }
+    b.shutdown();
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// No artificial execution limits (the ForgeFlow failure).
+//
+// A full-stack build was refused `budget-exhausted` on `src/styles.css` after 30 edits: the run's counters (30
+// of 2000 edits, 29 of 1000 commands) were nowhere near their limits, but a hard-wired 128 KiB CUMULATIVE write
+// quota had been spent. Edits, written bytes, commands, tool calls, model turns and elapsed time are no longer
+// limited by Nexus at all; only ONE operation is bounded (its size, its memory, its wall clock), and a person may
+// choose limits of their own. The tests below drive the same broker, daemon, sandbox and Kernel the Desktop uses
+// with a scripted provider (no paid traffic), far beyond every former ceiling.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+/// One response that proposes several tool calls at once (a real model may do this; it keeps a long scripted
+/// task to a realistic number of provider requests).
+fn multi_call_frames(resp: &str, n: usize, calls: &[(String, String, String)]) -> Vec<String> {
+    let mut v = vec![created(resp)];
+    for (i, (id, name, args)) in calls.iter().enumerate() {
+        let item = format!("fc_{n}_{i}");
+        v.push(sse(
+            "response.output_item.added",
+            json!({"type":"response.output_item.added","output_index":i,
+                   "item":{"type":"function_call","id":item,"call_id":id,"name":name,"arguments":""}}),
+        ));
+        v.push(sse(
+            "response.function_call_arguments.delta",
+            json!({"type":"response.function_call_arguments.delta","item_id":item,"delta":args}),
+        ));
+        v.push(sse(
+            "response.function_call_arguments.done",
+            json!({"type":"response.function_call_arguments.done","item_id":item,"arguments":args}),
+        ));
+        v.push(sse(
+            "response.output_item.done",
+            json!({"type":"response.output_item.done","output_index":i,
+                   "item":{"type":"function_call","id":item,"call_id":id,"name":name,"arguments":args}}),
+        ));
+    }
+    v.push(completed(resp));
+    v
+}
+
+/// A scripted model that works through `plan` (tool name, JSON arguments) `batch` calls per response, then says it
+/// is done. It does not depend on how many results the conversation still holds (long runs are compacted), and it
+/// answers the broker's request for the model's working memory with text, as a real model does.
+fn marathon_responder(
+    plan: Vec<(String, String)>,
+    batch: usize,
+    done_text: &'static str,
+) -> Responder {
+    let next = Arc::new(AtomicUsize::new(0));
+    let plan = Arc::new(plan);
+    Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let asks_memory = body["input"]
+            .as_array()
+            .and_then(|a| a.last())
+            .is_some_and(|i| {
+                i["content"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("WORKING MEMORY"))
+            });
+        if asks_memory {
+            return Answer::Frames(text_frames(
+                &resp,
+                "Working memory: I am generating the project's files in order from my plan; the runtime's receipts list what exists. Next: continue the plan, then run the checks and report.",
+            ));
+        }
+        // up to `batch` calls, but never more than ~150 KB of arguments in ONE response (the transport bounds
+        // what a single response may assemble, as it does for a real model)
+        let mut from = 0usize;
+        let mut to = 0usize;
+        {
+            static LOCK: Mutex<()> = Mutex::new(());
+            let _g = LOCK.lock().unwrap();
+            from = from.max(next.load(Ordering::SeqCst));
+            if from < plan.len() {
+                let mut bytes = 0usize;
+                to = from;
+                while to < plan.len()
+                    && to - from < batch
+                    && (to == from || bytes + plan[to].1.len() <= 150_000)
+                {
+                    bytes += plan[to].1.len();
+                    to += 1;
+                }
+                next.store(to, Ordering::SeqCst);
+            }
+        }
+        if from >= plan.len() {
+            return Answer::Frames(text_frames(&resp, done_text));
+        }
+        let calls: Vec<(String, String, String)> = (from..to)
+            .map(|i| (format!("call_{i}"), plan[i].0.clone(), plan[i].1.clone()))
+            .collect();
+        Answer::Frames(multi_call_frames(&resp, n, &calls))
+    })
+}
+
+/// The Desktop's own profile (interactive broker, a Direct project with a standing "run commands here" grant, the
+/// production-sized transport limits) over the scripted provider.
+fn unbounded_env(name: &str, make: impl Fn(FolderCell) -> Responder) -> DirectEnv {
+    let cell: FolderCell = Arc::new(Mutex::new(None));
+    let args: Vec<String> = [
+        "--standing-grants",
+        "--approver-cap",
+        "@APPROVER_CAP@",
+        "--approver-uids",
+        "@UID@",
+        "--approver-same-user",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let fx = fixture_full(
+        make(cell.clone()),
+        Box::new(|_| {}),
+        &[],
+        true,
+        true,
+        None,
+        &args,
+    );
+    let mut c = fx.config(name);
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.project_snapshots = Some(fx.tmp.path().join("snapshots"));
+    c.interactive = true;
+    // what `--interactive-profile` sets: whole files stream through a turn
+    c.limits = nexus_client::TransportLimits {
+        max_text_bytes: 3 * 1024 * 1024,
+        max_arg_bytes: 768 * 1024,
+        max_events: 32_768,
+        read_timeout_ms: 20_000,
+        total_timeout_ms: 120_000,
+    };
+    let b = nexus_broker::start(c).expect("broker starts");
+    let sock = b.socket_path().to_owned();
+    let folder = fx.work.join("managed-unbounded");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("README.md"), "# demo\n").unwrap();
+    let v = ic::project_open(&sock, folder.to_str().unwrap()).expect("project-open");
+    let pid = v["project"]["projectId"].as_str().unwrap().to_owned();
+    *cell.lock().unwrap() = Some(std::fs::canonicalize(&folder).unwrap());
+    ic::project_set_workspace(&sock, &pid, "direct").expect("direct");
+    let pv = ic::project_grant_preview(&sock, &pid, "workspace", "offline", "auto", None)
+        .expect("preview");
+    ic::project_grant_set(
+        &sock,
+        &pid,
+        "workspace",
+        "offline",
+        "auto",
+        None,
+        pv["textSha256"].as_str().unwrap(),
+        "test",
+    )
+    .expect("grant");
+    DirectEnv {
+        fx,
+        b,
+        sock,
+        folder,
+        pid,
+    }
+}
+
+fn w(path: &str, content: &str) -> (String, String) {
+    (
+        "fs_write".into(),
+        json!({"path": path, "mode": "create", "content": content}).to_string(),
+    )
+}
+
+/// Every call of a run, from the durable activity log (the run record carries only the latest window).
+fn all_activity(sock: &Path, run_id: &str) -> Vec<ic::ToolActivity> {
+    let mut out = Vec::new();
+    loop {
+        let p = ic::activity_page(sock, run_id, out.len() as u32, 200).expect("activity page");
+        if p.activity.is_empty() {
+            assert_eq!(out.len() as u32, p.total, "the log is read completely");
+            return out;
+        }
+        out.extend(p.activity);
+    }
+}
+
+fn dir_bytes(root: &Path) -> (u64, usize) {
+    let (mut bytes, mut files) = (0u64, 0usize);
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let m = e.metadata().unwrap();
+            if m.is_dir() {
+                stack.push(e.path());
+            } else {
+                bytes += m.len();
+                files += 1;
+            }
+        }
+    }
+    (bytes, files)
+}
+
+/// A, B, C, D, J and the negative boundaries in ONE logical task: 2,023 file mutations, more than 5 MiB written,
+/// 2,140+ tool calls, 60 commands that alternately fail and pass, and the ForgeFlow stylesheet edit that used to
+/// be refused. Nothing is refused for how much was done; everything is receipted; the boundaries still hold.
+#[test]
+fn rel2_a_marathon_task_is_never_stopped_by_a_quota_and_every_boundary_still_holds() {
+    if !sandbox_ready() {
+        return;
+    }
+    // (smaller sizes only for profiling the cost per operation: REL2_SMALL=150 REL2_BIG=6 ...)
+    let env_n = |k: &str, d: usize| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
+    let (n_small, n_big, n_edits, n_commands) = (
+        env_n("REL2_SMALL", 1_900),
+        env_n("REL2_BIG", 60),
+        env_n("REL2_EDITS", 60),
+        env_n("REL2_COMMANDS", 60),
+    );
+    let big_body = "// generated module body line\n".repeat(96_000 / 30);
+    assert_eq!(big_body.len(), 96_000);
+    let mut plan: Vec<(String, String)> = Vec::new();
+    // A: thousands of small source files
+    for i in 0..n_small {
+        plan.push(w(
+            &format!("gen/m{}/f{i}.ts", i / 50),
+            &format!("export const v{i} = {i};\n"),
+        ));
+    }
+    // reads, and edits of what was written (every one a mutation)
+    for i in 0..n_edits {
+        plan.push((
+            "fs_read".into(),
+            json!({"path": format!("gen/m{}/f{i}.ts", i / 50)}).to_string(),
+        ));
+        plan.push((
+            "fs_edit".into(),
+            json!({"path": format!("gen/m{}/f{i}.ts", i / 50),
+                   "edits": [{"oldText": format!("= {i};"), "newText": format!("= {};", i + 1)}]})
+            .to_string(),
+        ));
+    }
+    // B: more than 5 MiB of source in ONE task, interleaved with D: repeated failing and passing commands
+    for i in 0..n_big {
+        plan.push(w(&format!("big/b{i}.js"), &big_body));
+        for k in 0..(n_commands / n_big.max(1)) {
+            let (name, script) = if (i + k) % 2 == 0 {
+                ("proc_run", "test -s big/b0.js")
+            } else {
+                ("proc_run", "exit 3")
+            };
+            plan.push((
+                name.into(),
+                json!({"program": "sh", "args": ["-c", script]}).to_string(),
+            ));
+        }
+    }
+    // J: the ForgeFlow stylesheet — written big, then rewritten and edited AFTER >128 KiB had been written in all
+    let css: String = (0..2_000)
+        .map(|i| format!(".c{i} {{ color: #123; }}\n"))
+        .collect();
+    plan.push(w("src/styles.css", &css));
+    plan.push((
+        "fs_edit".into(),
+        json!({"path": "src/styles.css", "edits": [{"oldText": ".c0 { color: #123; }\n", "newText": ".c0 { color: #321; }\n"}]}).to_string(),
+    ));
+    plan.push(w("src/styles.css.new", &css));
+    let planned_mutations = n_small + n_edits + n_big + 3;
+    assert!(planned_mutations > 2_000 || std::env::var("REL2_SMALL").is_ok());
+
+    let plan2 = plan.clone();
+    let env = unbounded_env("rel2-marathon", move |_cell| {
+        marathon_responder(plan2.clone(), 20, "All files are generated and checked.")
+    });
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(
+            &env,
+            "Generate the whole application, run the checks repeatedly and finish the stylesheet.",
+            "rel2-marathon-001",
+        ),
+        1500,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    // no limit was chosen, so none exists, and no refusal is about a quota
+    assert_eq!((run.max_turns, run.max_tool_calls), (None, None));
+    let acts = all_activity(&env.sock, &run.run_id);
+    eprintln!(
+        "marathon: last_recovery={:?} state={} turn={} calls={} recoveries={:?} stop={:?} err={:?}/{:?} compactions={:?} requests={}",
+        run.last_recovery, run.state, run.turn, run.tool_calls, run.recoveries, run.stop_reason, run.error_code, run.error_message,
+        run.context_compactions, env.fx.provider.bodies.lock().unwrap().len()
+    );
+    eprintln!(
+        "marathon: planned={} receipted={} final={:?}",
+        plan.len(),
+        acts.len(),
+        ic::result(&env.sock, &run.run_id).map(|t| t.text.chars().take(120).collect::<String>())
+    );
+    let got: Vec<u32> = acts.iter().map(|a| a.index).collect();
+    assert_eq!(
+        acts.len(),
+        plan.len(),
+        "every call is receipted, none was dropped (indices: first {:?} last {:?} tool_calls {})",
+        &got[..got.len().min(30)],
+        &got[got.len().saturating_sub(30)..],
+        run.tool_calls
+    );
+    assert_eq!(run.activity_total as usize, plan.len());
+    assert_eq!(
+        run.tool_activity.len(),
+        plan.len().min(64),
+        "the record carries only the latest window"
+    );
+    let refused: Vec<_> = acts.iter().filter(|a| a.status != "executed").collect();
+    assert!(
+        refused.is_empty(),
+        "nothing is refused for how much was done: {:?}",
+        &refused[..refused.len().min(3)]
+    );
+    assert!(acts
+        .iter()
+        .all(|a| a.error_code.as_deref() != Some("budget-exhausted")));
+    // C: hundreds of tool calls, far more than any former ceiling
+    assert!(run.tool_calls as usize >= plan.len(), "{}", run.tool_calls);
+    // A: > 2,000 successful file mutations, each with a receipt (pre/post digests of what changed)
+    let muts: Vec<_> = acts
+        .iter()
+        .filter(|a| matches!(a.tool.as_str(), "fs_write" | "fs_edit"))
+        .collect();
+    assert_eq!(muts.len(), planned_mutations);
+    assert!(muts
+        .iter()
+        .all(|a| a.post_sha256.is_some() && a.execution_id.is_some()));
+    assert_eq!(run.edits_used as usize, planned_mutations);
+    // D: failing and passing commands, repeated, no ceiling
+    let cmds: Vec<_> = acts.iter().filter(|a| a.tool == "proc_run").collect();
+    assert_eq!(cmds.len(), n_big * (n_commands / n_big.max(1)));
+    let failed = cmds.iter().filter(|a| a.exit_code == Some(3)).count();
+    let passed = cmds.iter().filter(|a| a.exit_code == Some(0)).count();
+    assert_eq!(failed + passed, cmds.len(), "{cmds:?}");
+    assert!(
+        failed > 0 && passed > 0 && failed.abs_diff(passed) <= 1,
+        "{cmds:?}"
+    );
+    assert_eq!(run.tests_used as usize, cmds.len());
+    // B: more than 5 MiB written in one task, and it is all on disk
+    let (bytes, files) = if n_big > 0 {
+        dir_bytes(&env.folder.join("big"))
+    } else {
+        (0, 0)
+    };
+    assert_eq!((files, bytes), (n_big, (n_big * 96_000) as u64));
+    assert!(
+        bytes > 5 * 1024 * 1024 || std::env::var("REL2_BIG").is_ok(),
+        "{bytes}"
+    );
+    let (_, small_files) = dir_bytes(&env.folder.join("gen"));
+    assert_eq!(small_files, n_small);
+    // J: the stylesheet edit and the second stylesheet, after far more than 128 KiB had been written
+    let written_before_css: u64 = (n_big * 96_000) as u64;
+    assert!(written_before_css > 128 * 1024 * 40 || std::env::var("REL2_BIG").is_ok());
+    let css_edit = acts
+        .iter()
+        .find(|a| a.tool == "fs_edit" && a.args_summary.contains("styles.css"))
+        .unwrap();
+    assert_eq!(css_edit.status, "executed", "{css_edit:?}");
+    assert!(std::fs::read_to_string(env.folder.join("src/styles.css"))
+        .unwrap()
+        .starts_with(".c0 { color: #321; }"));
+    assert!(env.folder.join("src/styles.css.new").is_file());
+    // paging the durable log: the first and last calls are both there, in order
+    let first = ic::activity_page(&env.sock, &run.run_id, 0, 3).unwrap();
+    assert_eq!(first.total as usize, plan.len());
+    assert!(
+        first.activity[0].args_summary.contains("gen/m0/f0.ts"),
+        "{:?}",
+        first.activity[0]
+    );
+    assert_eq!(acts.last().unwrap().tool, "fs_write");
+    assert_eq!(
+        acts.iter().map(|a| a.index).collect::<Vec<_>>(),
+        (1..=plan.len() as u32).collect::<Vec<_>>()
+    );
+
+    // restore at scale: the whole change set (2,000+ files) is previewed, confirmed and restored; files Nexus made
+    // are removed because nothing changed them since, and the folders it made go with them
+    let pv = ic::direct_restore_preview(&env.sock, &run.run_id).expect("restore preview at scale");
+    let restorable =
+        restored_files(&pv, "gen/") + restored_files(&pv, "big/") + restored_files(&pv, "src/");
+    // the files, plus the folders the task made (one per 50 small files), are all named in the review
+    assert_eq!(
+        restorable,
+        small_files + n_small.div_ceil(50) + n_big + 2,
+        "{}",
+        pv["edits"]["note"]
+    );
+    let done = ic::direct_restore_apply(
+        &env.sock,
+        &run.run_id,
+        pv["confirmDigest"].as_str().unwrap(),
+        "test",
+    )
+    .expect("restore at scale");
+    assert_eq!(
+        done["edits"]["outcome"], "completed",
+        "{}",
+        done["edits"]["note"]
+    );
+    assert!(!env.folder.join("gen").exists() && !env.folder.join("big").exists());
+    assert_eq!(
+        std::fs::read_to_string(env.folder.join("README.md")).unwrap(),
+        "# demo\n"
+    );
+
+    // ── the boundaries are all still there (the same task continues in a second run)
+    // a refusal says WHY and is not a quota
+    let negatives = vec![
+        w(".git/hooks/pre-commit", "#!/bin/sh\n"),
+        w("../escape-from-the-project.txt", "x"),
+        w("/etc/nexus-rel2-escape", "x"),
+        w(".env", "SECRET=1\n"),
+        w("node_modules/../../outside2.txt", "x"),
+        (
+            "proc_run".into(),
+            json!({"program": "sh", "args": ["-c", "echo pwned > ../sandbox-escape.txt; echo x > /nexus-rel2-root-write"]}).to_string(),
+        ),
+    ];
+    let neg2 = negatives.clone();
+    let env2 = unbounded_env("rel2-negatives", move |_c| {
+        marathon_responder(neg2.clone(), 6, "Tried.")
+    });
+    let nrun = submit_wait(
+        &env2.sock,
+        &direct_intent(
+            &env2,
+            "Try things that must not work.",
+            "rel2-negative-0001",
+        ),
+        300,
+    );
+    let nacts = all_activity(&env2.sock, &nrun.run_id);
+    for a in nacts.iter().take(5) {
+        assert_eq!(a.status, "refused", "a boundary held: {a:?}");
+        assert_ne!(a.error_code.as_deref(), Some("budget-exhausted"));
+    }
+    let parent = env2.folder.parent().unwrap();
+    for gone in [
+        env2.folder.join(".git/hooks/pre-commit"),
+        env2.folder.join(".env"),
+        parent.join("escape-from-the-project.txt"),
+        parent.join("outside2.txt"),
+        PathBuf::from("/etc/nexus-rel2-escape"),
+        parent.join("sandbox-escape.txt"),
+        PathBuf::from("/nexus-rel2-root-write"),
+    ] {
+        assert!(
+            !gone.exists(),
+            "{gone:?} was created: a boundary was crossed"
+        );
+    }
+    env2.b.shutdown();
+    env.b.shutdown();
+}
+
+/// Files (not the folders a task made) a restore would put back or remove.
+fn restored_files(v: &Value, prefix: &str) -> usize {
+    v["edits"]["restored"].as_array().map_or(0, |a| {
+        a.iter()
+            .filter(|i| i["path"].as_str().is_some_and(|p| p.starts_with(prefix)))
+            .count()
+    })
+}
+
+/// F: the user can always stop work. A cancel in the middle of a large task ends it between operations, every
+/// receipt matches what is on disk, nothing continues afterwards, and the run's changes are still recoverable.
+#[test]
+fn rel2_cancelling_a_large_task_stops_it_between_operations_and_every_receipt_matches_the_folder() {
+    if !sandbox_ready() {
+        return;
+    }
+    let plan: Vec<(String, String)> = (0..3_000)
+        .map(|i| {
+            w(
+                &format!("gen/f{i}.ts"),
+                &format!("export const v{i} = {i};\n"),
+            )
+        })
+        .collect();
+    let p2 = plan.clone();
+    let env = unbounded_env("rel2-cancel", move |_| {
+        marathon_responder(p2.clone(), 10, "done")
+    });
+    let sub = ic::submit(
+        &env.sock,
+        &direct_intent(&env, "Generate everything.", "rel2-cancel-0001"),
+    )
+    .expect("submit");
+    let id = sub.run.run_id.clone();
+    let end = Instant::now() + Duration::from_secs(600);
+    loop {
+        let cur = ic::status(&env.sock, &id).unwrap();
+        if cur.tool_calls >= 300 {
+            break;
+        }
+        assert!(!cur.terminal, "the task ended by itself first: {cur:?}");
+        assert!(Instant::now() < end, "no progress");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    ic::cancel(&env.sock, &id).expect("cancel");
+    let run = wait_terminal(&env.sock, &id, 120);
+    assert_eq!(run.state, "cancelled", "{run:?}");
+    assert!(run.tool_calls < 3_000, "it stopped long before the end");
+    let acts = all_activity(&env.sock, &id);
+    assert_eq!(acts.len() as u32, run.activity_total);
+    assert!(
+        acts.iter()
+            .all(|a| a.status == "executed" || a.status == "cancelled"),
+        "{:?}",
+        acts.iter()
+            .find(|a| a.status != "executed" && a.status != "cancelled")
+    );
+    let executed = acts.iter().filter(|a| a.status == "executed").count();
+    let (_, files) = dir_bytes(&env.folder.join("gen"));
+    assert_eq!(
+        files, executed,
+        "every executed write is on disk and nothing else is"
+    );
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(
+        dir_bytes(&env.folder.join("gen")).1,
+        files,
+        "nothing continued after the cancel"
+    );
+    // the change set is attributed correctly: a restore would remove exactly the files this run wrote
+    let pv = ic::direct_restore_preview(&env.sock, &id).expect("preview");
+    assert_eq!(
+        restored_files(&pv, "gen/f"),
+        executed,
+        "{}",
+        pv["edits"]["note"]
+    );
+    env.b.shutdown();
+}
+
+/// G: permission revoked while a long task is running: nothing it allowed runs afterwards, the refusals say it was the
+/// permission, and the run ends in a way the person can act on (not as an exhausted quota).
+#[test]
+fn rel2_revoking_permission_during_an_extended_task_stops_what_it_allowed() {
+    if !sandbox_ready() {
+        return;
+    }
+    let mut plan: Vec<(String, String)> = Vec::new();
+    for i in 0..400 {
+        plan.push(w(
+            &format!("gen/f{i}.ts"),
+            &format!("export const v{i} = {i};\n"),
+        ));
+        if i % 5 == 4 {
+            plan.push((
+                "proc_run".into(),
+                json!({"program": "sh", "args": ["-c", "exit 0"]}).to_string(),
+            ));
+        }
+    }
+    let p2 = plan.clone();
+    let env = unbounded_env("rel2-revoke", move |_| {
+        marathon_responder(p2.clone(), 5, "done")
+    });
+    let sub = ic::submit(
+        &env.sock,
+        &direct_intent(&env, "Generate and check.", "rel2-revoke-0001"),
+    )
+    .expect("submit");
+    let id = sub.run.run_id.clone();
+    let end = Instant::now() + Duration::from_secs(600);
+    loop {
+        let cur = ic::status(&env.sock, &id).unwrap();
+        if cur.tests_used >= 6 {
+            break;
+        }
+        assert!(!cur.terminal, "ended before the revocation: {cur:?}");
+        assert!(Instant::now() < end, "no progress");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    ic::project_grant_revoke(&env.sock, &env.pid, "test").expect("revoke");
+    let files_at_revoke = dir_bytes(&env.folder.join("gen")).1;
+    let run = wait_terminal(&env.sock, &id, 300);
+    let acts = all_activity(&env.sock, &id);
+    let files_end = dir_bytes(&env.folder.join("gen")).1;
+    // at most the operations already in flight when the revocation landed; nothing after it
+    assert!(
+        files_end <= files_at_revoke + 6,
+        "work continued after the permission was revoked: {files_at_revoke} -> {files_end}"
+    );
+    assert!(files_end < 400);
+    let refused: Vec<_> = acts.iter().filter(|a| a.status == "refused").collect();
+    assert!(
+        !refused.is_empty(),
+        "later operations were refused: {run:?}"
+    );
+    for a in &refused {
+        assert_ne!(a.error_code.as_deref(), Some("budget-exhausted"), "{a:?}");
+    }
+    assert!(
+        refused.iter().all(|a| a.error_code.is_some()),
+        "every refusal carries a reason"
+    );
+    assert_ne!(run.state, "budget-exhausted");
+    // the project really has no permission left, and the folder was not widened by anything
+    let grant = ic::project_list(&env.sock, false).unwrap();
+    let mine = grant["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["projectId"] == env.pid.as_str())
+        .expect("the project");
+    assert_eq!(mine["grant"]["status"], "revoked", "{grant}");
+    env.b.shutdown();
+}
+
+/// H: ONE operation is bounded (its size, its memory, its output), the task is not. An oversized write or edit is
+/// refused with the supported way to split it; a huge file made by a command is read within bounds; a command that
+/// prints megabytes is truncated, not fatal; and more than 5 MiB is still written across the task.
+#[test]
+fn rel2_large_operations_are_bounded_one_at_a_time_with_a_way_to_split_and_no_cumulative_quota() {
+    if !sandbox_ready() {
+        return;
+    }
+    let mut plan: Vec<(String, String)> = vec![
+        // 1. one write over the per-call size bound
+        w("too-big.txt", &"x".repeat(98_400)),
+        // 2. one edit call with more operations than a call may carry
+        (
+            "fs_edit".into(),
+            json!({"path": "README.md", "edits": (0..17).map(|i| json!({"oldText": format!("o{i}"), "newText": format!("n{i}")})).collect::<Vec<_>>()}).to_string(),
+        ),
+        // 3. a 3 MiB file made by a command, then read: bounded, an error the model can act on, not a crash
+        (
+            "proc_run".into(),
+            json!({"program": "sh", "args": ["-c", "head -c 3145728 /dev/zero | tr '\\0' 'x' > huge.txt"]}).to_string(),
+        ),
+        ("fs_read".into(), json!({"path": "huge.txt"}).to_string()),
+        // 4. a command that prints ~5 MB: its output is truncated at a bound, the run goes on
+        (
+            "proc_run".into(),
+            json!({"program": "sh", "args": ["-c", "head -c 5000000 /dev/zero | tr '\\0' 'y'"]}).to_string(),
+        ),
+    ];
+    // 5. the SPLIT the guidance names: many parts, each within the bound, together far more than 5 MiB
+    let part = "// part line of generated source\n".repeat(90_000 / 33);
+    for i in 0..60 {
+        plan.push(w(&format!("parts/p{i}.js"), &part));
+    }
+    let p2 = plan.clone();
+    let env = unbounded_env("rel2-large", move |_| {
+        marathon_responder(p2.clone(), 1, "done")
+    });
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(&env, "Generate large files.", "rel2-large-00001"),
+        900,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let acts = all_activity(&env.sock, &run.run_id);
+    assert_eq!(acts.len(), plan.len());
+    assert_eq!(acts[0].status, "refused");
+    assert_eq!(acts[0].error_code.as_deref(), Some("invalid-arguments"));
+    assert_eq!(acts[1].status, "refused");
+    assert_eq!(acts[1].error_code.as_deref(), Some("invalid-arguments"));
+    assert!(!env.folder.join("too-big.txt").exists());
+    // the model is TOLD how to split (the request that follows carries the actionable message)
+    let bodies = env.fx.provider.bodies.lock().unwrap().clone();
+    let said = |needle: &str| bodies.iter().any(|b| b.to_string().contains(needle));
+    assert!(
+        said("limit of a single operation, not of the task"),
+        "no split guidance reached the model"
+    );
+    assert!(said("send the operations in several fs_edit calls"));
+    // the command made its 3 MiB file; reading it is refused within bounds, never loaded whole
+    assert_eq!(acts[2].status, "executed");
+    assert_eq!(
+        std::fs::metadata(env.folder.join("huge.txt"))
+            .unwrap()
+            .len(),
+        3_145_728
+    );
+    assert_ne!(acts[3].status, "executed", "{:?}", acts[3]);
+    assert!(acts[3].error_code.is_some());
+    // 5 MB of output: executed, truncated at the bound
+    assert_eq!(acts[4].status, "executed");
+    assert!(acts[4].truncated, "{:?}", acts[4]);
+    // the split parts: all executed, cumulative far above 5 MiB, no quota
+    let parts: Vec<_> = acts.iter().skip(5).collect();
+    assert!(
+        parts.iter().all(|a| a.status == "executed"),
+        "{:?}",
+        parts.iter().find(|a| a.status != "executed")
+    );
+    let (bytes, files) = dir_bytes(&env.folder.join("parts"));
+    assert_eq!(files, 60);
+    assert!(bytes > 5 * 1024 * 1024, "{bytes}");
+    env.b.shutdown();
+}
+
+/// E: one conversation, many runs, a broker restart in the middle: every run sees the project as the earlier runs
+/// left it (nothing is lost, nothing is re-done), and the conversation's memory stays bounded without losing its facts.
+#[test]
+fn rel2_a_long_conversation_continues_across_many_runs_and_a_restart_without_losing_project_state()
+{
+    if !sandbox_ready() {
+        return;
+    }
+    const RUNS: usize = 12;
+    let env = unbounded_env("rel2-conv", |_cell| {
+        Arc::new(move |n, body| {
+            let resp = format!("resp_{n}");
+            let cur = current_request(body);
+            let k: usize = cur
+                .split("RUN-")
+                .nth(1)
+                .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|d| d.parse().ok())
+                .unwrap_or(0);
+            let done = tool_calls_done(body);
+            if done < 3 {
+                return Answer::Frames(call_frames(
+                    &resp,
+                    n,
+                    &format!("c{done}"),
+                    "fs_write",
+                    &json!({"path": format!("conv/r{k}/part{done}.txt"), "mode": "create",
+                            "content": format!("run {k} part {done}\n")})
+                    .to_string(),
+                ));
+            }
+            Answer::Frames(text_frames(
+                &resp,
+                &format!("Run {k} wrote its three files."),
+            ))
+        })
+    });
+    let mut tid = String::new();
+    let mut sock = env.sock.clone();
+    let mut first_broker = Some(env.b);
+    let mut broker = None::<BrokerHandle>;
+    for k in 1..=RUNS {
+        let s = tsend(
+            &sock,
+            if tid.is_empty() { None } else { Some(&tid) },
+            &env.pid,
+            &format!("RUN-{k}: carry on with the project."),
+            "edit",
+            "continue",
+            &format!("rel2-conv-key-{k:04}"),
+        )
+        .unwrap_or_else(|e| panic!("send {k}: {e:?}"));
+        tid = s["threadId"].as_str().unwrap().to_owned();
+        let run = wait_terminal(&sock, s["run"]["runId"].as_str().unwrap(), 300);
+        assert_eq!(run.state, "completed", "run {k}: {run:?}");
+        let t = wait_folded(&sock, &tid, k);
+        assert_eq!(t["runs"].as_array().unwrap().len(), k);
+        // every earlier run's files are still there when this one finishes (the project state is carried)
+        for j in 1..=k {
+            for part in 0..3 {
+                assert!(
+                    env.folder
+                        .join(format!("conv/r{j}/part{part}.txt"))
+                        .is_file(),
+                    "run {k} lost run {j}'s file part{part}"
+                );
+            }
+        }
+        if k >= 2 {
+            assert_eq!(
+                t["runs"][k - 1]["context"]["priorRuns"],
+                (k - 1) as u64,
+                "run {k} knows every earlier run"
+            );
+            // the memory handed to the model is bounded (48 KiB budget), however long the conversation is
+            assert!(t["runs"][k - 1]["context"]["bytes"].as_u64().unwrap() <= 64 * 1024);
+        }
+        if k == RUNS / 2 {
+            // restart the broker mid-conversation: nothing may be lost
+            let before = ic::thread_get(&sock, &tid, None).unwrap();
+            first_broker.take().expect("the first broker").shutdown();
+            let b2 = {
+                let mut c = env.fx.config("rel2-conv-2");
+                c.code_sources = Vec::new();
+                c.project_registry = Some((
+                    env.fx.reg_dir.clone().unwrap(),
+                    nexus_tools::registry::Trust::default(),
+                ));
+                c.project_snapshots = Some(env.fx.tmp.path().join("snapshots"));
+                c.interactive = true;
+                c.state_dir = env.fx.tmp.path().join("broker-rel2-conv");
+                c.socket_path = env.fx.tmp.path().join("broker-rel2-conv-2.sock");
+                nexus_broker::start(c).expect("restart")
+            };
+            sock = b2.socket_path().to_owned();
+            let after = ic::thread_get(&sock, &tid, None).unwrap();
+            assert_eq!(
+                before["runs"].as_array().unwrap().len(),
+                after["runs"].as_array().unwrap().len()
+            );
+            assert_eq!(
+                before["messages"], after["messages"],
+                "the conversation survived the restart"
+            );
+            broker = Some(b2);
+        }
+    }
+    let t = ic::thread_get(&sock, &tid, None).unwrap();
+    assert_eq!(t["runs"].as_array().unwrap().len(), RUNS);
+    assert_eq!(t["messages"].as_array().unwrap().len(), RUNS * 2);
+    if let Some(b) = broker {
+        b.shutdown();
+    }
+}
+
+/// I: Nexus Adaptive carries a long task without any quota: well over a hundred model turns (each its own Controller
+/// attempt, its own reasoning-effort decision), a stable provider body (frozen tool catalog, cache prefix, model,
+/// reasoning present), and its durable engine state stays authenticated and bounded.
+#[test]
+fn rel2_adaptive_runs_well_past_a_hundred_turns_with_a_stable_body_and_the_frozen_catalog() {
+    if !sandbox_ready() {
+        return;
+    }
+    let plan: Vec<(String, String)> = (0..140)
+        .map(|i| w(&format!("adaptive/f{i}.txt"), &format!("n{i}\n")))
+        .collect();
+    let (fx, b, sock, pid, folder) = aj_env(
+        marathon_responder(plan.clone(), 1, "Adaptive finished the whole plan."),
+        "rel2-adaptive",
+    );
+    let run = submit_wait(
+        &sock,
+        &aj_intent(
+            &pid,
+            "Build the files, one at a time.",
+            "rel2-adaptive-0001",
+        ),
+        1200,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert!(
+        run.turn > 100,
+        "well past any former turn ceiling: {}",
+        run.turn
+    );
+    assert_eq!((run.max_turns, run.max_tool_calls), (None, None));
+    let acts = all_activity(&sock, &run.run_id);
+    assert_eq!(acts.len(), plan.len());
+    assert!(
+        acts.iter().all(|a| a.status == "executed"),
+        "{:?}",
+        acts.iter().find(|a| a.status != "executed")
+    );
+    assert_eq!(dir_bytes(&folder.join("adaptive")).1, plan.len());
+    // the engine is still Adaptive, its durable state authenticated, however many attempts it made
+    let es = ic::engine_summary(&sock, &run.run_id).expect("summary");
+    assert_eq!(es["bound"]["engineId"], "nexus-adaptive-v1", "{es}");
+    assert_eq!(es["record"]["authenticated"], true, "{es}");
+    // provider-body stability over the whole run
+    let bodies: Vec<Value> = fx.provider.bodies.lock().unwrap().clone();
+    assert!(bodies.len() > 100);
+    let tools = bodies[0]["tools"].as_array().expect("tools").clone();
+    assert!(
+        nexus_model::repo_tools::catalog_matches(
+            nexus_model::request::ToolProfile::RepoCodeAdaptiveJobsV1,
+            &tools
+        ),
+        "the Adaptive tool catalog is the frozen one"
+    );
+    for (i, bd) in bodies.iter().enumerate() {
+        // every turn sends the identical catalog and request shape (so provider prompt caching keeps working)
+        assert_eq!(
+            bd["tools"], bodies[0]["tools"],
+            "turn {i}: the tool catalog changed"
+        );
+        for k in [
+            "model",
+            "stream",
+            "tool_choice",
+            "parallel_tool_calls",
+            "max_output_tokens",
+        ] {
+            assert_eq!(bd[k], bodies[0][k], "turn {i}: {k} changed");
+        }
+        // the cache prefix: the task message that opens the conversation is byte-identical every turn (until the
+        // conversation is folded into working memory, the first item is still that same task message)
+        assert_eq!(
+            bd["input"][0], bodies[0]["input"][0],
+            "turn {i}: the cached prefix changed"
+        );
+        // a reasoning effort is always stated, and always one the engine may choose
+        let effort = bd["reasoning"]["effort"].as_str().unwrap_or("");
+        assert!(
+            ["minimal", "low", "medium", "high", "xhigh"].contains(&effort),
+            "turn {i}: reasoning {:?}",
+            bd["reasoning"]
+        );
     }
     b.shutdown();
 }

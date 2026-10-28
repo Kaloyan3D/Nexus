@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-intent-activity"
+description = "Enables the intent_activity command without any pre-configured scope."
+commands.allow = ["intent_activity"]
+
+[[permission]]
+identifier = "deny-intent-activity"
+description = "Denies the intent_activity command without any pre-configured scope."
+commands.deny = ["intent_activity"]

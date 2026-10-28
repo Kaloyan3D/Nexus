@@ -53,43 +53,89 @@ pub const MAX_CONSECUTIVE_REFUSALS: u32 = 3;
 pub const OUTPUT_ESCALATION_FACTOR: u64 = 2;
 /// Consecutive truncated turns tolerated before the run stops.
 pub const MAX_TRUNCATIONS_IN_A_ROW: u32 = 2;
-/// Retained tool-activity entries in the run view.
+/// Latest tool-activity entries carried in the run record (all of them are in the durable activity log).
 pub const MAX_ACTIVITY: usize = 64;
+/// The same refused call, identically, this many times in a row: it cannot succeed unchanged, so the model
+/// is told so once (guidance, never an authority); and this many: the run stops with a reason the person can act on.
+pub const STAGNATION_NUDGE_AT: u32 = 3;
+pub const STAGNATION_STOP_AT: u32 = 8;
 
-/// Resolved, bounded limits for one run.
+/// Evidence-based no-progress detection. Activity is never a problem (thousands of successful edits or
+/// repeated test runs are ordinary engineering); what shows a loop is the SAME refused call coming back
+/// unchanged: same tool, same arguments, same refusal. Any call that executes resets it.
+#[derive(Default)]
+struct Stagnation {
+    last: Option<String>,
+    repeats: u32,
+    nudged: bool,
+}
+
+impl Stagnation {
+    /// Feed the outcome of one tool call. Returns true when the model should be nudged now.
+    fn observe(&mut self, act: &ToolActivity) -> bool {
+        if act.status == "refused" {
+            let sig = format!(
+                "{}|{}|{}",
+                act.tool,
+                act.args_digest.as_deref().unwrap_or(&act.args_summary),
+                act.error_code.as_deref().unwrap_or("")
+            );
+            if self.last.as_deref() == Some(sig.as_str()) {
+                self.repeats += 1;
+            } else {
+                self.last = Some(sig);
+                self.repeats = 1;
+                self.nudged = false;
+            }
+            if self.repeats >= STAGNATION_NUDGE_AT && !self.nudged {
+                self.nudged = true;
+                return true;
+            }
+        } else if act.status == "executed" {
+            *self = Stagnation::default();
+        }
+        false
+    }
+
+    fn stopped(&self) -> bool {
+        self.repeats >= STAGNATION_STOP_AT
+    }
+}
+
+/// The limits of one run. For `repo-code` every field is `None` unless a person or operator CHOSE a limit:
+/// there is no built-in ceiling on turns, tool calls, tool-result bytes or elapsed time (a long engineering
+/// task is not an error). `repo-inspect`, the small read-only inspection product, keeps its fixed defaults.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
-    pub turns: u32,
-    pub tool_calls: u32,
-    pub result_bytes: u64,
-    pub runtime: Duration,
+    pub turns: Option<u32>,
+    pub tool_calls: Option<u32>,
+    pub result_bytes: Option<u64>,
+    pub runtime: Option<Duration>,
     pub output_tokens: Option<u64>,
+}
+
+impl Limits {
+    pub fn runtime_exceeded(&self, started: Instant) -> bool {
+        self.runtime.is_some_and(|r| started.elapsed() >= r)
+    }
 }
 
 pub fn resolve_limits(intent: &NexusIntentV1) -> Limits {
     let l = &intent.limits;
     let code = intent.intent_type == nexus_contracts::intent::INTENT_REPO_CODE;
+    let dflt = |d: u64| if code { None } else { Some(d) };
     Limits {
-        turns: l.max_turns.unwrap_or(if code {
-            crate::code::DEFAULT_CODE_TURNS
-        } else {
-            DEFAULT_MAX_TURNS
-        }),
-        tool_calls: l.max_tool_calls.unwrap_or(if code {
-            crate::code::DEFAULT_CODE_TOOL_CALLS
-        } else {
-            DEFAULT_MAX_TOOL_CALLS
-        }),
-        result_bytes: l.max_tool_result_bytes.unwrap_or(if code {
-            crate::code::DEFAULT_CODE_RESULT_BYTES
-        } else {
-            DEFAULT_MAX_RESULT_BYTES
-        }),
-        runtime: Duration::from_secs(l.max_runtime_secs.unwrap_or(if code {
-            crate::code::DEFAULT_CODE_RUNTIME_SECS
-        } else {
-            DEFAULT_MAX_RUNTIME_SECS
-        })),
+        turns: l
+            .max_turns
+            .or(dflt(u64::from(DEFAULT_MAX_TURNS)).map(|n| n as u32)),
+        tool_calls: l
+            .max_tool_calls
+            .or(dflt(u64::from(DEFAULT_MAX_TOOL_CALLS)).map(|n| n as u32)),
+        result_bytes: l.max_tool_result_bytes.or(dflt(DEFAULT_MAX_RESULT_BYTES)),
+        runtime: l
+            .max_runtime_secs
+            .or(dflt(DEFAULT_MAX_RUNTIME_SECS))
+            .map(Duration::from_secs),
         output_tokens: l.max_output_tokens,
     }
 }
@@ -646,6 +692,8 @@ struct Ctx<'a> {
     b: &'a Arc<Broker>,
     run_id: &'a str,
     flag: &'a Arc<AtomicBool>,
+    /// How many of `ls.activity` are already in the run's durable activity log.
+    persisted: std::cell::Cell<usize>,
 }
 
 fn now_ms() -> u64 {
@@ -689,7 +737,12 @@ pub(crate) fn run(
     intent: &NexusIntentV1,
     flag: &Arc<AtomicBool>,
 ) -> Result<(), StepError> {
-    let ctx = Ctx { b, run_id, flag };
+    let ctx = Ctx {
+        b,
+        run_id,
+        flag,
+        persisted: std::cell::Cell::new(0),
+    };
     let started = Instant::now();
     let mode = Mode::of(intent);
     let mut limits = resolve_limits(intent);
@@ -699,12 +752,20 @@ pub(crate) fn run(
             .cfg
             .code_caps
             .with_user_limits(&b.cfg.state_dir)
-            .effective(b.cfg.interactive);
-        limits.turns = limits.turns.min(eff.max_turns);
-        limits.tool_calls = limits.tool_calls.min(eff.max_tool_calls);
-        limits.runtime = limits
-            .runtime
-            .min(Duration::from_secs(eff.max_runtime_secs));
+            .effective();
+        let tighter = |a: Option<u64>, c: Option<u64>| match (a, c) {
+            (Some(a), Some(c)) => Some(a.min(c)),
+            (a, c) => a.or(c),
+        };
+        limits.turns =
+            tighter(limits.turns.map(u64::from), eff.max_turns.map(u64::from)).map(|n| n as u32);
+        limits.tool_calls = tighter(
+            limits.tool_calls.map(u64::from),
+            eff.max_tool_calls.map(u64::from),
+        )
+        .map(|n| n as u32);
+        limits.runtime = tighter(limits.runtime.map(|d| d.as_secs()), eff.max_runtime_secs)
+            .map(Duration::from_secs);
     }
     let workspace_id = intent
         .workspace_id
@@ -750,28 +811,14 @@ pub(crate) fn run(
         .clone();
     let mut policy = crate::code::resolve_policy(intent, &ws.write_allow);
     if mode == Mode::Code {
-        let eff = b
-            .cfg
-            .code_caps
-            .with_user_limits(&b.cfg.state_dir)
-            .effective(b.cfg.interactive);
-        policy.max_edits = policy.max_edits.min(eff.max_edits);
-        policy.max_tests = policy.max_tests.min(eff.max_tests);
         // A7.1: a read-only request cannot change a file: the gate refuses every write.
         policy.read_only = b.store.load(run_id).is_some_and(|r| r.run.read_only);
-        if policy.read_only {
-            policy.max_edits = 0;
-        }
     }
     b.update(run_id, |r| {
         r.state = "preparing".into();
         r.workspace_id = Some(workspace_id.clone());
         r.max_turns = limits.turns;
         r.max_tool_calls = limits.tool_calls;
-        if mode == Mode::Code {
-            r.max_edits = policy.max_edits;
-            r.max_tests = policy.max_tests;
-        }
     });
     if ctx.stop() {
         crate::pipeline::cancelled_before_submission(b, run_id);
@@ -1163,9 +1210,17 @@ pub(crate) fn run(
                 .map(|_| ())
                 .map_err(|(c, m)| discard(se(c, m)))?;
         } else {
-            crate::live_auth::consume_session(&b.cfg.state_dir, &attempt)
-                .map(|_| ())
+            // An operator-created authorization may state limits; a run that asked for none is bound by them
+            // (and one that asked for more was refused above). Nothing is invented when none were stated.
+            let rec = crate::live_auth::consume_session(&b.cfg.state_dir, &attempt)
                 .map_err(|(c, m)| discard(se(c, m)))?;
+            limits.turns = limits.turns.or(rec.max_turns);
+            limits.tool_calls = limits.tool_calls.or(rec.max_tool_calls);
+            limits.result_bytes = limits.result_bytes.or(rec.max_tool_result_bytes);
+            b.update(run_id, |r| {
+                r.max_turns = limits.turns;
+                r.max_tool_calls = limits.tool_calls;
+            });
         }
     }
     if ctx.stop() {
@@ -1541,7 +1596,6 @@ struct LoopState {
     last_sha: BTreeMap<String, String>,
     edits_used: u32,
     tests_used: u32,
-    write_bytes: u64,
     last_test: Option<String>,
     /// A file was changed after the last verification command (or none ran yet).
     dirty_since_test: bool,
@@ -1590,27 +1644,114 @@ impl Ctx<'_> {
         self.flag.load(Ordering::SeqCst) || self.b.shutdown.load(Ordering::SeqCst)
     }
     fn progress(&self, ls: &LoopState, state: &str) {
-        let activity = ls.activity.clone();
+        // Every call goes to the durable log exactly once; the run record carries only the latest window
+        // (cloning the whole history on every step made a long run quadratic).
+        self.persisted.set(persist_activity(
+            &self.b.cfg.state_dir,
+            self.run_id,
+            &ls.activity,
+            self.persisted.get(),
+        ));
+        let skip = ls.activity.len().saturating_sub(MAX_ACTIVITY);
+        let window: Vec<ToolActivity> = ls.activity[skip..].to_vec();
+        let total = ls.activity.len() as u32;
         self.b.update(self.run_id, |r| {
             r.state = state.to_owned();
             r.turn = ls.turns;
             r.tool_calls = ls.tool_calls;
             r.tool_result_bytes = ls.result_bytes;
-            let skip = activity.len().saturating_sub(MAX_ACTIVITY);
-            r.tool_activity = activity.into_iter().skip(skip).collect();
+            r.tool_activity = window;
+            r.activity_total = total;
         });
     }
 }
 
-/// The Controller refused another attempt of this task (its bound on provider requests).
-pub(crate) fn is_attempt_limit(code: &str) -> bool {
-    code == "too-many-attempts" || code.ends_with("too-many-attempts")
+/// Directory of the per-run activity logs (private to the broker, next to the run records).
+fn activity_dir(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir.join("activity")
+}
+
+/// Append `activity[from..]` to the run's durable log (one JSON line each) and return the new persisted
+/// count. The log is append-only, so a call is written once and the cost does not grow with the run.
+pub(crate) fn persist_activity(
+    state_dir: &std::path::Path,
+    run_id: &str,
+    activity: &[ToolActivity],
+    from: usize,
+) -> usize {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    if from >= activity.len() || run_id.is_empty() || run_id.contains(['/', '.']) {
+        return from.min(activity.len());
+    }
+    let dir = activity_dir(state_dir);
+    let _ = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir);
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(dir.join(format!("{run_id}.jsonl")))
+    else {
+        return from;
+    };
+    let mut buf = String::new();
+    for a in &activity[from..] {
+        if let Ok(l) = serde_json::to_string(a) {
+            buf.push_str(&l);
+            buf.push('\n');
+        }
+    }
+    if f.write_all(buf.as_bytes()).is_ok() {
+        activity.len()
+    } else {
+        from
+    }
+}
+
+/// One page of the run's durable activity log (oldest first) and the total number of calls in it.
+pub(crate) fn read_activity(
+    state_dir: &std::path::Path,
+    run_id: &str,
+    offset: u64,
+    limit: u64,
+) -> (u64, Vec<serde_json::Value>) {
+    use std::io::BufRead;
+    use std::os::unix::fs::OpenOptionsExt;
+    if run_id.is_empty() || run_id.contains(['/', '.']) {
+        return (0, Vec::new());
+    }
+    let Ok(f) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(activity_dir(state_dir).join(format!("{run_id}.jsonl")))
+    else {
+        return (0, Vec::new());
+    };
+    let mut total = 0u64;
+    let mut page = Vec::new();
+    for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+        if total >= offset && (page.len() as u64) < limit {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                page.push(v);
+            }
+        }
+        total += 1;
+    }
+    (total, page)
 }
 
 /// What the runtime itself recorded so far (never model text): files changed and the last
 /// command with its verdict. Used when old steps are dropped from the conversation.
 pub(crate) fn receipts_summary(activity: &[ToolActivity]) -> String {
+    /// Files named in the summary. A task that changed thousands of files must not spend its context window
+    /// on a list of them: the latest are named, the rest are counted (the receipts themselves are all kept).
+    const NAMED_FILES: usize = 40;
     let mut files: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut last_cmd: Option<String> = None;
     let mut refused = 0;
     for a in activity {
@@ -1622,7 +1763,7 @@ pub(crate) fn receipts_summary(activity: &[ToolActivity]) -> String {
                     .last()
                     .unwrap_or("?")
                     .to_owned();
-                if !files.contains(&f) {
+                if seen.insert(f.clone()) {
                     files.push(f);
                 }
             }
@@ -1640,8 +1781,15 @@ pub(crate) fn receipts_summary(activity: &[ToolActivity]) -> String {
     let mut s = String::new();
     if files.is_empty() {
         s.push_str("no file has been changed yet; ");
-    } else {
+    } else if files.len() <= NAMED_FILES {
         s.push_str(&format!("files changed so far: {}; ", files.join(", ")));
+    } else {
+        let more = files.len() - NAMED_FILES;
+        s.push_str(&format!(
+            "{} files changed so far, the latest {NAMED_FILES}: {}; ",
+            files.len(),
+            files[more..].join(", ")
+        ));
     }
     match last_cmd {
         Some(c) => s.push_str(&format!("last command: {c}; ")),
@@ -2418,6 +2566,8 @@ fn turn_loop(
     let mut evidence = Evidence::default();
     let mut seen_calls: Vec<String> = Vec::new();
     let mut refusals_in_a_row = 0u32;
+    let mut stagnation = Stagnation::default();
+    let mut stagnation_nudge: Option<String> = None;
     let mut turn_cap = out_tokens;
     let mut truncations_in_a_row = 0u32;
     let mut attempt_id = b
@@ -2440,31 +2590,25 @@ fn turn_loop(
     > = std::collections::HashMap::new();
     loop {
         turn += 1;
-        if turn > limits.turns {
+        if limits.turns.is_some_and(|t| turn > t) {
             break;
         }
         if ctx.stop() {
             return Ok(LoopEnd::Cancelled);
         }
-        if started.elapsed() >= limits.runtime {
+        if limits.runtime_exceeded(*started) {
             return Ok(LoopEnd::Limit("max-runtime"));
         }
         // Each model turn is its own Controller attempt of the same task.
         if dispatches > 0 {
             let _g = b.bridge_lock.lock().unwrap_or_else(|p| p.into_inner());
-            let a = match bridge(
+            // There is no bound on attempts: any error here is a real failure of the ledger.
+            let a = bridge(
                 b,
                 "attempt-add",
                 &[&ledger, sh.task_id, sh.task_instance],
                 None,
-            ) {
-                Ok(a) => a,
-                // The Controller's per-task bound on provider requests is a policy limit, not
-                // a malfunction: end cleanly with the work kept (a self-development task died
-                // here as an opaque "failed" at 96 attempts).
-                Err(e) if is_attempt_limit(&e.code) => return Ok(LoopEnd::Limit("max-attempts")),
-                Err(e) => return Err(e),
-            };
+            )?;
             attempt_id = str_of(&a, "attemptId")?;
         }
         let shadow = bridge(
@@ -2954,7 +3098,7 @@ fn turn_loop(
                 "the provider ended the response early while proposing a tool; nothing was executed".into(),
             ));
         }
-        if turn == limits.turns {
+        if limits.turns == Some(turn) {
             return Ok(LoopEnd::Limit("max-turns"));
         }
 
@@ -2988,7 +3132,7 @@ fn turn_loop(
             if ctx.stop() {
                 return Ok(LoopEnd::Cancelled);
             }
-            if started.elapsed() >= limits.runtime {
+            if limits.runtime_exceeded(*started) {
                 return Ok(LoopEnd::Limit("max-runtime"));
             }
             let call_id = safe_id(&call.call_id);
@@ -3005,10 +3149,10 @@ fn turn_loop(
                 ));
             }
             seen_calls.push(call_id.clone());
-            if ls.tool_calls >= limits.tool_calls {
+            if limits.tool_calls.is_some_and(|c| ls.tool_calls >= c) {
                 return Ok(LoopEnd::Limit("max-tool-calls"));
             }
-            if ls.result_bytes >= limits.result_bytes {
+            if limits.result_bytes.is_some_and(|c| ls.result_bytes >= c) {
                 return Ok(LoopEnd::Limit("max-tool-result-bytes"));
             }
             ls.tool_calls += 1;
@@ -3126,9 +3270,9 @@ fn turn_loop(
                         };
                         act.args_digest = Some(p.args_digest.clone());
                         // Per-run budgets for mutations and commands.
-                        if let Some(msg) = budget_refusal(&cp, ls, &sh.policy) {
+                        if let Some(msg) = budget_refusal(&cp, &sh.policy) {
                             act.status = "refused".into();
-                            act.error_code = Some("budget-exhausted".into());
+                            act.error_code = Some("read-only-request".into());
                             let _ = session.tool_call(
                                 idx,
                                 &call_id,
@@ -3138,7 +3282,7 @@ fn turn_loop(
                                 true,
                             );
                             refusals_in_a_row += 1;
-                            render_error(p.model_name, "budget-exhausted", msg)
+                            render_error(p.model_name, "read-only-request", msg)
                         } else {
                             let _ = session.tool_call(
                                 idx,
@@ -3176,7 +3320,6 @@ fn turn_loop(
                                     Kind::Write => ls.edits_used += 1,
                                     _ => ls.tests_used += 1,
                                 }
-                                ls.write_bytes += cp.bytes;
                                 let (e, t) = (ls.edits_used, ls.tests_used);
                                 b.update(ctx.run_id, |r| {
                                     r.edits_used = e;
@@ -3186,7 +3329,7 @@ fn turn_loop(
                                     b,
                                     ctx.run_id,
                                     ctx.flag,
-                                    *started + limits.runtime,
+                                    limits.runtime.map(|r| *started + r),
                                     &params,
                                     &origin_tag,
                                     p.model_name,
@@ -3430,8 +3573,30 @@ fn turn_loop(
             });
             ls.observations.extend(pending_observation);
             track_execution_claim(ls, &act, &call);
+            if stagnation.observe(&act) {
+                stagnation_nudge = Some(format!(
+                    "[Nexus] You have proposed the same {} call {} times in a row and it was refused every time ({}). It will not succeed unchanged. Read the refusal, change the arguments or the approach, or explain in text what is blocking you.",
+                    act.tool,
+                    stagnation.repeats,
+                    act.error_code.as_deref().unwrap_or("refused")
+                ));
+            }
+            let stagnant_on = (stagnation.stopped()).then(|| {
+                format!(
+                    "{} was proposed {} times in a row with the same arguments and refused each time ({})",
+                    act.tool,
+                    stagnation.repeats,
+                    act.error_code.as_deref().unwrap_or("refused")
+                )
+            });
             ls.activity.push(act);
             ctx.progress(ls, "tool-running");
+            if let Some(why) = stagnant_on {
+                return Ok(LoopEnd::Failed(
+                    "too-many-refused-tool-calls".into(),
+                    format!("the run stopped because it was going in circles: {why}. Nothing was lost; send a message to tell the model what to do differently and it will continue from the work so far"),
+                ));
+            }
             if refusals_in_a_row
                 >= if b.cfg.interactive {
                     25
@@ -3441,10 +3606,16 @@ fn turn_loop(
             {
                 return Ok(LoopEnd::Failed(
                     "too-many-refused-tool-calls".into(),
-                    "the model kept proposing refused or invalid tool calls; the run was stopped"
+                    "the model kept proposing refused or invalid tool calls one after another without anything succeeding; the run was stopped. Nothing was lost: send a message to tell it what to do differently and it will continue from the work so far"
                         .into(),
                 ));
             }
+        }
+        if let Some(n) = stagnation_nudge.take() {
+            items.push(InputItem::Message {
+                role: "user".into(),
+                content: n,
+            });
         }
         // EM-01: after the tool phase the Engineering Mode may add bounded guidance (muse-v0: the
         // "start implementing" reminder for an implementation task that keeps reading).
@@ -3474,28 +3645,13 @@ fn turn_loop(
     Ok(LoopEnd::Limit("max-turns"))
 }
 
-/// Per-run budgets for mutations and commands (None = allowed).
-fn budget_refusal(cp: &CodeProposal, ls: &LoopState, pol: &CodePolicy) -> Option<&'static str> {
+/// Why a proposal is refused BEFORE it reaches the Kernel, by policy of THIS request (None = allowed).
+/// There are no per-run counts or byte quotas: how many edits, how much source or how many commands a task
+/// needs is decided by the task. The only policy left here is a read-only request.
+fn budget_refusal(cp: &CodeProposal, pol: &CodePolicy) -> Option<&'static str> {
     match cp.kind {
-        Kind::Read => None,
-        Kind::Write => {
-            if pol.read_only {
-                Some("this request is READ-ONLY: the user asked you not to change any file, so every edit and write is refused. Investigate with fs_list, fs_search and fs_read and answer in text; if a change would help, describe it instead of making it")
-            } else if ls.edits_used >= pol.max_edits {
-                Some("the edit budget for this run is exhausted; summarize your work and finish")
-            } else if ls.write_bytes + cp.bytes > pol.max_total_write_bytes {
-                Some("the total write-size budget for this run is exhausted")
-            } else {
-                None
-            }
-        }
-        Kind::Process => {
-            if ls.tests_used >= pol.max_tests {
-                Some("the command budget for this run is exhausted; summarize your work and finish")
-            } else {
-                None
-            }
-        }
+        Kind::Write if pol.read_only => Some("this request is READ-ONLY: the user asked you not to change any file, so every edit and write is refused. Investigate with fs_list, fs_search and fs_read and answer in text; if a change would help, describe it instead of making it"),
+        _ => None,
     }
 }
 
@@ -4212,11 +4368,21 @@ fn finalize(
     }
     let completion = ls.completion;
     let (edits_used, tests_used, last_test) = (ls.edits_used, ls.tests_used, ls.last_test.clone());
+    let mode_code = ls.mode_code;
     let unresolved_failed_checks = ls.failed_checks.len() as u32;
     let unexecuted_snapshot: Vec<String> = ls.unexecuted.values().map(|c| c.line.clone()).collect();
     let verified = ls.citations_verified.clone();
     let unverified = ls.citations_unverified.clone();
-    let activity = ls.activity.clone();
+    // every call is in the durable log before the record that points at it is final
+    ctx.persisted.set(persist_activity(
+        &ctx.b.cfg.state_dir,
+        ctx.run_id,
+        &ls.activity,
+        ctx.persisted.get(),
+    ));
+    let skip = ls.activity.len().saturating_sub(MAX_ACTIVITY);
+    let activity_total = ls.activity.len() as u32;
+    let activity: Vec<ToolActivity> = ls.activity[skip..].to_vec();
     let (turns, calls, bytes) = (ls.turns, ls.tool_calls, ls.result_bytes);
     ctx.b.update(ctx.run_id, |r: &mut IntentRun| {
         if let Ok(s) = &status {
@@ -4229,8 +4395,8 @@ fn finalize(
         r.turn = turns;
         r.tool_calls = calls;
         r.tool_result_bytes = bytes;
-        let skip = activity.len().saturating_sub(MAX_ACTIVITY);
-        r.tool_activity = activity.into_iter().skip(skip).collect();
+        r.activity_total = activity_total;
+        r.tool_activity = activity;
         r.citations_verified = verified;
         r.citations_unverified = unverified;
         r.pending_approval = None;
@@ -4238,7 +4404,7 @@ fn finalize(
             r.changed_files = changed;
             r.diff_digest = diff_digest;
         }
-        if r.max_edits > 0 {
+        if mode_code {
             r.edits_used = edits_used;
             r.tests_used = tests_used;
             r.last_test_verification = last_test;
@@ -4462,17 +4628,18 @@ mod tests {
         let l = resolve_limits(&i);
         assert_eq!(
             (l.turns, l.tool_calls),
-            (DEFAULT_MAX_TURNS, DEFAULT_MAX_TOOL_CALLS)
+            (Some(DEFAULT_MAX_TURNS), Some(DEFAULT_MAX_TOOL_CALLS))
         );
         i.limits.max_turns = Some(2);
-        assert_eq!(resolve_limits(&i).turns, 2);
-    }
-
-    #[test]
-    fn the_controllers_attempt_bound_is_a_clean_limit_not_a_failure() {
-        assert!(is_attempt_limit("too-many-attempts"));
-        assert!(is_attempt_limit("bridge-too-many-attempts"));
-        assert!(!is_attempt_limit("bridge-error"));
+        assert_eq!(resolve_limits(&i).turns, Some(2));
+        // repo-code: no limit unless one was chosen
+        i.intent_type = nexus_contracts::intent::INTENT_REPO_CODE.to_owned();
+        i.limits.max_turns = None;
+        let l = resolve_limits(&i);
+        assert_eq!(
+            (l.turns, l.tool_calls, l.result_bytes, l.runtime),
+            (None, None, None, None)
+        );
     }
 
     #[test]

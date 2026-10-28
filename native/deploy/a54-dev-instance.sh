@@ -168,8 +168,6 @@ start)
     EXTRA_B="--project-registry $A613_PROJECT_REGISTRY"
     [ -z "${A613_CAP_TURNS:-}" ] || EXTRA_B="$EXTRA_B --code-cap-turns $A613_CAP_TURNS"
     [ -z "${A613_CAP_TOOL_CALLS:-}" ] || EXTRA_B="$EXTRA_B --code-cap-tool-calls $A613_CAP_TOOL_CALLS"
-    [ -z "${A613_CAP_EDITS:-}" ] || EXTRA_B="$EXTRA_B --code-cap-edits $A613_CAP_EDITS"
-    [ -z "${A613_CAP_COMMANDS:-}" ] || EXTRA_B="$EXTRA_B --code-cap-commands $A613_CAP_COMMANDS"
     [ -z "${A613_CAP_MINUTES:-}" ] || EXTRA_B="$EXTRA_B --code-cap-minutes $A613_CAP_MINUTES"
     [ -z "${A613_APPROVAL_TTL_SECS:-}" ] || EXTRA_B="$EXTRA_B --approval-ttl-secs $A613_APPROVAL_TTL_SECS"
   fi
