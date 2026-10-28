@@ -1257,6 +1257,18 @@ pub(crate) fn run(
     // offer exactly that catalog's frozen bytes, and the run records which one it was offered.
     let catalog_profile =
         crate::engine::tool_catalog_profile(engine.descriptor().engine_id, mode == Mode::Code);
+    // Explicit catalog migration (Adaptive + Jobs): a conversation whose
+    // FIRST run was offered the signals catalog keeps that catalog for its
+    // whole life — a conversation never silently switches tool catalogs
+    // mid-history (prompt-cache stability and run-to-run continuity). Only
+    // conversations with no prior catalog binding adopt the new one.
+    let catalog_profile = if catalog_profile == nexus_model::ToolProfile::RepoCodeAdaptiveJobsV1
+        && conversation_bound_to_signals(ctx.b, run_id)
+    {
+        nexus_model::ToolProfile::RepoCodeMuseSignalsV1
+    } else {
+        catalog_profile
+    };
     if !nexus_model::repo_tools::verify_catalog(catalog_profile) {
         return Err(discard(se(
             "tool-catalog-mismatch",
@@ -1272,19 +1284,6 @@ pub(crate) fn run(
             "the run is already bound to another tool catalog, or the binding could not be recorded; nothing was sent",
         )));
     }
-    // Explicit catalog migration (Adaptive + Jobs): a conversation whose
-    // FIRST run was offered the signals catalog keeps that catalog for its
-    // whole life — a conversation never silently switches tool catalogs
-    // mid-history (prompt-cache stability and run-to-run continuity). Only
-    // conversations with no prior catalog binding adopt the new one.
-    let catalog_profile =
-        if catalog_profile == nexus_model::ToolProfile::RepoCodeAdaptiveJobsV1
-            && conversation_bound_to_signals(ctx.b, run_id)
-        {
-            nexus_model::ToolProfile::RepoCodeMuseSignalsV1
-        } else {
-            catalog_profile
-        };
     let signals_run = matches!(
         catalog_profile,
         nexus_model::ToolProfile::RepoCodeMuseSignalsV1
@@ -1879,9 +1878,7 @@ fn conversation_bound_to_signals(b: &crate::server::Broker, run_id: &str) -> boo
     b.store
         .load(&first.run_id)
         .and_then(|r| r.tool_catalog_digest)
-        .is_some_and(|d| {
-            d == nexus_model::repo_tools::REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST
-        })
+        .is_some_and(|d| d == nexus_model::repo_tools::REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST)
 }
 
 /// path beyond the names of files this run created.

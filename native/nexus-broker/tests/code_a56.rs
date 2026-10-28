@@ -20303,3 +20303,381 @@ fn demo_b_an_authorized_retry_of_the_demonstration_is_recorded_executed() {
     );
     b.shutdown();
 }
+
+// ---- Adaptive + Jobs: nexus-adaptive-v1 carries signals and background jobs ----
+
+fn aj_env(responder: Responder, name: &str) -> (Fx, BrokerHandle, PathBuf, String, PathBuf) {
+    // install root with the adaptive mode activated (as s4_fixture_with does)
+    let dir = tempfile::tempdir().unwrap();
+    let st = std::process::Command::new("cp")
+        .args(["-r", "--reflink=auto"])
+        .arg(repo_root().join("config"))
+        .arg(dir.path().join("config"))
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let mode_path = dir
+        .path()
+        .join("config/registry/modes/engineering-v2-adaptive.json");
+    let mut m: Value = serde_json::from_slice(&std::fs::read(&mode_path).unwrap()).unwrap();
+    m["status"] = "active".into();
+    m["selectable"] = true.into();
+    m["runnable"] = true.into();
+    m["requestBudgetBytes"] = 440_000.into();
+    std::fs::write(&mode_path, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+    let install = dir.path().to_path_buf();
+    let daemon_args: Vec<String> = [
+        "--standing-grants",
+        "--approver-cap",
+        "@APPROVER_CAP@",
+        "--approver-uids",
+        "@UID@",
+        "--approver-same-user",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let fx = fixture_full(
+        responder,
+        Box::new(|_| {}),
+        &[],
+        true,
+        true,
+        Some((install.clone(), dir)),
+        &daemon_args,
+    );
+    let r = node_json(&[
+        "registry-engine-scope",
+        fx.registry.to_str().unwrap(),
+        install.to_str().unwrap(),
+        "nexus-adaptive-v1",
+    ]);
+    assert_eq!(r["ok"], true, "{r}");
+    let saved = s4_save_adaptive(&fx, S6_WIDE);
+    assert_eq!(saved["ok"], true, "{saved}");
+    let b = managed_broker(&fx, name);
+    let sock = b.socket_path().to_owned();
+    let folder = fx.work.join("managed");
+    let pid = open_managed_project(&fx, &sock, &folder);
+    ic::project_set_workspace(&sock, &pid, "direct").expect("direct");
+    std::fs::write(
+        folder.join("server.js"),
+        "const http=require('http'),fs=require('fs');http.createServer((q,s)=>{s.end(fs.readFileSync('msg.txt'))}).listen(4321,'127.0.0.1',()=>console.log('listening-4321'));\n",
+    )
+    .unwrap();
+    std::fs::write(folder.join("msg.txt"), "v1\n").unwrap();
+    let dest = ic::NetChoice {
+        presets: vec![],
+        hosts: vec![],
+        local_ports: vec![],
+        git_write: false,
+        dev_ports: vec![4321],
+    };
+    let pv = ic::project_grant_preview_net(
+        &sock,
+        &pid,
+        "workspace",
+        "offline",
+        "auto",
+        None,
+        Some(("best-effort", "protect")),
+        &dest,
+    )
+    .expect("preview");
+    let digest = pv["textSha256"].as_str().unwrap().to_owned();
+    ic::project_grant_set_net(
+        &sock,
+        &pid,
+        "workspace",
+        "offline",
+        "auto",
+        None,
+        &digest,
+        "cli",
+        Some(("best-effort", "protect")),
+        &dest,
+    )
+    .expect("grant set");
+    (fx, b, sock, pid, folder)
+}
+
+fn aj_intent(pid: &str, text: &str, key: &str) -> nexus_contracts::intent::NexusIntentV1 {
+    let mut intent = code_intent_for(pid, text, key, |_| {});
+    intent.model = Some(nexus_contracts::intent::ModelSelection {
+        provider_id: "e2e-mock".into(),
+        remote_model_id: "e2e-mock-model".into(),
+        logical_model_id: Some("e2e/e2e-1".into()),
+        route_id: Some("e2e-mock/e2e-1".into()),
+        mode_id: Some(ADAPTIVE_MODE.into()),
+    });
+    intent
+}
+
+#[test]
+fn aj_adaptive_runs_signals_and_the_full_job_lifecycle_on_a_real_server() {
+    if !sandbox_ready() {
+        return;
+    }
+    let evidence = Arc::new(Mutex::new(Vec::<String>::new()));
+    let ev = evidence.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let out = m71_last_output(body);
+        let call = |id: &str, name: &str, args: &str| {
+            Answer::Frames(call_frames(&resp, n, id, name, args))
+        };
+        match tool_calls_done(body) {
+            // adaptive reasoning state is still reported and handled
+            0 => call(
+                "a0",
+                "muse_update_reasoning_state",
+                r#"{"recordHypothesisFailure":true}"#,
+            ),
+            // an unauthorized port is refused (fail closed, no authority granted)
+            1 => call(
+                "a1",
+                "job_start",
+                r#"{"program":"node","args":["server.js"],"cwd":".","exposePorts":[9999]}"#,
+            ),
+            2 => {
+                ev.lock().unwrap().push(format!("unauthorized: {out}"));
+                call(
+                    "a2",
+                    "job_start",
+                    r#"{"program":"node","args":["server.js"],"cwd":".","exposePorts":[4321]}"#,
+                )
+            }
+            3 => {
+                let started: Value = serde_json::from_str(&out).unwrap_or_default();
+                let job = started["jobId"].as_str().unwrap_or("").to_owned();
+                let url = started["exposed"][0]["url"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned();
+                let got = std::net::TcpStream::connect(url.trim_start_matches("http://"))
+                    .map(|mut s| {
+                        use std::io::{Read, Write};
+                        let _ = s.write_all(b"GET / HTTP/1.0\r\n\r\n");
+                        let mut buf = String::new();
+                        let _ = s.read_to_string(&mut buf);
+                        buf
+                    })
+                    .unwrap_or_default();
+                ev.lock()
+                    .unwrap()
+                    .push(format!("started job={job} bridge={got}"));
+                call("a3", "job_status", &json!({"jobId": job}).to_string())
+            }
+            4 => {
+                ev.lock().unwrap().push(format!("status: {out}"));
+                let started_job = {
+                    let e = ev.lock().unwrap();
+                    e.iter()
+                        .find(|l| l.starts_with("started job="))
+                        .map(|l| {
+                            l.trim_start_matches("started job=")
+                                .split(' ')
+                                .next()
+                                .unwrap_or("")
+                                .to_owned()
+                        })
+                        .unwrap_or_default()
+                };
+                call("a4", "job_logs", &json!({"jobId": started_job}).to_string())
+            }
+            5 => {
+                ev.lock().unwrap().push(format!("logs: {out}"));
+                call(
+                    "a5",
+                    "fs_write",
+                    r#"{"path":"msg.txt","mode":"replace","content":"v2\n","expectedSha256":"2d27fbdf4e8ca207afbfa388ca9172fbcc6c70e534af2476b3b704f87debadcf"}"#,
+                )
+            }
+            6 => call(
+                "a6",
+                "proc_run",
+                r#"{"program":"sh","args":["-c","cat msg.txt"]}"#,
+            ),
+            7 => {
+                ev.lock().unwrap().push(format!("foreground: {out}"));
+                let e = ev.lock().unwrap();
+                let job = e
+                    .iter()
+                    .find(|l| l.starts_with("started job="))
+                    .map(|l| {
+                        l.trim_start_matches("started job=")
+                            .split(' ')
+                            .next()
+                            .unwrap_or("")
+                            .to_owned()
+                    })
+                    .unwrap_or_default();
+                call("a7", "job_stop", &json!({"jobId": job}).to_string())
+            }
+            _ => {
+                ev.lock().unwrap().push(format!("final: {out}"));
+                Answer::Frames(text_frames(
+                    &resp,
+                    "Server ran, observed the edit, and stopped.",
+                ))
+            }
+        }
+    });
+    let (fx, b, sock, pid, _folder) = aj_env(responder, "aj-adaptive");
+    let run = submit_wait(
+        &sock,
+        &aj_intent(
+            &pid,
+            "Run the dev server, check it, edit msg.txt, then stop it.",
+            "ajobs-0001",
+        ),
+        300,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    // the run was offered the combined Adaptive + Jobs catalog, frozen for the run
+    let rec = em02_record(&fx, "aj-adaptive", &run.run_id);
+    assert_eq!(
+        rec["toolCatalogDigest"],
+        nexus_model::repo_tools::REPO_CODE_ADAPTIVE_JOBS_V1_CATALOG_DIGEST,
+        "{rec}"
+    );
+    // and the provider really saw both extra tool families in one tool array
+    let bodies = fx.provider.bodies.lock().unwrap();
+    let tools_of = |b: &Value| -> Vec<String> {
+        b["tools"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|t| t["name"].as_str().unwrap_or("").to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert!(
+        bodies.iter().any(|b| {
+            let t = tools_of(b);
+            t.iter().any(|n| n == "job_start")
+                && t.iter().any(|n| n == "muse_update_reasoning_state")
+        }),
+        "no request carried signals + job tools together"
+    );
+    drop(bodies);
+    let ev = evidence.lock().unwrap();
+    let all = ev.join("\n");
+    assert!(
+        all.contains("not authorized") || all.contains("devPorts"),
+        "{all}"
+    );
+    assert!(all.contains("listening-4321"), "{all}");
+    assert!(all.contains("v1"), "{all}");
+    assert!(all.contains("v2"), "{all}");
+    // the refused start was superseded by the real one: no unverified claim remains
+    assert_ne!(
+        run.completion.as_deref(),
+        Some("unexecuted-claims"),
+        "{run:?}"
+    );
+    assert!(
+        run.tool_activity
+            .iter()
+            .any(|a| a.tool == "muse_update_reasoning_state" && a.status == "executed"),
+        "{:?}",
+        run.tool_activity
+    );
+    assert!(
+        run.tool_activity
+            .iter()
+            .any(|a| a.tool == "job_stop" && a.status == "executed"),
+        "{:?}",
+        run.tool_activity
+    );
+    let jobs = ic::job_list(&sock).expect("job list");
+    assert!(
+        jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|j| j["state"] != "running"),
+        "{jobs}"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn aj_an_existing_conversation_keeps_its_signals_catalog() {
+    if !sandbox_ready() {
+        return;
+    }
+    let responder: Responder =
+        Arc::new(move |n, _body| Answer::Frames(text_frames(&format!("resp_{n}"), "done")));
+    let (fx, b, sock, pid, _folder) = aj_env(responder, "aj-grandfather");
+    let send = |thread: Option<&str>, text: &str, key: &str| {
+        ic::thread_send(
+            &sock,
+            &ic::ThreadSend {
+                thread_id: thread,
+                project_id: &pid,
+                content: text,
+                mode: "edit",
+                workspace: "continue",
+                idempotency_key: key,
+                model: Some("e2e-mock/e2e-mock-model"),
+                route: Some("e2e-mock/e2e-1"),
+                mode_id: Some(ADAPTIVE_MODE),
+            },
+        )
+        .expect("thread send")
+    };
+    // a NEW conversation adopts the combined catalog
+    let s1 = send(None, "First message.", "aj-gf-0001");
+    let tid = s1["threadId"].as_str().unwrap().to_owned();
+    let r1 = wait_terminal(&sock, s1["run"]["runId"].as_str().unwrap(), 240);
+    assert_eq!(r1.state, "completed", "{r1:?}");
+    let rec1 = em02_record(&fx, "aj-grandfather", &r1.run_id);
+    assert_eq!(
+        rec1["toolCatalogDigest"],
+        nexus_model::repo_tools::REPO_CODE_ADAPTIVE_JOBS_V1_CATALOG_DIGEST
+    );
+    // simulate a PRE-MIGRATION conversation: its first run was bound to the
+    // historical signals catalog
+    let path = fx
+        .config("aj-grandfather")
+        .state_dir
+        .join("runs")
+        .join(format!("{}.json", r1.run_id));
+    let mut rec: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    rec["toolCatalogDigest"] =
+        nexus_model::repo_tools::REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST.into();
+    std::fs::write(&path, serde_json::to_vec(&rec).unwrap()).unwrap();
+    // the next message of that conversation must NOT silently switch catalogs
+    let bodies_before = fx.provider.bodies.lock().unwrap().len();
+    let s2 = send(Some(&tid), "Second message.", "aj-gf-0002");
+    let r2 = wait_terminal(&sock, s2["run"]["runId"].as_str().unwrap(), 240);
+    assert_eq!(r2.state, "completed", "{r2:?}");
+    let rec2 = em02_record(&fx, "aj-grandfather", &r2.run_id);
+    eprintln!(
+        "DBG r1.thread_id={:?} r2.thread_id={:?} rec keys={:?}",
+        r1.thread_id,
+        r2.thread_id,
+        rec1.as_object().map(|o| o.keys().collect::<Vec<_>>())
+    );
+    assert_eq!(
+        rec2["toolCatalogDigest"],
+        nexus_model::repo_tools::REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST,
+        "an existing conversation keeps its catalog"
+    );
+    let bodies = fx.provider.bodies.lock().unwrap();
+    assert!(bodies.len() > bodies_before, "the second run sent requests");
+    for body in &bodies[bodies_before..] {
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .map(|a| a.iter().map(|t| t["name"].as_str().unwrap_or("")).collect())
+            .unwrap_or_default();
+        assert!(
+            !names.contains(&"job_start"),
+            "grandfathered run was offered job tools: {names:?}"
+        );
+        assert!(names.contains(&"muse_update_reasoning_state"), "{names:?}");
+    }
+    b.shutdown();
+}
