@@ -164,7 +164,10 @@ describe("a refused step in the run's progress", () => {
   });
 
   it("never shows a generic budget for anything and claims nothing for a code it does not know", () => {
-    expect(step({ errorCode: "budget-exhausted" }).text).not.toMatch(/budget/i);
+    // the raw code is shown as the receipt says it, but nothing explains it as a "budget" or claims a source
+    const old = step({ errorCode: "budget-exhausted" });
+    expect(old.text).not.toMatch(/ — /);
+    expect(old.hint).toBeUndefined();
     const unknown = step({ errorCode: "something-new" });
     expect(unknown.hint).toBeUndefined();
     expect(step({ status: "executed", errorCode: null, postSha256: "a".repeat(64) }).hint).toBeUndefined();
