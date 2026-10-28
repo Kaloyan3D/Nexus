@@ -2039,7 +2039,10 @@ fn job_start_summary(args: &Value) -> (String, Option<Vec<u16>>) {
             .take(n)
             .collect::<String>()
     };
-    let program = clean(args.get("program").and_then(|v| v.as_str()).unwrap_or(""), 60);
+    let program = clean(
+        args.get("program").and_then(|v| v.as_str()).unwrap_or(""),
+        60,
+    );
     let argv = args
         .get("args")
         .and_then(|v| v.as_array())
@@ -4636,11 +4639,14 @@ mod tests {
         assert_eq!(text, "npm run dev · preview port 5173");
         assert_eq!(ports, Some(vec![5173]));
         // no ports: no suffix, no field
-        let (text, ports) = job_start_summary(&serde_json::json!({"program": "node", "args": ["server.js"], "exposePorts": []}));
+        let (text, ports) = job_start_summary(
+            &serde_json::json!({"program": "node", "args": ["server.js"], "exposePorts": []}),
+        );
         assert_eq!(text, "node server.js");
         assert_eq!(ports, None);
         // control characters never reach the record
-        let (text, _) = job_start_summary(&serde_json::json!({"program": "no\u{1b}de", "args": ["a\nb"]}));
+        let (text, _) =
+            job_start_summary(&serde_json::json!({"program": "no\u{1b}de", "args": ["a\nb"]}));
         assert!(!text.chars().any(|c| c.is_control()), "{text:?}");
         // malformed input does not panic
         let (text, ports) = job_start_summary(&serde_json::json!("nope"));

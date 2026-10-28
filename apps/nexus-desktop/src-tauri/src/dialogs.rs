@@ -27,8 +27,12 @@ pub trait Dialogs: Send + Sync {
 
 /// `http://127.0.0.1:<port>` and nothing else: a preview is a local development server.
 pub fn is_local_preview_url(url: &str) -> bool {
-    url.strip_prefix("http://127.0.0.1:")
-        .is_some_and(|p| !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n)))
+    url.strip_prefix("http://127.0.0.1:").is_some_and(|p| {
+        !p.is_empty()
+            && p.len() <= 5
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && p.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n))
+    })
 }
 
 pub struct SystemDialogs;

@@ -92,7 +92,9 @@ fn dialogs(confirm: bool) -> ScriptedDialogs {
 /// names the exact grant it was asked about (so a test can see what the person would have been shown).
 fn project_broker(project: Value) -> Handler {
     Box::new(move |f| match f["cmd"].as_str().unwrap_or("") {
-        "project-list" => Ok(json!({"projects": [project.clone()], "permissions": {"known": true}})),
+        "project-list" => {
+            Ok(json!({"projects": [project.clone()], "permissions": {"known": true}}))
+        }
         "project-grant-preview" => {
             let p = &f["params"];
             Ok(json!({
@@ -103,7 +105,9 @@ fn project_broker(project: Value) -> Handler {
             }))
         }
         "project-grant" => Ok(json!({"project": {"projectId": "p"}})),
-        "project-workspace" => Ok(json!({"project": {"projectId": "p", "workspaceMode": "direct"}})),
+        "project-workspace" => {
+            Ok(json!({"project": {"projectId": "p", "workspaceMode": "direct"}}))
+        }
         _ => Ok(json!({})),
     })
 }
@@ -159,16 +163,31 @@ fn allowing_previews_adds_ports_keeps_everything_else_and_needs_a_native_yes() {
     rt.project_allow_previews(&yes, "p", &[5173, 3000]).unwrap();
     let set = fake.frame("project-grant").expect("stored");
     let p = &set["params"];
-    assert_eq!(p["devPorts"], json!([3000, 5173]), "sorted, de-duplicated, additive");
+    assert_eq!(
+        p["devPorts"],
+        json!([3000, 5173]),
+        "sorted, de-duplicated, additive"
+    );
     assert_eq!(p["fs"], "workspace");
     assert_eq!(p["net"], "controlled");
     assert_eq!(p["checkpoint"], "required", "recovery policy kept");
     assert_eq!(p["hardLinks"], "allow");
-    assert_eq!(p["gitWrite"], true, "an existing Git-write choice is kept, never widened or hidden");
-    assert_eq!(p["allowHosts"], json!(["registry.npmjs.org:443", "github.com"]), "{p}");
+    assert_eq!(
+        p["gitWrite"], true,
+        "an existing Git-write choice is kept, never widened or hidden"
+    );
+    assert_eq!(
+        p["allowHosts"],
+        json!(["registry.npmjs.org:443", "github.com"]),
+        "{p}"
+    );
     assert_eq!(p["allowLocalPorts"], json!([5432]));
     assert_eq!(p["surface"], "desktop");
-    assert_eq!(p["textSha256"], "a".repeat(64), "the digest of the text that was shown");
+    assert_eq!(
+        p["textSha256"],
+        "a".repeat(64),
+        "the digest of the text that was shown"
+    );
     // the lifetime is the REMAINING one: never extended by amending
     let secs = p["expiresInSecs"].as_u64().unwrap();
     assert!((3590..=3600).contains(&secs), "{secs}");
@@ -180,7 +199,12 @@ fn allowing_previews_adds_ports_keeps_everything_else_and_needs_a_native_yes() {
 fn previews_are_refused_before_any_dialog_when_they_cannot_work_or_are_not_ports() {
     let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let cases: Vec<(&str, Value, Vec<u16>, &str)> = vec![
-        ("no grant at all", project("direct", None), vec![5173], "no-grant"),
+        (
+            "no grant at all",
+            project("direct", None),
+            vec![5173],
+            "no-grant",
+        ),
         (
             "commands on a throw-away copy",
             project("direct", Some(grant("scratch", "offline", json!({})))),
@@ -195,13 +219,19 @@ fn previews_are_refused_before_any_dialog_when_they_cannot_work_or_are_not_ports
         ),
         (
             "revoked permissions",
-            project("direct", Some(grant("workspace", "offline", json!({"status": "revoked"})))),
+            project(
+                "direct",
+                Some(grant("workspace", "offline", json!({"status": "revoked"}))),
+            ),
             vec![5173],
             "ended",
         ),
         (
             "expired permissions",
-            project("direct", Some(grant("workspace", "offline", json!({"status": "expired"})))),
+            project(
+                "direct",
+                Some(grant("workspace", "offline", json!({"status": "expired"}))),
+            ),
             vec![5173],
             "ended",
         ),
@@ -229,7 +259,10 @@ fn previews_are_refused_before_any_dialog_when_they_cannot_work_or_are_not_ports
         let d = dialogs(true);
         let e = rt.project_allow_previews(&d, "p", &ports).unwrap_err();
         assert!(e.contains(expect), "{name}: {e}");
-        assert!(d.shown.lock().unwrap().is_empty(), "{name}: a dialog was shown");
+        assert!(
+            d.shown.lock().unwrap().is_empty(),
+            "{name}: a dialog was shown"
+        );
         assert!(!fake.cmds().contains(&"project-grant".to_owned()), "{name}");
     }
 }
@@ -245,8 +278,17 @@ fn editing_permissions_keeps_what_the_panel_does_not_offer() {
     let (fake, rt) = Fake::start("keep", project_broker(project("direct", Some(g))));
     let d = dialogs(true);
     // the panel changes only the lifetime: previews, recovery policy and the Git choice must survive
-    rt.project_set_grant_keeping(&d, "p", "workspace", "offline", "auto", Some(86_400), &Default::default(), None)
-        .unwrap();
+    rt.project_set_grant_keeping(
+        &d,
+        "p",
+        "workspace",
+        "offline",
+        "auto",
+        Some(86_400),
+        &Default::default(),
+        None,
+    )
+    .unwrap();
     let p = fake.frame("project-grant").unwrap()["params"].clone();
     assert_eq!(p["devPorts"], json!([4321]));
     assert_eq!(p["checkpoint"], "required");
@@ -255,12 +297,34 @@ fn editing_permissions_keeps_what_the_panel_does_not_offer() {
     assert_eq!(p["expiresInSecs"], 86_400);
 
     // explicitly clearing the ports clears them; leaving the project folder drops them (nothing to preview)
-    rt.project_set_grant_keeping(&d, "p", "workspace", "offline", "auto", None, &Default::default(), Some(vec![]))
-        .unwrap();
-    assert!(fake.frame("project-grant").unwrap()["params"].get("devPorts").is_none());
-    rt.project_set_grant_keeping(&d, "p", "scratch", "offline", "auto", None, &Default::default(), None)
-        .unwrap();
-    assert!(fake.frame("project-grant").unwrap()["params"].get("devPorts").is_none());
+    rt.project_set_grant_keeping(
+        &d,
+        "p",
+        "workspace",
+        "offline",
+        "auto",
+        None,
+        &Default::default(),
+        Some(vec![]),
+    )
+    .unwrap();
+    assert!(fake.frame("project-grant").unwrap()["params"]
+        .get("devPorts")
+        .is_none());
+    rt.project_set_grant_keeping(
+        &d,
+        "p",
+        "scratch",
+        "offline",
+        "auto",
+        None,
+        &Default::default(),
+        None,
+    )
+    .unwrap();
+    assert!(fake.frame("project-grant").unwrap()["params"]
+        .get("devPorts")
+        .is_none());
 }
 
 #[test]
@@ -273,12 +337,24 @@ fn a_revoked_permission_set_is_not_silently_revived_with_its_old_options() {
     );
     let (fake, rt) = Fake::start("revived", project_broker(project("direct", Some(g))));
     let d = dialogs(true);
-    rt.project_set_grant_keeping(&d, "p", "workspace", "offline", "auto", None, &Default::default(), None)
-        .unwrap();
+    rt.project_set_grant_keeping(
+        &d,
+        "p",
+        "workspace",
+        "offline",
+        "auto",
+        None,
+        &Default::default(),
+        None,
+    )
+    .unwrap();
     let p = fake.frame("project-grant").unwrap()["params"].clone();
     assert!(p.get("devPorts").is_none(), "{p}");
     assert!(p.get("gitWrite").is_none(), "{p}");
-    assert_eq!(p["checkpoint"], "best-effort", "defaults, not the revoked grant's weaker policy");
+    assert_eq!(
+        p["checkpoint"], "best-effort",
+        "defaults, not the revoked grant's weaker policy"
+    );
 }
 
 // ---- one-step "allow Nexus to edit this project" ------------------------------------------------
@@ -289,7 +365,13 @@ fn allowing_work_asks_for_the_folder_and_the_commands_separately_and_never_picks
     let (fake, rt) = Fake::start("work", project_broker(project("isolated", None)));
     let d = dialogs(true);
     rt.project_allow_work(&d, "p").unwrap();
-    let shown: Vec<String> = d.shown.lock().unwrap().iter().map(|s| s.0.clone()).collect();
+    let shown: Vec<String> = d
+        .shown
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.0.clone())
+        .collect();
     assert_eq!(
         shown,
         vec![
@@ -298,10 +380,18 @@ fn allowing_work_asks_for_the_folder_and_the_commands_separately_and_never_picks
         ],
         "one native dialog for the folder, one with the broker's exact text for the commands"
     );
-    assert_eq!(fake.frame("project-workspace").unwrap()["params"]["workspace"], "direct");
+    assert_eq!(
+        fake.frame("project-workspace").unwrap()["params"]["workspace"],
+        "direct"
+    );
     let p = fake.frame("project-grant").unwrap()["params"].clone();
-    assert_eq!((p["fs"].as_str(), p["net"].as_str(), p["approval"].as_str()), (Some("workspace"), Some("offline"), Some("auto")));
-    assert!(p.get("devPorts").is_none() && p.get("gitWrite").is_none() && p["expiresInSecs"].is_null());
+    assert_eq!(
+        (p["fs"].as_str(), p["net"].as_str(), p["approval"].as_str()),
+        (Some("workspace"), Some("offline"), Some("auto"))
+    );
+    assert!(
+        p.get("devPorts").is_none() && p.get("gitWrite").is_none() && p["expiresInSecs"].is_null()
+    );
 
     // a "no" to the folder stops everything: nothing was changed
     let (fake, rt) = Fake::start("work-no", project_broker(project("isolated", None)));
@@ -316,19 +406,33 @@ fn allowing_work_raises_only_the_scope_of_existing_permissions_and_refuses_to_to
     let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (fake, rt) = Fake::start(
         "work-scratch",
-        project_broker(project("direct", Some(grant("scratch", "install", json!({"approval": "auto", "devPorts": []}))))),
+        project_broker(project(
+            "direct",
+            Some(grant(
+                "scratch",
+                "install",
+                json!({"approval": "auto", "devPorts": []}),
+            )),
+        )),
     );
     let d = dialogs(true);
     rt.project_allow_work(&d, "p").unwrap();
     let p = fake.frame("project-grant").unwrap()["params"].clone();
-    assert_eq!((p["fs"].as_str(), p["net"].as_str()), (Some("workspace"), Some("install")), "{p}");
+    assert_eq!(
+        (p["fs"].as_str(), p["net"].as_str()),
+        (Some("workspace"), Some("install")),
+        "{p}"
+    );
     // already direct: no folder dialog
     assert_eq!(d.shown.lock().unwrap().len(), 1);
 
     // already working in place: nothing to do, nothing is sent
     let (fake, rt) = Fake::start(
         "work-done",
-        project_broker(project("direct", Some(grant("workspace", "offline", json!({}))))),
+        project_broker(project(
+            "direct",
+            Some(grant("workspace", "offline", json!({}))),
+        )),
     );
     let d = dialogs(true);
     rt.project_allow_work(&d, "p").unwrap();
@@ -353,17 +457,29 @@ fn dependency_downloads_toggle_install_only_network_and_never_replace_a_destinat
     let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (fake, rt) = Fake::start(
         "inst-on",
-        project_broker(project("direct", Some(grant("workspace", "offline", json!({}))))),
+        project_broker(project(
+            "direct",
+            Some(grant("workspace", "offline", json!({}))),
+        )),
     );
     let d = dialogs(true);
     rt.project_allow_installs(&d, "p", true).unwrap();
-    assert_eq!(fake.frame("project-grant").unwrap()["params"]["net"], "install");
+    assert_eq!(
+        fake.frame("project-grant").unwrap()["params"]["net"],
+        "install"
+    );
     let (fake, rt) = Fake::start(
         "inst-off",
-        project_broker(project("direct", Some(grant("workspace", "install", json!({}))))),
+        project_broker(project(
+            "direct",
+            Some(grant("workspace", "install", json!({}))),
+        )),
     );
     rt.project_allow_installs(&d, "p", false).unwrap();
-    assert_eq!(fake.frame("project-grant").unwrap()["params"]["net"], "offline");
+    assert_eq!(
+        fake.frame("project-grant").unwrap()["params"]["net"],
+        "offline"
+    );
     // specific destinations / full network are advanced settings: refused, not overwritten
     for net in ["controlled", "full"] {
         let (fake, rt) = Fake::start(
@@ -381,15 +497,33 @@ fn widening_policies_need_a_native_yes_and_narrowing_does_not() {
     let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (fake, rt) = Fake::start("policy", Box::new(|_| Ok(json!({"project": {}}))));
     let no = dialogs(false);
-    assert_eq!(rt.project_set_policy(&no, "p", Some(true), None).unwrap_err(), "cancelled");
-    assert_eq!(rt.project_set_policy(&no, "p", None, Some(true)).unwrap_err(), "cancelled");
-    assert!(!fake.cmds().contains(&"project-policy".to_owned()), "a declined dialog widened a policy");
+    assert_eq!(
+        rt.project_set_policy(&no, "p", Some(true), None)
+            .unwrap_err(),
+        "cancelled"
+    );
+    assert_eq!(
+        rt.project_set_policy(&no, "p", None, Some(true))
+            .unwrap_err(),
+        "cancelled"
+    );
+    assert!(
+        !fake.cmds().contains(&"project-policy".to_owned()),
+        "a declined dialog widened a policy"
+    );
     // turning OFF needs no dialog
-    rt.project_set_policy(&no, "p", Some(false), Some(false)).unwrap();
-    assert!(no.shown.lock().unwrap().len() == 2, "only the two declined requests showed a dialog");
+    rt.project_set_policy(&no, "p", Some(false), Some(false))
+        .unwrap();
+    assert!(
+        no.shown.lock().unwrap().len() == 2,
+        "only the two declined requests showed a dialog"
+    );
     let yes = dialogs(true);
     rt.project_set_policy(&yes, "p", Some(true), None).unwrap();
-    assert_eq!(fake.frame("project-policy").unwrap()["params"]["installs"], true);
+    assert_eq!(
+        fake.frame("project-policy").unwrap()["params"]["installs"],
+        true
+    );
 }
 
 // ---- previews: the address is the broker's ------------------------------------------------------------
@@ -411,8 +545,14 @@ fn a_preview_opens_the_brokers_loopback_address_and_only_while_the_server_runs()
     );
     let d = dialogs(true);
     let url = rt.preview_open(&d, "job-1", 5173).unwrap();
-    assert_eq!(url, "http://127.0.0.1:43111", "built from the broker's host port, not from any address string");
-    assert_eq!(*d.opened.lock().unwrap(), vec!["http://127.0.0.1:43111".to_owned()]);
+    assert_eq!(
+        url, "http://127.0.0.1:43111",
+        "built from the broker's host port, not from any address string"
+    );
+    assert_eq!(
+        *d.opened.lock().unwrap(),
+        vec!["http://127.0.0.1:43111".to_owned()]
+    );
     // a port the job does not publish
     let e = rt.preview_open(&d, "job-1", 9999).unwrap_err();
     assert!(e.contains("not published"), "{e}");
@@ -426,7 +566,11 @@ fn a_preview_opens_the_brokers_loopback_address_and_only_while_the_server_runs()
 
 #[test]
 fn only_a_local_loopback_preview_address_is_ever_opened() {
-    for ok in ["http://127.0.0.1:5173", "http://127.0.0.1:1", "http://127.0.0.1:65535"] {
+    for ok in [
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:1",
+        "http://127.0.0.1:65535",
+    ] {
         assert!(is_local_preview_url(ok), "{ok}");
     }
     for bad in [
@@ -481,17 +625,28 @@ fn a_restore_is_bound_to_the_reviewed_digest_and_a_native_yes() {
 
     // a "no": the exact outcome was shown, nothing was applied
     let no = dialogs(false);
-    assert_eq!(rt.restore_apply(&no, "exec-1", "digest-one").unwrap_err(), "cancelled");
+    assert_eq!(
+        rt.restore_apply(&no, "exec-1", "digest-one").unwrap_err(),
+        "cancelled"
+    );
     let text = no.shown.lock().unwrap()[0].1.clone();
-    assert!(text.contains("src/a.txt") && text.contains("src/b.txt"), "{text}");
+    assert!(
+        text.contains("src/a.txt") && text.contains("src/b.txt"),
+        "{text}"
+    );
     assert!(text.contains("left exactly as they are"), "{text}");
     assert!(
-        fake.frames.lock().unwrap().iter().all(|f| f["cmd"] != "exec-restore" || f["params"]["dryRun"] != false),
+        fake.frames
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|f| f["cmd"] != "exec-restore" || f["params"]["dryRun"] != false),
         "nothing was applied"
     );
 
     // a "yes" with the reviewed digest applies, with the digest and the Desktop's surface
-    rt.restore_apply(&dialogs(true), "exec-1", "digest-one").unwrap();
+    rt.restore_apply(&dialogs(true), "exec-1", "digest-one")
+        .unwrap();
     let applied = fake
         .frames
         .lock()
@@ -508,10 +663,16 @@ fn a_restore_is_bound_to_the_reviewed_digest_and_a_native_yes() {
 #[test]
 fn a_refused_restore_shows_no_dialog_and_applies_nothing() {
     let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let (fake, rt) = Fake::start("restore-refused", restore_broker(Some("the task still has a command in progress")));
+    let (fake, rt) = Fake::start(
+        "restore-refused",
+        restore_broker(Some("the task still has a command in progress")),
+    );
     let d = dialogs(true);
     let e = rt.restore_apply(&d, "exec-1", "digest-one").unwrap_err();
-    assert!(e.starts_with("refused:") && e.contains("command in progress"), "{e}");
+    assert!(
+        e.starts_with("refused:") && e.contains("command in progress"),
+        "{e}"
+    );
     assert!(d.shown.lock().unwrap().is_empty());
     assert!(!fake.cmds().contains(&"exec-restore".to_owned()));
 }

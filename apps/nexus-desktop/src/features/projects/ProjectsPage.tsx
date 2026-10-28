@@ -27,7 +27,7 @@ export function parseHosts(text: string): string[] {
 export function parsePorts(text: string): number[] {
   return text.split(/[\s,;]+/).map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0 && n < 65536);
 }
-const APPROVAL_LABEL: Record<string, string> = { auto: "Runs without asking (inside these permissions)", ask: "Asks me first (approver terminal)" };
+const APPROVAL_LABEL: Record<string, string> = { auto: "Runs without asking (inside these permissions)", ask: "Asks me first — answered in a separate terminal program (advanced)" };
 const EXPIRY_CHOICES: { label: string; secs: number | null }[] = [
   { label: "until I revoke it", secs: null },
   { label: "1 day", secs: 86_400 },
