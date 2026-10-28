@@ -35,7 +35,7 @@ Priority: **P0** blocks the Release 1 journey · **P1** release-relevant · **P2
 | B7 | Preserve checkpoint / hard-link / Git-write / dev-port choices when editing a grant | – | – | `project_set_grant_keeping` | invisible | **defect (silent reset) → FI** | `release1_native` |
 | B8 | Full Access / full network | `fs=full` | host-exec build flag, native yes | advanced editor | Advanced only, flagged | FI → FI (never a default, never via simple rows) | `release1.test` |
 | B9 | Git metadata writes (`gitWrite`), git worktree access | grant `gitWrite` | explicit | none | – | CLI → **INT/CLI by decision** (high-risk; kept only if already set, never offered) | `release1_native` (kept, not widened) |
-| B10 | Ask-before-each-action approvals | independent approver (separate credential) | terminal approver only | read-only banner | Advanced; warning shown on the project | PI → **UNS in GUI** (needs a terminal; stated plainly) | `release1.test` |
+| B10 | Ask-before-each-action approvals | independent approver (separate credential) | terminal approver only | – | **disabled for Release 1 by decision**: the application never creates it, the choice is hidden/disabled with the reason, `askAvailable=false` is reported, and a project that already asks can be switched to automatic through a native confirmation | PI → **OFF by decision** (no approver is reachable from the app, so none is offered) | `permissions_runtime_m21`, `release1_native`, `release1.test` |
 | B11 | Trusted workspace (auto-apply for copies) | `project-policy trusted` | now native-confirmed | `project_set_policy` | Advanced | FI → FI | `release1_native` |
 | B12 | Apply a copy's patch | `project-adopt` | native confirm lists files | `project_adopt` | run actions | FI → FI | `interactive.test` |
 
@@ -81,7 +81,7 @@ Priority: **P0** blocks the Release 1 journey · **P1** release-relevant · **P2
 |---|---|---|---|---|---|---|---|
 | F1 | What a command changed (effects) | `exec-effects` | read-only | `exec_effects` / `commandEffects` | Evidence & recovery | **CLI → FI** | `release1_native`, `release1.test` |
 | F2 | Guarded restore of command effects | `exec-restore` (dry run + digest) | native yes; renderer supplies only the reviewed digest; stale digest refused; refused while a command runs; audited | `exec_restore_preview/apply` | Review recovery → Restore | **CLI → FI** | `release1_native`, `release1.test`, live |
-| F3 | Restore of **file edits** made directly in the folder | originals kept 30 days; no restore verb | – | – | stated plainly in the UI and the native dialog | UNS (manual) — **release limitation L1** | – |
+| F3 | Restore of **file edits** (and files Nexus created) made directly in the folder | `direct-restore-preview` / `direct-restore` (`edit_restore.rs`): digest-bound preview, atomic swap with verification, hard-link/symlink/protected-path refusal, daemon audit | native yes; renderer supplies only the reviewed digest; stale digest refused; changed-since files left alone | `edits_restore_preview/apply` | Evidence & recovery → *N file edits by Nexus* → Restore changes… | **UNS → FI** | `edit_restore_rel1` (10), `code_a56::rel1_direct_run_edits_are_restorable…`, `release1_native`, `release1.test`, **installed-package GUI run** |
 | F4 | Edits outside the folder, downloads, dependency dirs | – | – | – | "not a universal undo" text | UNS (by design) | `release1.test` |
 
 ## G. Shell and packaging
@@ -89,7 +89,9 @@ Priority: **P0** blocks the Release 1 journey · **P1** release-relevant · **P2
 | # | Capability | Before → Now |
 |---|---|---|
 | G1 | Sidecars + Registry bridge in the bundle | **absent → shipped** (`bin/`, `repo/config/registry/` incl. `modes/`) |
-| G2 | Package dependencies | webkit/gtk only → + Node.js ≥ 18, `zenity \| kdialog` (+ recommends `xdg-utils`, `git`) |
+| G2 | Package dependencies | webkit/gtk only → + `libc6 (>= 2.39)`, `bubblewrap`, `systemd`, `util-linux`, `zenity \| kdialog` (+ recommends `xdg-utils`, `git`). **No Node.js dependency**: a pinned, verified Node.js v24.22.1 (npm 11.19.1) ships in `/usr/lib/Nexus/node` |
+| G2a | Private Node.js | **none → bundled**, SHA-256/signature checked at packaging, ELF/arch/version checked at run time, last-resort toolchain for commands (project-specific toolchains still win), never added to the user's PATH |
+| G2b | Git metadata created by commands/background jobs | **window open → neutralised** when the creating command/job ends (hooks, dangerous config keys, `.git` pointer files; quarantined originals) — see Readiness §6 |
 | G3 | Sentry page (no data source) | primary navigation → moved to Advanced, labelled "not connected" |
 | G4 | Mock runs, Controller ledger, Control Room | Advanced (INT/diagnostic) — unchanged |
 | G5 | Integrity status | Control Room (INT) |
