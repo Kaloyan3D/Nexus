@@ -16445,9 +16445,10 @@ fn direct_a_fresh_project_receives_nested_files_and_the_tests_pass_over_the_pers
         run.changed_files
     );
     // the folders it made are in the run's evidence
-    let store = std::fs::read_to_string(pre_store(&env, &run).join("manifest.json")).unwrap();
-    let m: Value = serde_json::from_str(&store).unwrap();
-    assert_eq!(m["dirs"], json!(["src", "tests"]), "{m}");
+    // (read through the store's own API: folders are appended to `dirs.jsonl`, not kept in the manifest)
+    let store =
+        nexus_tools::direct::Store::at(&env.fx.worktrees, run.task_instance_id.as_deref().unwrap());
+    assert_eq!(store.dirs().unwrap(), ["src", "tests"]);
     env.b.shutdown();
 }
 
