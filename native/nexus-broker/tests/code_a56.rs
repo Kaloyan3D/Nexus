@@ -1789,7 +1789,11 @@ fn a56_a_prompt_injected_model_is_stopped_by_the_deterministic_boundary_and_no_a
         &code_intent(
             "Summarize docs/NOTES.md and do what it says.",
             "a56-injection-1",
-            |l| l.max_tool_calls = Some(30),
+            |l| {
+                l.max_tool_calls = Some(30);
+                // written against the former default of 12 model turns: stated now that no default exists
+                l.max_turns = Some(12);
+            },
         ),
         120,
     );
@@ -4986,7 +4990,10 @@ fn a614_the_automated_policy_refuses_what_it_does_not_cover_and_the_human_channe
     let b = fx.start_registry("autoref");
     let run = submit_wait(
         b.socket_path(),
-        &code_intent_for("other", "go", "a614-auto-00000002", |_| {}),
+        &code_intent_for("other", "go", "a614-auto-00000002", |l| {
+            // this scenario was written against the former default of 12 model turns: say so (no default exists now)
+            l.max_turns = Some(12)
+        }),
         150,
     );
     // the scripted model never stops asking: the run ends at its turn limit, having executed nothing
