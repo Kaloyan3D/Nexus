@@ -16,19 +16,20 @@ function mount(api: NativeApi, hash = "#") {
 }
 
 describe("Nexus shell", () => {
-  it("renders the six primary destinations, a collapsed Advanced group and one composer", async () => {
+  it("renders the five primary destinations, a collapsed Advanced group and one composer", async () => {
     const user = userEvent.setup();
     mount(fakeApi());
     const nav = screen.getByRole("navigation", { name: "Primary" });
-    for (const n of ["Workspace", "Projects", "History", "Models", "Sentry", "Settings"]) {
+    for (const n of ["Workspace", "Projects", "History", "Models", "Settings"]) {
       expect(within(nav).getByRole("button", { name: new RegExp(n) })).toBeInTheDocument();
     }
     // developer destinations are NOT primary; they live in a collapsed Advanced group and nothing is lost
-    for (const n of ["Control Room", "Controller ledger", "Mock runs"]) expect(within(nav).queryByRole("button", { name: new RegExp(n) })).toBeNull();
+    // a page with no backend (Sentry) is not a primary destination either
+    for (const n of ["Control Room", "Controller ledger", "Mock runs", "Sentry"]) expect(within(nav).queryByRole("button", { name: new RegExp(n) })).toBeNull();
     const adv = within(nav).getByRole("button", { name: "Advanced" });
     expect(adv).toHaveAttribute("aria-expanded", "false");
     await user.click(adv);
-    for (const n of ["Control Room", "Controller ledger", "Mock runs"]) expect(within(nav).getByRole("button", { name: new RegExp(n) })).toBeInTheDocument();
+    for (const n of ["Control Room", "Controller ledger", "Mock runs", "Sentry"]) expect(within(nav).getByRole("button", { name: new RegExp(n) })).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Describe the task…")).toBeInTheDocument();
     expect(await screen.findByText(/Runtime ready/)).toBeInTheDocument();
   });
@@ -145,7 +146,9 @@ describe("Nexus shell", () => {
   it("Sentry shows an integration-unavailable state, not findings", async () => {
     const user = userEvent.setup();
     mount(fakeApi());
-    await user.click(within(screen.getByRole("navigation", { name: "Primary" })).getByRole("button", { name: /Sentry/ }));
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    await user.click(within(nav).getByRole("button", { name: "Advanced" }));
+    await user.click(within(nav).getByRole("button", { name: /Sentry/ }));
     expect(screen.getByText("Sentry integration unavailable")).toBeInTheDocument();
   });
 

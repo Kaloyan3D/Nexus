@@ -4,7 +4,9 @@ import { useNexus } from "../../state/NexusContext";
 import { Loading } from "../../components/ui/primitives";
 import { RunList } from "../history/RunList";
 import { TaskView } from "../task/TaskView";
-import { SetupCard } from "../setup/SetupCard";
+import { SetupCard, setupComplete, useHasProject } from "../setup/SetupCard";
+import { PreviewsPanel } from "../jobs/PreviewsPanel";
+import { ProjectComposer } from "./ProjectComposer";
 import { ThreadView } from "../thread/ThreadView";
 import { ThreadList } from "../thread/ThreadList";
 import { UnifiedComposer } from "./UnifiedComposer";
@@ -21,12 +23,11 @@ function useRecentLimit(): number {
 }
 
 function IdleView() {
-  const { setPage, runtimeState } = useNexus();
+  const { setPage, runtimeState, engineChoice } = useNexus();
+  const hasProject = useHasProject();
   const interactive = runtimeState?.mode === "interactive";
   const limit = useRecentLimit();
-  const needsSetup =
-    runtimeState?.mode === "interactive" &&
-    !(runtimeState.phase === "ready" && runtimeState.providerConnected && runtimeState.consent.given);
+  const needsSetup = !setupComplete(runtimeState, engineChoice, hasProject);
   if (needsSetup) {
     return (
       <div className="nv-page nv-narrow nv-idle">
@@ -37,7 +38,8 @@ function IdleView() {
   return (
     <div className="nv-page nv-narrow nv-idle">
       <h1 className="nv-hero">What should Nexus work on?</h1>
-      <UnifiedComposer autoFocus />
+      {interactive ? <ProjectComposer autoFocus /> : <UnifiedComposer autoFocus />}
+      {interactive && <PreviewsPanel showEnded={false} />}
       <section aria-label="Recent runs" className="nv-recentblock">
         <div className="nv-recentblock__head">
           <h2 className="nv-subheading">Recent</h2>

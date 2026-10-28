@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { FolderGit2, FolderOpen, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
 import { useNexus } from "../../state/NexusContext";
-import type { JobView, ProjectView, WorkspaceMode } from "../../lib/contracts";
+import type { ProjectView } from "../../lib/contracts";
 import { Alert, Badge, Button, EmptyState } from "../../components/ui/primitives";
+import { ProjectAccess } from "../access/ProjectAccess";
+import { PreviewsPanel } from "../jobs/PreviewsPanel";
 
 /**
  * Read-only: the projects the operator has authorized. Registering a project (a path, a
@@ -176,8 +178,40 @@ function PermissionsEditor({ p }: { p: ProjectView }) {
   );
 }
 
+function ProjectKinds({ p }: { p: ProjectView }) {
+  if (p.kinds.length === 0) return <Badge tone="warning" title="Nexus could not tell what kind of project this is">type not detected</Badge>;
+  return (
+    <>
+      {p.kinds.map((k) => (
+        <Badge key={k.id} tone={k.supported ? "purple" : "warning"} title={k.supported ? "Nexus can build and test this" : "Nexus can read and edit this but cannot run its builds yet"}>
+          {k.label}
+          {k.supported ? "" : " · edit only"}
+        </Badge>
+      ))}
+    </>
+  );
+}
+
+/** Everything granular, behind one disclosure: the plain choices above are enough for ordinary use. */
+function AdvancedSettings({ p }: { p: ProjectView }) {
+  const { setProjectPolicy, setupBusy } = useNexus();
+  return (
+    <details className="nv-details nv-project__advanced" aria-label={`Advanced settings for ${p.label}`}>
+      <summary>Advanced permissions</summary>
+      <div className="nv-stack" style={{ gap: 10, marginTop: 8 }}>
+        <PermissionsEditor p={p} />
+        {p.workspaceMode !== "direct" && (
+          <label className="nv-note" title="When a task finishes and its checks pass, Nexus applies the change to your folder by itself (all-or-nothing, only if your folder did not change meanwhile). Nothing is committed or pushed.">
+            <input type="checkbox" checked={p.trusted === true} onChange={(e) => void setProjectPolicy(p.projectId, { trusted: e.target.checked })} disabled={setupBusy === "project"} aria-label={`Apply finished work to ${p.label} automatically`} /> Apply finished, checked work to my folder automatically
+          </label>
+        )}
+      </div>
+    </details>
+  );
+}
+
 function OpenedProjects() {
-  const { projects, openProject, refreshProject, forgetProject, setProjectPolicy, setProjectEditMode, refreshProjects, setupBusy, setupError } = useNexus();
+  const { projects, openProject, refreshProject, forgetProject, refreshProjects, setupBusy, setupError } = useNexus();
   const managed = projects.filter((p) => p.managed);
   return (
     <section aria-label="Your projects" className="nv-stack" style={{ gap: 10 }}>
@@ -191,147 +225,39 @@ function OpenedProjects() {
           {setupBusy === "project" ? "Opening…" : "Open project…"}
         </Button>
       </div>
-      <p className="nv-note">
-        Choose a folder with the system picker. Nexus reads it, keeps a private snapshot to work from, and never changes your folder; new tasks start from your current files.
-      </p>
+      <p className="nv-note">Choose a folder with the system picker. Nexus works only in the folders you open, and only in the ways you allow below. Permissions of one project never apply to another.</p>
       {setupError && <Alert tone="warning" title="That did not finish">{setupError.message}</Alert>}
       {managed.length === 0 ? (
         <EmptyState icon={FolderGit2} title="No project open yet">
           Press “Open project…”, pick a software project folder, then describe a task on the Workspace page.
         </EmptyState>
       ) : (
-        <table className="nv-table" aria-label="Opened projects">
-          <thead>
-            <tr>
-              <th>Project</th>
-              <th>Type</th>
-              <th>Workspace</th>
-              <th>Permissions</th>
-              <th>Snapshot</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {managed.map((p) => (
-              <tr key={p.projectId}>
-                <td>
-                  <span className="nv-mono">{p.label}</span>
-                </td>
-                <td>
-                  {p.kinds.length === 0 ? <Badge tone="warning">not detected</Badge> : p.kinds.map((k) => (
-                    <Badge key={k.id} tone={k.supported ? "purple" : "warning"} title={k.supported ? "Nexus can build and test this" : "Nexus can read and edit this but cannot run its builds yet"}>
-                      {k.label}{k.supported ? "" : " · edit only"}
-                    </Badge>
-                  ))}
-                </td>
-                <td>
-                  <label className="nv-note" title="Where Nexus makes changes for NEW tasks. Direct: the real files in your project folder, saved as each change is made (no patch to apply). Isolated: a throw-away copy; you review and apply its patch.">
-                    <span className="nv-sr-only">Workspace for {p.label}</span>
-                    <select
-                      className="nv-select nv-select--quiet"
-                      aria-label={`Workspace for ${p.label}`}
-                      value={p.workspaceMode === "direct" ? "direct" : "isolated"}
-                      onChange={(e) => void setProjectEditMode(p.projectId, e.target.value as WorkspaceMode)}
-                      disabled={setupBusy === "project"}
-                    >
-                      <option value="direct">Edit my folder directly</option>
-                      <option value="isolated">Isolated copy (review and apply)</option>
-                    </select>
-                  </label>
-                  {p.workspaceMode === "direct" ? <Badge tone="warning" title="Changes are written to your real files">edits your files</Badge> : null}
-                </td>
-                <td>
-                  <PermissionsEditor p={p} />
-                </td>
-                <td className="nv-note">
-                  {new Date(p.snapshotAtMs).toLocaleString()}
-                  {p.changedSinceSnapshot === true ? " · folder changed since (new tasks refresh automatically)" : ""}
-                  {p.originDirty ? " · had uncommitted changes" : ""}
-                </td>
-                <td>
-                  {p.grant ? (
-                    <span className="nv-note" title="This project has standing permissions: they decide whether dependencies may be installed (their Network setting). The older per-project switch is not used while they exist.">
-                      installs: {p.grant.status !== "active" ? "stopped (permissions " + p.grant.status + ")" : p.grant.net === "install" ? "allowed by Permissions" : p.grant.net === "controlled" ? "only the destinations in Permissions" : "not allowed by Permissions"}
-                    </span>
-                  ) : (
-                    <label className="nv-note" title="Lets Nexus download this project's dependencies (npm ci, pip install, ...) inside its sandbox. Everything else runs without network.">
-                      <input type="checkbox" checked={p.installs === true} onChange={(e) => void setProjectPolicy(p.projectId, { installs: e.target.checked })} disabled={setupBusy === "project"} aria-label={`Allow dependency installs for ${p.label}`} /> installs
-                    </label>
-                  )}{" "}
-                  {p.workspaceMode !== "direct" && (
-                    <>
-                  <label className="nv-note" title="Trusted workspace: when a task finishes and its checks pass, Nexus applies the change to your folder by itself (all-or-nothing, only if your folder did not change meanwhile). Nothing is committed or pushed.">
-                        <input type="checkbox" checked={p.trusted === true} onChange={(e) => void setProjectPolicy(p.projectId, { trusted: e.target.checked })} disabled={setupBusy === "project"} aria-label={`Apply finished work to ${p.label} automatically`} /> apply automatically
-                      </label>{" "}
-                    </>
-                  )}
-                  <Button size="sm" variant="ghost" icon={<RefreshCw size={13} />} aria-label={`Refresh ${p.label}`} onClick={() => void refreshProject(p.projectId)} disabled={setupBusy === "project"}>
-                    Refresh
-                  </Button>
-                  <Button size="sm" variant="ghost" icon={<Trash2 size={13} />} aria-label={`Remove ${p.label}`} onClick={() => void forgetProject(p.projectId)} disabled={setupBusy === "project"}>
-                    Remove
-                  </Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </section>
-  );
-}
-
-/** M7D: background jobs (dev servers, watchers) across projects — state, exposed loopback
- * URLs and stop. Status only; no credentials are involved. */
-function JobsPanel() {
-  const { api } = useNexus();
-  const [jobs, setJobs] = useState<JobView[]>([]);
-  const [err, setErr] = useState<string | null>(null);
-  const load = () => {
-    api
-      .jobList()
-      .then((r) => {
-        setJobs(r.jobs);
-        setErr(null);
-      })
-      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
-  };
-  useEffect(() => {
-    load();
-    const h = setInterval(load, 3000);
-    return () => clearInterval(h);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  if (err) return null;
-  if (jobs.length === 0) return null;
-  return (
-    <section aria-label="Background jobs" className="nv-stack" style={{ gap: 6 }}>
-      <h2 className="nv-subheading">Background jobs</h2>
-      <ul className="nv-list">
-        {jobs.map((j) => (
-          <li key={j.jobId}>
-            <Badge tone={j.state === "running" ? "success" : j.state === "failed" ? "warning" : "neutral"}>{j.state}</Badge>{" "}
-            <code>{j.command}</code>
-            {j.exposed.map((x) => (
-              <span key={x.port}>
-                {" · "}
-                <a href={x.url} target="_blank" rel="noreferrer">
-                  {x.url}
-                </a>
-              </span>
-            ))}
-            {j.exitCode != null ? <span className="nv-note"> · exit {j.exitCode}</span> : null}
-            {j.state === "running" ? (
-              <>
-                {" "}
-                <Button size="sm" variant="ghost" onClick={() => void api.jobStop(j.jobId).then(load)}>
-                  Stop
+        <div aria-label="Opened projects" role="region" className="nv-projects">
+          {managed.map((p) => (
+            <article key={p.projectId} className="nv-project" aria-label={`Project ${p.label}`}>
+              <header className="nv-project__head">
+                <h2 className="nv-project__name">{p.label}</h2>
+                <ProjectKinds p={p} />
+                <span className="nv-composer__spacer" />
+                <Button size="sm" variant="ghost" icon={<RefreshCw size={13} />} aria-label={`Refresh ${p.label}`} onClick={() => void refreshProject(p.projectId)} disabled={setupBusy === "project"}>
+                  Refresh
                 </Button>
-              </>
-            ) : null}
-          </li>
-        ))}
-      </ul>
+                <Button size="sm" variant="ghost" icon={<Trash2 size={13} />} aria-label={`Remove ${p.label}`} onClick={() => void forgetProject(p.projectId)} disabled={setupBusy === "project"}>
+                  Remove
+                </Button>
+              </header>
+              <p className="nv-note nv-project__snap">
+                Snapshot {new Date(p.snapshotAtMs).toLocaleString()}
+                {p.changedSinceSnapshot === true ? " · folder changed since (new tasks refresh automatically)" : ""}
+                {p.originDirty ? " · had uncommitted changes" : ""}
+              </p>
+              <ProjectAccess p={p} />
+              <PreviewsPanel projectId={p.projectId} heading="Running now" />
+              <AdvancedSettings p={p} />
+            </article>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -342,13 +268,13 @@ export function ProjectsPage() {
     return (
       <div className="nv-page nv-narrow">
         <OpenedProjects />
-        <JobsPanel />
-        <h2 className="nv-subheading">What applies to every task</h2>
-        <ul className="nv-list" aria-label="Execution policy">
-          <li>Each project has a workspace setting you choose: Nexus edits the real files in the project folder directly (every change is on disk as soon as it is made; it keeps the original of every file it changes), or works in an isolated copy that you review and apply. Nothing is ever committed, pushed or merged.</li>
-          <li>Edits and build/test commands run automatically under a workspace policy (recorded as automated grants, never as your approval). Commands run in a sandbox with the network off.</li>
-          <li>Protected files (lock files, build scripts, hidden and credential-shaped paths, version-control internals) cannot be written.</li>
-          <li>Selected source text and command output are sent to your connected provider; each model turn is a billable request. You can revoke consent in Settings.</li>
+        <h2 className="nv-subheading">How Nexus keeps you in control</h2>
+        <ul className="nv-list" aria-label="Safety summary">
+          <li>Nexus changes nothing without your permission: each project starts with the safest settings, and every widening is confirmed in a system dialog that shows exactly what changes. Nexus itself cannot grant, widen or renew a permission.</li>
+          <li>Commands run in a sandbox. The network is off unless you allow dependency downloads (install commands only) or list specific sites; a preview can be reached from this computer only.</li>
+          <li>Protected files (lock files, build scripts, hidden and credential-shaped paths, version-control internals) cannot be written. Nothing is ever committed, pushed or merged for you.</li>
+          <li>Selected source text and command output are sent to your connected provider; each model turn is a billable request. You can revoke autonomous work in Settings.</li>
+          <li>“Done” always comes from what actually ran: results marked verified come from recorded command results, never from what the model says about itself.</li>
         </ul>
       </div>
     );

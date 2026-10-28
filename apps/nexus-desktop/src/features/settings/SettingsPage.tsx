@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { EngineChoice } from "../engine/EngineChoice";
+import { EnvironmentNotes } from "../setup/EnvironmentNotes";
 import { useNexus } from "../../state/NexusContext";
 import { absoluteTime } from "../../lib/format";
 import { Alert, Badge, Button, KeyValue } from "../../components/ui/primitives";
@@ -49,13 +50,13 @@ function AdvancedLimits() {
 }
 
 export function SettingsPage() {
-  const { appInfo, runtime, blockers, refreshRuntime, runtimeState, connectProvider, giveConsent, revokeConsent, retryRuntime, setupBusy, setupError, intentCodeLimits } = useNexus();
+  const { appInfo, runtime, blockers, refreshRuntime, runtimeState, connectProvider, giveConsent, revokeConsent, retryRuntime, setupBusy, setupError, intentCodeLimits, permissionSupport } = useNexus();
   const i = appInfo.data;
   const connected = runtime?.connection === "connected";
   return (
     <div className="nv-page">
       <h1 className="nv-page__title">Settings</h1>
-      <p className="nv-page__sub">Read-only configuration. Nexus does not change privileged settings.</p>
+      <p className="nv-page__sub">Your connection, the engine, safety limits and what this computer can do. Privileged changes always ask in a system dialog.</p>
 
       {runtimeState?.mode === "interactive" && (
         <section className="nv-panel" aria-label="Provider and autonomy">
@@ -111,34 +112,19 @@ export function SettingsPage() {
         </section>
       )}
 
-      <section className="nv-panel">
-        <h2 className="nv-panel__title">Appearance</h2>
-        <KeyValue
-          rows={[
-            { label: "Theme", value: "Nexus Dark (only theme)" },
-            { label: "Accent", value: <Badge tone="purple" mono>#7C5CFF</Badge> },
-            { label: "Motion", value: "Follows system reduced-motion preference" },
-          ]}
-        />
-      </section>
-
-      <section className="nv-panel">
-        <h2 className="nv-panel__title">Native daemon</h2>
-        <KeyValue
-          rows={[
-            { label: "Connection", value: runtime ? <Badge tone={connected ? "success" : "error"}>{runtime.connection}</Badge> : null },
-            { label: "Detail", value: runtime?.detail },
-            { label: "Last check", value: runtime ? absoluteTime(new Date(runtime.checkedAtMs).toISOString()) : null },
-            { label: "Socket", value: i?.socketPath, mono: true },
-            { label: "Ledger dir", value: i?.ledgerDir ?? "unset (NEXUS_LEDGER_DIR)", mono: true },
-          ]}
-        />
-        <div style={{ marginTop: 12 }}>
-          <button type="button" className="nv-btn nv-btn--sm" onClick={refreshRuntime}>
-            Re-run diagnostics
-          </button>
-        </div>
-      </section>
+      {runtimeState?.mode === "interactive" && (
+        <section className="nv-panel" aria-label="This computer">
+          <h2 className="nv-panel__title">This computer</h2>
+          <p className="nv-note">What Nexus found here decides what it can do. Anything that is missing is listed with how to fix it.</p>
+          <EnvironmentNotes />
+          <KeyValue
+            rows={[
+              { label: "Commands in your project", value: permissionSupport?.known ? <Badge tone={permissionSupport.inPlaceAvailable === false ? "warning" : "success"}>{permissionSupport.inPlaceAvailable === false ? "unavailable" : "available"}</Badge> : "—" },
+              { label: "Data folder", value: runtimeState.home ?? "—", mono: true },
+            ]}
+          />
+        </section>
+      )}
 
       <section className="nv-panel">
         <h2 className="nv-panel__title">Application</h2>
@@ -146,23 +132,38 @@ export function SettingsPage() {
         <KeyValue
           rows={[
             { label: "Version", value: i?.appVersion, mono: true },
-            { label: "Client API", value: i ? `v${i.clientApiVersion}` : null },
-            { label: "IPC protocol", value: i ? `v${i.ipcProtocol}` : null },
             { label: "Platform", value: i?.platform },
-            { label: "Dispatch", value: <Badge tone="warning">disabled</Badge> },
           ]}
         />
       </section>
 
-      <section className="nv-panel">
-        <h2 className="nv-panel__title">Known live-execution blockers</h2>
+      <details className="nv-details nv-panel" aria-label="Advanced diagnostics">
+        <summary>Advanced diagnostics</summary>
+        <h3 className="nv-subheading">Native daemon</h3>
+        <KeyValue
+          rows={[
+            { label: "Connection", value: runtime ? <Badge tone={connected ? "success" : "error"}>{runtime.connection}</Badge> : null },
+            { label: "Detail", value: runtime?.detail },
+            { label: "Last check", value: runtime ? absoluteTime(new Date(runtime.checkedAtMs).toISOString()) : null },
+            { label: "Socket", value: i?.socketPath, mono: true },
+            { label: "Ledger dir", value: i?.ledgerDir ?? "unset (NEXUS_LEDGER_DIR)", mono: true },
+            { label: "Client API", value: i ? `v${i.clientApiVersion}` : null },
+            { label: "IPC protocol", value: i ? `v${i.ipcProtocol}` : null },
+          ]}
+        />
+        <div style={{ marginTop: 12 }}>
+          <button type="button" className="nv-btn nv-btn--sm" onClick={refreshRuntime}>
+            Re-run diagnostics
+          </button>
+        </div>
+        <h3 className="nv-subheading">Known limitations of live execution</h3>
         <ul className="nv-list">
           {(blockers.data?.blockers ?? []).map((b) => (
             <li key={b}>{b}</li>
           ))}
         </ul>
-        {!blockers.data && <p className="nv-note">Blocker list unavailable.</p>}
-      </section>
+        {!blockers.data && <p className="nv-note">The list is unavailable.</p>}
+      </details>
     </div>
   );
 }

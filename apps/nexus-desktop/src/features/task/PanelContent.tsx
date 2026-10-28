@@ -6,11 +6,12 @@ import { outcomeView, toolKind } from "../../lib/runKind";
 import { useNexus, type PanelKind } from "../../state/NexusContext";
 import { Alert, Badge, Loading, Tabs, type TabDef } from "../../components/ui/primitives";
 import { DiffViewer } from "../conversation/ModelRunPanel";
+import { RecoverySection } from "../recovery/CommandRecovery";
 
 const TABS: TabDef[] = [
   { id: "diff", label: "Diff" },
   { id: "test", label: "Test output" },
-  { id: "evidence", label: "Evidence" },
+  { id: "evidence", label: "Evidence & recovery" },
   { id: "source", label: "Source" },
 ];
 
@@ -108,9 +109,15 @@ function DiffTab({ run }: { run: IntentRun }) {
       <CopyPatch patch={d.diff} truncated={d.diffTruncated} />
       <DiffViewer diff={d.diff || "(no changes)"} truncated={d.diffTruncated} />
       <CopyFacts run={run} />
-      <p className="nv-note">
-        This is the isolated working copy at commit <span className="nv-mono">{short(d.baseCommit)}</span>. Your repository is unchanged; applying a patch is a manual step by you.
-      </p>
+      {run.workspaceKind === "direct" ? (
+        <p className="nv-note">
+          These changes were made directly in your project folder: they are already saved in your files. Nexus kept the original of every file it changed, so this is exactly what differs from before the run.
+        </p>
+      ) : (
+        <p className="nv-note">
+          This is the isolated working copy at commit <span className="nv-mono">{short(d.baseCommit)}</span>. Your folder is unchanged until you apply these changes.
+        </p>
+      )}
     </div>
   );
 }
@@ -226,6 +233,7 @@ function EvidenceTab({ run }: { run: IntentRun }) {
         </tbody>
       </table>
       <p className="nv-note">Receipts are the runtime&apos;s records of what executed. The model&apos;s own statements are never used for any status shown here.</p>
+      <RecoverySection run={run} />
     </div>
   );
 }
@@ -253,8 +261,13 @@ function SourceTab({ run }: { run: IntentRun }) {
       <dd>{intentCodeLimits?.approvalLifetimeSecs ? `${Math.round(intentCodeLimits.approvalLifetimeSecs / 60 * 10) / 10} min` : "—"}</dd>
       <dt>Provider</dt>
       <dd className="nv-mono">{run.providerId ?? "—"} / {run.remoteModelId ?? "—"}</dd>
-      <dt>Execution</dt>
-      <dd>Isolated copy of the project · network off for commands · nothing is committed, pushed or merged</dd>
+      <dt>Where it ran</dt>
+      <dd>
+        {run.workspaceKind === "direct"
+          ? "Edits made directly in your project folder, with the original of every changed file kept · commands run in a sandbox"
+          : "An isolated copy of the project, so your folder is unchanged until you apply the changes · commands run in a sandbox"}
+        {" · "}network only for what the project&apos;s permissions allow (off by default) · nothing is committed, pushed or merged
+      </dd>
     </dl>
   );
 }

@@ -7,13 +7,13 @@ const NAV: Array<{ id: Page; label: string; icon: LucideIcon }> = [
   { id: "projects", label: "Projects", icon: FolderGit2 },
   { id: "history", label: "History", icon: History },
   { id: "models", label: "Models", icon: Boxes },
-  { id: "sentry", label: "Sentry", icon: ShieldCheck },
 ];
 
 const ADVANCED: Array<{ id: Page; label: string; icon: LucideIcon }> = [
   { id: "tasks", label: "Controller ledger", icon: LayoutList },
   { id: "control-room", label: "Control Room", icon: MonitorCog },
   { id: "mock", label: "Mock runs", icon: FlaskConical },
+  { id: "sentry", label: "Sentry (not connected)", icon: ShieldCheck },
 ];
 
 export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {

@@ -13,6 +13,8 @@ import { Alert, Badge, Button, Loading, StatusDot } from "../../components/ui/pr
 import { useNexus } from "../../state/NexusContext";
 import { AdoptButton } from "../task/TaskView";
 import { ThreadComposer } from "./ThreadComposer";
+import { RunNeeds } from "../access/RunNeeds";
+import { PreviewsPanel } from "../jobs/PreviewsPanel";
 import { useThread } from "./useThread";
 
 const STEP_ICON: Record<StepTone, typeof CheckCircle2> = {
@@ -102,7 +104,7 @@ function evidenceBadge(r: ThreadRunView): { label: string; tone: "success" | "wa
 }
 
 function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; detail: ThreadDetail }) {
-  const { openPanel } = useNexus();
+  const { openPanel, projects } = useNexus();
   const run = r.run;
   const now = useNow(1000);
   const [open, setOpen] = useState(false);
@@ -215,6 +217,7 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
         </div>
       )}
       {isLast && !live && run?.autoAdopt && <p className="nv-note">Trusted workspace: {run.autoAdopt}.</p>}
+      {isLast && run && !r.readOnly && <RunNeeds run={run} project={projects.find((p) => p.projectId === detail.thread.projectId)} threadId={detail.thread.threadId} live={live} />}
     </section>
   );
 }
@@ -364,6 +367,7 @@ export function ThreadView({ threadId }: { threadId: string }) {
         })}
         {detail.runs.length === 0 && <p className="nv-note">Ask a question about the project, or describe what to change. Nexus remembers everything said here.</p>}
       </div>
+      <PreviewsPanel projectId={t.projectId} showEnded={false} />
       <ThreadComposer key={t.threadId} detail={detail} onSent={reload} />
     </div>
   );
