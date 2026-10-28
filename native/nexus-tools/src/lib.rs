@@ -30,6 +30,7 @@ pub mod egress_host;
 pub mod events;
 pub mod exec;
 pub mod exec_contract;
+pub mod gitguard;
 pub mod gitwt;
 pub mod grant;
 pub mod host_exec;

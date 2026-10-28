@@ -2040,18 +2040,66 @@ pub fn run_process(
     // A `.git` created BY this command (git init, a script, any program) is therefore writable
     // inside that one command — hooks/config included — whatever the grant says; it is fully
     // protected from the next command on. Never let that pass silently: say so in the result.
+    // Release 1: what a creating command planted in a `.git` it created is NEUTRALISED here (hooks removed,
+    // config reduced to what a fresh repository has, a `.git` pointer file removed; originals quarantined), so
+    // nothing that would run later with the person's privileges survives the command that made it.
     if in_place {
-        let git_now = std::path::Path::new(ctx.ws.root_path())
-            .join(".git")
-            .exists();
+        let root_fd = ctx.ws.root_raw_fd();
+        let quarantine = run_dir.join("git-quarantine");
+        let mut created_git = false;
+        let mut summary = crate::gitguard::Neutralized::default();
+        let git_now =
+            std::fs::symlink_metadata(std::path::Path::new(ctx.ws.root_path()).join(".git"))
+                .is_ok();
         if git_now && !git_existed_before {
+            created_git = true;
+            let n = crate::gitguard::neutralize_created_git(root_fd, ".git", ".git", &quarantine);
+            summary.hooks_removed.extend(n.hooks_removed);
+            summary.config_rewritten.extend(n.config_rewritten);
+            summary.git_file_removed |= n.git_file_removed;
+            summary.quarantined |= n.quarantined;
+        }
+        // a `.git` the command created anywhere else in the project (a nested repository)
+        if let Some(l) = &ledger {
+            for d in l
+                .effects
+                .created_dirs
+                .paths
+                .iter()
+                .chain(l.effects.created.paths.iter())
+            {
+                let (parent_rel, name) = match d.rfind('/') {
+                    Some(i) => (&d[..i], &d[i + 1..]),
+                    None => continue, // the root `.git` is handled above
+                };
+                if name != ".git" {
+                    continue;
+                }
+                if let Some(p) = crate::observe::open_dir_rel(root_fd, parent_rel) {
+                    created_git = true;
+                    use std::os::fd::AsRawFd;
+                    let n = crate::gitguard::neutralize_created_git(
+                        p.as_raw_fd(),
+                        ".git",
+                        d,
+                        &quarantine,
+                    );
+                    summary.hooks_removed.extend(n.hooks_removed);
+                    summary.config_rewritten.extend(n.config_rewritten);
+                    summary.git_file_removed |= n.git_file_removed;
+                    summary.quarantined |= n.quarantined;
+                }
+            }
+        }
+        if created_git {
             if let Some(o) = output.as_object_mut() {
                 o.insert(
                     "gitMetadataCreated".into(),
                     serde_json::json!({
                         "byThisCommand": true,
                         "mountProtectedInThisCommand": false,
-                        "note": "this command created .git; metadata written inside the creating command (including hooks/config) is not mount-protected — it is protected from the next command on",
+                        "neutralized": summary,
+                        "note": "this command created .git; it could write hooks/config inside that one command (mounts are prepared before a command). What could run later outside the sandbox was removed or reduced when the command ended: non-sample hooks, config keys other than a fresh repository's own, and a .git pointer file; originals are kept privately. From the next command on, .git is mount-protected.",
                     }),
                 );
             }
