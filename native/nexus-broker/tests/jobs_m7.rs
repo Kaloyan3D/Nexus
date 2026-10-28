@@ -231,3 +231,74 @@ fn m7d_broker_job_lifecycle_revocation_and_restart_honesty() {
     let _ = &fx.proj;
     drop(fx);
 }
+
+/// Release 1: a `.git` created by a long-running job is unprotected for the job's whole life (mounts are prepared
+/// before it starts). The watcher neutralises what could run later with the person's privileges, while it runs.
+#[test]
+fn rel1_a_git_created_by_a_background_job_is_neutralised_while_the_job_runs_and_an_existing_git_is_never_touched(
+) {
+    if !ready() {
+        return;
+    }
+    let (fx, env, pid) = fixture();
+    grant(&env, &pid);
+    let mgr = Arc::new(JobManager::open(&fx.state.join("jobs")).unwrap());
+
+    // 1. an EXISTING repository (the fixture's) with a hook of the person's own: untouched by a job
+    std::fs::write(
+        fx.proj.join(".git/hooks/pre-commit"),
+        "#!/bin/sh\necho mine\n",
+    )
+    .unwrap();
+    let j0 = jobs::job_start(
+        &mgr,
+        &env,
+        &fx.state,
+        &json!({"projectId": pid, "program": "sh", "args": ["-c", "echo existing-repo-job; sleep 2"], "cwd": ".", "exposePorts": []}),
+    )
+    .expect("job on an existing repo");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert_eq!(
+        std::fs::read_to_string(fx.proj.join(".git/hooks/pre-commit")).unwrap(),
+        "#!/bin/sh\necho mine\n",
+        "a person's own hook was touched"
+    );
+    let _ = jobs::job_stop(&mgr, &json!({"jobId": j0["jobId"]}));
+
+    // 2. a project WITHOUT .git: the job creates one and plants a hook and a config key
+    std::fs::remove_dir_all(fx.proj.join(".git")).unwrap();
+    let script = "git init -q; printf '#!/bin/sh\\ntouch /tmp/rel1-job-hook-ran\\n' > .git/hooks/pre-commit; chmod +x .git/hooks/pre-commit; printf '[core]\\n\\tfsmonitor = /tmp/evil\\n[user]\\n\\tname = Dev\\n' > .git/config; echo planted-done; sleep 30";
+    let j = jobs::job_start(
+        &mgr,
+        &env,
+        &fx.state,
+        &json!({"projectId": pid, "program": "sh", "args": ["-c", script], "cwd": ".", "exposePorts": []}),
+    )
+    .expect("job start");
+    let id = j["jobId"].as_str().unwrap().to_owned();
+    wait_for("the job planted its files", || {
+        jobs::job_logs(&mgr, &json!({"jobId": id}))
+            .ok()
+            .and_then(|v| v["logs"].as_str().map(|s| s.contains("planted-done")))
+            .unwrap_or(false)
+    });
+    // while the job is STILL RUNNING the dangerous surface is gone
+    wait_for("the hook is neutralised", || {
+        !fx.proj.join(".git/hooks/pre-commit").exists()
+            && !std::fs::read_to_string(fx.proj.join(".git/config"))
+                .unwrap_or_default()
+                .contains("fsmonitor")
+    });
+    assert_eq!(
+        mgr.status(&id).unwrap().state,
+        "running",
+        "the job must still be running when the sweep happened"
+    );
+    let cfg = std::fs::read_to_string(fx.proj.join(".git/config")).unwrap();
+    assert!(
+        cfg.contains("name = Dev"),
+        "legitimate keys were lost: {cfg}"
+    );
+    assert!(!Path::new("/tmp/rel1-job-hook-ran").exists());
+    jobs::job_stop(&mgr, &json!({"jobId": id})).unwrap();
+}

@@ -125,6 +125,8 @@ pub fn job_start(
         .origin
         .clone()
         .unwrap_or_else(|| rec.source_path.clone());
+    // must be read BEFORE the job starts: a job that creates .git immediately would otherwise look like it had one
+    let git_before = std::fs::symlink_metadata(std::path::Path::new(&root).join(".git")).is_ok();
     let ws = Workspace::open_root(&root, WorkspacePolicy::default())
         .map_err(|e| bad("workspace-error", e.message))?;
     let policy = CommandPolicy::standard(Toolchain::discover()).with_workbench();
@@ -213,6 +215,26 @@ pub fn job_start(
             max_log_bytes: 1 << 20,
         })
         .map_err(|e| bad("command-refused", e.message))?;
+    // Release 1: a job runs for as long as the person leaves it, and mounts are prepared before it starts, so
+    // a `.git` it creates is unprotected for its whole life. While the job runs, and once more when it ends,
+    // whatever in a `.git` THE JOB created could run later with the person's privileges is neutralised (a few
+    // syscalls per tick, idempotent; a `.git` that existed before the job started is never touched).
+    let git_root = PathBuf::from(&root);
+    let git_quarantine = state_dir.join("job-git-quarantine").join(&rec.id);
+    let sweep_git = move || {
+        if git_before {
+            return;
+        }
+        if let Ok(d) = std::fs::File::open(&git_root) {
+            use std::os::fd::AsRawFd;
+            nexus_tools::gitguard::neutralize_created_git(
+                d.as_raw_fd(),
+                ".git",
+                ".git",
+                &git_quarantine,
+            );
+        }
+    };
     // Revocation watcher: the job cannot outlive the authority that permitted it.
     {
         let mgr = mgr.clone();
@@ -224,8 +246,10 @@ pub fn job_start(
         let exposed_ports: Vec<u16> = rec_job.exposed.iter().map(|(p, _)| *p).collect();
         std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_millis(300));
+            sweep_git();
             let Ok(st) = mgr.status(&job_id) else { return };
             if st.state != "running" {
+                sweep_git();
                 return;
             }
             let still_valid = registry::load(&registry_dir, &trust)

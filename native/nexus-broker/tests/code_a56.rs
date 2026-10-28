@@ -15969,6 +15969,150 @@ fn rel1_direct_run_edits_are_restorable_through_the_broker_and_user_changes_are_
     env.b.shutdown();
 }
 
+/// A Direct project whose folder has NO `.git`, with the permission Release 1's "allow Nexus to run commands in
+/// this project" stores (commands run IN the folder, offline, automatic), on a runtime with standing grants.
+fn direct_in_place_env_without_git(
+    name: &str,
+    make: impl Fn(FolderCell) -> Responder,
+) -> DirectEnv {
+    let cell: FolderCell = Arc::new(Mutex::new(None));
+    let args: Vec<String> = [
+        "--standing-grants",
+        "--approver-cap",
+        "@APPROVER_CAP@",
+        "--approver-uids",
+        "@UID@",
+        "--approver-same-user",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let fx = fixture_full(
+        make(cell.clone()),
+        Box::new(|_| {}),
+        &[],
+        true,
+        true,
+        None,
+        &args,
+    );
+    let b = managed_broker(&fx, name);
+    let sock = b.socket_path().to_owned();
+    let folder = fx.work.join("managed-nogit");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("README.md"), "# demo\n").unwrap();
+    let v = ic::project_open(&sock, folder.to_str().unwrap()).expect("project-open");
+    let pid = v["project"]["projectId"].as_str().unwrap().to_owned();
+    *cell.lock().unwrap() = Some(std::fs::canonicalize(&folder).unwrap());
+    ic::project_set_workspace(&sock, &pid, "direct").expect("direct");
+    let pv = ic::project_grant_preview(&sock, &pid, "workspace", "offline", "auto", None)
+        .expect("preview");
+    ic::project_grant_set(
+        &sock,
+        &pid,
+        "workspace",
+        "offline",
+        "auto",
+        None,
+        pv["textSha256"].as_str().unwrap(),
+        "test",
+    )
+    .expect("grant");
+    DirectEnv {
+        fx,
+        b,
+        sock,
+        folder,
+        pid,
+    }
+}
+
+/// Release 1 (Git creation window): a command that CREATES `.git` in a project that had none cannot leave a hook or
+/// a dangerous config key behind for the person's own git (and editor) to run later with their privileges. The
+/// command itself ran with the planted files (inside its sandbox); what survives it is neutralised, and the
+/// originals are quarantined, not destroyed.
+#[test]
+fn rel1_git_created_by_a_command_is_neutralised_before_the_person_can_run_it() {
+    if !sandbox_ready() {
+        return;
+    }
+    let script = "git init -q; \
+printf '[core]\\n\\trepositoryformatversion = 0\\n\\tfsmonitor = /tmp/evil-fsmonitor\\n\\thooksPath = /tmp/evil-hooks\\n[alias]\\n\\tci = !sh -c evil\\n[user]\\n\\tname = Dev\\n' > .git/config; \
+printf '#!/bin/sh\\ntouch /tmp/rel1-hook-ran\\n' > .git/hooks/pre-commit; chmod +x .git/hooks/pre-commit; \
+mkdir -p sub && cd sub && git init -q && printf '#!/bin/sh\\necho nested\\n' > .git/hooks/post-checkout && chmod +x .git/hooks/post-checkout; \
+echo planted";
+    let env = direct_in_place_env_without_git("rel1-git", move |_cell| {
+        let script = script.to_owned();
+        Arc::new(move |n, body| {
+            let resp = format!("resp_{n}");
+            match tool_calls_done(body) {
+                0 => Answer::Frames(call_frames(
+                    &resp,
+                    n,
+                    "c0",
+                    "proc_run",
+                    &json!({"program":"sh","args":["-c", script]}).to_string(),
+                )),
+                _ => Answer::Frames(text_frames(&resp, "Done.")),
+            }
+        })
+    });
+    assert!(
+        !env.folder.join(".git").exists(),
+        "the project must start without a .git"
+    );
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(&env, "Initialise a repository.", "rel1-git-0001"),
+        240,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let cmd = run
+        .tool_activity
+        .iter()
+        .find(|a| a.tool == "proc_run")
+        .expect("command");
+    assert_eq!(cmd.status, "executed", "{cmd:?}");
+    assert_eq!(
+        cmd.exit_code,
+        Some(0),
+        "the planting command failed: {cmd:?}"
+    );
+    // the repository exists (Nexus does not delete a repository), but nothing in it can run later
+    let g = env.folder.join(".git");
+    assert!(
+        g.is_dir(),
+        "git init did not run; folder: {:?}; cmd: {cmd:?}; grant: {}",
+        std::fs::read_dir(&env.folder)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect::<Vec<_>>(),
+        ic::project_list(&env.sock, false).unwrap()["projects"]
+    );
+    assert!(
+        !g.join("hooks/pre-commit").exists(),
+        "a planted hook survived the creating command"
+    );
+    let cfg = std::fs::read_to_string(g.join("config")).unwrap();
+    for bad in ["fsmonitor", "hooksPath", "alias", "evil"] {
+        assert!(
+            !cfg.contains(bad),
+            "{bad} survived in the root config: {cfg}"
+        );
+    }
+    assert!(
+        cfg.contains("repositoryformatversion") && cfg.contains("name = Dev"),
+        "legitimate keys were lost: {cfg}"
+    );
+    assert!(
+        !env.folder.join("sub/.git/hooks/post-checkout").exists(),
+        "a hook planted in a NESTED repository survived"
+    );
+    // nothing ran outside the sandbox
+    assert!(!std::path::Path::new("/tmp/rel1-hook-ran").exists());
+    env.b.shutdown();
+}
+
 /// 5: a file the user changed (before or during the run) is never silently overwritten; what is NOT the
 /// agent's work stays out of its evidence.
 #[test]
