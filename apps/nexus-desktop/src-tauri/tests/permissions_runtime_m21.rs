@@ -98,6 +98,7 @@ fn the_desktop_runtime_has_a_private_approver_channel_and_manages_permissions_th
             .into_owned()])),
         confirm: false,
         secret: None,
+        ..Default::default()
     };
     let d = ScriptedDialogs {
         confirm: true,

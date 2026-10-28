@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-allow-previews"
+description = "Enables the project_allow_previews command without any pre-configured scope."
+commands.allow = ["project_allow_previews"]
+
+[[permission]]
+identifier = "deny-project-allow-previews"
+description = "Denies the project_allow_previews command without any pre-configured scope."
+commands.deny = ["project_allow_previews"]

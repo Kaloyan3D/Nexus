@@ -59,7 +59,7 @@ fn active_grant(rec: &registry::ProjectRecord) -> Result<StandingGrant, CmdErr> 
 fn record_json(r: &nexus_tools::jobs::JobRecord, ready_ports: bool) -> Value {
     json!({
         "jobId": r.id, "state": r.state, "command": r.display, "task": r.task,
-        "authority": r.authority, "startedAtMs": r.started_at_ms, "endedAtMs": r.ended_at_ms,
+        "authority": r.authority, "projectId": r.project, "startedAtMs": r.started_at_ms, "endedAtMs": r.ended_at_ms,
         "exitCode": r.exit_code, "pid": r.pid,
         "exposed": r.exposed.iter().map(|(p, h)| json!({"port": p, "hostPort": h, "url": format!("http://127.0.0.1:{h}")})).collect::<Vec<_>>(),
         "ready": ready_ports && r.state == "running" && !r.exposed.is_empty(),
@@ -207,6 +207,7 @@ pub fn job_start(
             display: format!("{} {}", cmd.name, cmd.argv.join(" ")),
             task,
             authority: frozen.digest.clone(),
+            project: rec.id.clone(),
             authorized_ports: frozen.exec.dev_ports.clone(),
             expose,
             max_log_bytes: 1 << 20,
@@ -272,10 +273,13 @@ pub fn job_stop(mgr: &Arc<JobManager>, params: &Value) -> Result<Value, CmdErr> 
     Ok(record_json(&r, false))
 }
 
-pub fn job_list(mgr: &Arc<JobManager>) -> Result<Value, CmdErr> {
+pub fn job_list(mgr: &Arc<JobManager>, params: &Value) -> Result<Value, CmdErr> {
+    // optional filter: only the jobs of one project
+    let only = params.get("projectId").and_then(|v| v.as_str());
     let jobs = mgr
         .list()
         .iter()
+        .filter(|r| only.is_none_or(|p| r.project == p))
         .map(|r| record_json(r, true))
         .collect::<Vec<_>>();
     Ok(json!({"jobs": jobs}))

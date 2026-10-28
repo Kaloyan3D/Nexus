@@ -565,16 +565,40 @@ impl Runtime {
         expires_in_secs: Option<u64>,
         dest: &ic::NetChoice,
     ) -> Result<serde_json::Value, String> {
+        self.apply_draft(
+            d,
+            id,
+            &GrantDraft {
+                fs: fs.to_owned(),
+                net: net.to_owned(),
+                approval: approval.to_owned(),
+                expires_in_secs,
+                checkpoint: "best-effort".into(),
+                hard_links: "protect".into(),
+                dest: dest.clone(),
+            },
+        )
+    }
+
+    /// The one place a grant change reaches the broker: preview -> the broker's exact text in a NATIVE
+    /// dialog -> only a "yes" returns that text's digest.
+    fn apply_draft(
+        &self,
+        d: &dyn Dialogs,
+        id: &str,
+        g: &GrantDraft,
+    ) -> Result<serde_json::Value, String> {
         let sock = self.sock();
+        let exec = Some((g.checkpoint.as_str(), g.hard_links.as_str()));
         let pv = ic::project_grant_preview_net(
             &sock,
             id,
-            fs,
-            net,
-            approval,
-            expires_in_secs,
-            None,
-            dest,
+            &g.fs,
+            &g.net,
+            &g.approval,
+            g.expires_in_secs,
+            exec,
+            &g.dest,
         )
         .map_err(|e| e.message)?;
         let text = pv["text"]
@@ -591,16 +615,318 @@ impl Runtime {
         ic::project_grant_set_net(
             &sock,
             id,
-            fs,
-            net,
-            approval,
-            expires_in_secs,
+            &g.fs,
+            &g.net,
+            &g.approval,
+            g.expires_in_secs,
             &digest,
             "desktop",
-            None,
-            dest,
+            exec,
+            &g.dest,
         )
         .map_err(|e| e.message)
+    }
+
+    /// What the broker says about one project: whether it edits its real folder, and its grant.
+    fn project_facts(&self, id: &str) -> Result<(bool, Option<serde_json::Value>), String> {
+        let l = ic::project_list(&self.sock(), false).map_err(|e| e.message)?;
+        let p = l["projects"]
+            .as_array()
+            .and_then(|a| a.iter().find(|p| p["projectId"] == id))
+            .ok_or_else(|| "no such project".to_owned())?;
+        Ok((
+            p["workspaceMode"] == "direct",
+            p.get("grant").filter(|g| !g.is_null()).cloned(),
+        ))
+    }
+
+    /// The Desktop's "edit the permissions" command: like [`Self::project_set_grant`], but what the panel
+    /// does not offer is KEPT from the active permissions instead of silently reset (recovery
+    /// checkpoints, hard-link policy, Git writes, and - unless the caller names them - preview ports).
+    /// Nothing is widened by keeping: the dialog shows the complete result either way.
+    #[allow(clippy::too_many_arguments)]
+    pub fn project_set_grant_keeping(
+        &self,
+        d: &dyn Dialogs,
+        id: &str,
+        fs: &str,
+        net: &str,
+        approval: &str,
+        expires_in_secs: Option<u64>,
+        dest: &ic::NetChoice,
+        dev_ports: Option<Vec<u16>>,
+    ) -> Result<serde_json::Value, String> {
+        let (direct, grant) = self.project_facts(id)?;
+        let active = grant
+            .as_ref()
+            .filter(|g| g["status"] == "active")
+            .and_then(|g| GrantDraft::from_view(g).ok());
+        let mut draft = GrantDraft {
+            fs: fs.to_owned(),
+            net: net.to_owned(),
+            approval: approval.to_owned(),
+            expires_in_secs,
+            checkpoint: active
+                .as_ref()
+                .map_or("best-effort".into(), |a| a.checkpoint.clone()),
+            hard_links: active
+                .as_ref()
+                .map_or("protect".into(), |a| a.hard_links.clone()),
+            dest: dest.clone(),
+        };
+        draft.dest.git_write = active.as_ref().is_some_and(|a| a.dest.git_write);
+        let ports = dev_ports.unwrap_or_else(|| {
+            active
+                .as_ref()
+                .map(|a| a.dest.dev_ports.clone())
+                .unwrap_or_default()
+        });
+        // previews run commands in the project's own folder; without that there is nothing to keep
+        draft.dest.dev_ports = if fs == "workspace" && direct {
+            normalized_ports(&ports)
+        } else {
+            vec![]
+        };
+        self.apply_draft(d, id, &draft)
+    }
+
+    /// "Allow local development previews": add ports to the project's ACTIVE permissions and nothing else.
+    /// The renderer names ports (numbers); the broker's own consent text lists them and a native "yes" is
+    /// the only thing that stores them. A model can never reach this.
+    pub fn project_allow_previews(
+        &self,
+        d: &dyn Dialogs,
+        id: &str,
+        ports: &[u16],
+    ) -> Result<serde_json::Value, String> {
+        if ports.is_empty() || ports.len() > 8 {
+            return Err("choose between one and eight ports".into());
+        }
+        if let Some(p) = ports.iter().find(|p| **p < 1024) {
+            return Err(format!(
+                "port {p} is reserved; development servers use ports 1024 and above"
+            ));
+        }
+        let (direct, grant) = self.project_facts(id)?;
+        let Some(g) = grant else {
+            return Err("no-grant: allow Nexus to work in this project first".into());
+        };
+        let mut draft = GrantDraft::from_view(&g)?;
+        if draft.fs != "workspace" || !direct {
+            return Err("not-available: previews run in the project folder itself; allow Nexus to work in this project first".into());
+        }
+        let mut all = draft.dest.dev_ports.clone();
+        all.extend_from_slice(ports);
+        draft.dest.dev_ports = normalized_ports(&all);
+        self.apply_draft(d, id, &draft)
+    }
+
+    /// Stop previews on some ports (narrowing; still confirmed so the person sees the result).
+    pub fn project_revoke_previews(
+        &self,
+        d: &dyn Dialogs,
+        id: &str,
+    ) -> Result<serde_json::Value, String> {
+        let (_, grant) = self.project_facts(id)?;
+        let Some(g) = grant else {
+            return Err("this project has no permissions".into());
+        };
+        let mut draft = GrantDraft::from_view(&g)?;
+        draft.dest.dev_ports.clear();
+        self.apply_draft(d, id, &draft)
+    }
+
+    /// "Allow dependency downloads" on a project that has standing permissions: network for dependency
+    /// installs only (`install`), or back to offline. Controlled/Full network is left to the advanced
+    /// editor: an exact destination list is never silently replaced.
+    pub fn project_allow_installs(
+        &self,
+        d: &dyn Dialogs,
+        id: &str,
+        allow: bool,
+    ) -> Result<serde_json::Value, String> {
+        let (_, grant) = self.project_facts(id)?;
+        let Some(g) = grant else {
+            return Err("no-grant: allow Nexus to work in this project first".into());
+        };
+        let mut draft = GrantDraft::from_view(&g)?;
+        match (draft.net.as_str(), allow) {
+            ("offline", true) => draft.net = "install".into(),
+            ("install", false) => draft.net = "offline".into(),
+            ("install", true) | ("offline", false) => {
+                return Err("nothing to change: that is already the setting".into())
+            }
+            _ => {
+                return Err("not-available: this project already has specific network destinations; change them in Advanced permissions".into())
+            }
+        }
+        self.apply_draft(d, id, &draft)
+    }
+
+    /// "Allow Nexus to edit this project": the project edits its real folder (native confirmation) and its
+    /// commands run there, confined (the broker's consent text, native confirmation). Network stays off,
+    /// approval automatic inside the permissions, no end date unless the person already had one.
+    /// An existing active permission set is KEPT and only its filesystem scope is raised to the project
+    /// folder; Full Access is never chosen here.
+    pub fn project_allow_work(
+        &self,
+        d: &dyn Dialogs,
+        id: &str,
+    ) -> Result<serde_json::Value, String> {
+        let (direct, grant) = self.project_facts(id)?;
+        if !direct {
+            if !d.confirm(DIRECT_TITLE, DIRECT_TEXT)? {
+                return Err("cancelled".into());
+            }
+            ic::project_set_workspace(&self.sock(), id, "direct").map_err(|e| e.message)?;
+        }
+        let existing = grant
+            .as_ref()
+            .filter(|g| g["status"] == "active")
+            .map(GrantDraft::from_view)
+            .transpose()?;
+        let draft = match existing {
+            Some(g) if g.fs == "workspace" => return self.project_view(id),
+            Some(mut g) if g.fs == "scratch" => {
+                g.fs = "workspace".into();
+                g
+            }
+            Some(_) => {
+                return Err("not-available: this project has Full Access; reduce it in Advanced permissions".into())
+            }
+            None => GrantDraft {
+                fs: "workspace".into(),
+                net: "offline".into(),
+                approval: "auto".into(),
+                expires_in_secs: None,
+                checkpoint: "best-effort".into(),
+                hard_links: "protect".into(),
+                dest: ic::NetChoice::default(),
+            },
+        };
+        self.apply_draft(d, id, &draft)?;
+        self.project_view(id)
+    }
+
+    fn project_view(&self, id: &str) -> Result<serde_json::Value, String> {
+        let l = ic::project_list(&self.sock(), false).map_err(|e| e.message)?;
+        l["projects"]
+            .as_array()
+            .and_then(|a| a.iter().find(|p| p["projectId"] == id))
+            .cloned()
+            .map(|p| serde_json::json!({ "project": p }))
+            .ok_or_else(|| "no such project".to_owned())
+    }
+
+    /// Dependency installs / automatic apply of an ISOLATED project's finished work. Turning either ON
+    /// widens what Nexus may do without asking again, so it needs the person's native "yes"; turning it off
+    /// does not.
+    pub fn project_set_policy(
+        &self,
+        d: &dyn Dialogs,
+        id: &str,
+        installs: Option<bool>,
+        trusted: Option<bool>,
+    ) -> Result<serde_json::Value, String> {
+        if installs == Some(true)
+            && !d.confirm(
+                "Allow dependency downloads?",
+                "Nexus may download this project's dependencies (for example npm install or pip install) inside its sandbox. Only install commands get network access; everything else keeps running without it. Nexus does not choose where packages come from beyond what your project's own files say.",
+            )?
+        {
+            return Err("cancelled".into());
+        }
+        if trusted == Some(true)
+            && !d.confirm(
+                "Apply finished work automatically?",
+                "When a task finishes and its checks pass, Nexus will apply the change to your project folder by itself: all of it or none of it, and only if your folder did not change meanwhile. Nothing is committed or pushed.",
+            )?
+        {
+            return Err("cancelled".into());
+        }
+        ic::project_policy(&self.sock(), id, installs, trusted).map_err(|e| e.message)
+    }
+
+    /// Where a running development server can be seen, resolved by the BROKER from its own job record
+    /// (never from an address the renderer supplies), then opened in the default browser.
+    pub fn preview_open(
+        &self,
+        d: &dyn Dialogs,
+        job_id: &str,
+        port: u16,
+    ) -> Result<String, String> {
+        let st = ic::job_status(&self.sock(), job_id).map_err(|e| e.message)?;
+        if st["state"] != "running" {
+            return Err("this server is not running any more".into());
+        }
+        let host_port = st["exposed"]
+            .as_array()
+            .and_then(|a| a.iter().find(|x| x["port"] == port))
+            .and_then(|x| x["hostPort"].as_u64())
+            .ok_or("that preview is not published")?;
+        let url = format!("http://127.0.0.1:{host_port}");
+        d.open_url(&url)?;
+        Ok(url)
+    }
+
+    /// Guarded recovery of what one command changed in the project folder. The renderer names an
+    /// execution and the digest of the preview it showed the person; THIS process re-previews, refuses if
+    /// the files moved since, shows the exact outcome in a native dialog and only a "yes" applies it.
+    pub fn restore_apply(
+        &self,
+        d: &dyn Dialogs,
+        execution_id: &str,
+        reviewed_digest: &str,
+    ) -> Result<serde_json::Value, String> {
+        let sock = self.sock();
+        let pv = ic::exec_restore_preview(&sock, execution_id).map_err(|e| e.message)?;
+        let r = &pv["restore"];
+        if let Some(why) = r["refused"].as_str() {
+            return Err(format!("refused: {why}"));
+        }
+        let digest = pv["confirmDigest"].as_str().ok_or("no confirmation digest")?;
+        if digest != reviewed_digest {
+            return Err("changed: the files changed since you reviewed this recovery; review it again".into());
+        }
+        let list = |k: &str| -> Vec<String> {
+            r[k].as_array()
+                .map(|a| a.iter().filter_map(|i| i["path"].as_str().map(str::to_owned)).collect())
+                .unwrap_or_default()
+        };
+        let part = |title: &str, k: &str| -> String {
+            let l = list(k);
+            if l.is_empty() {
+                return String::new();
+            }
+            let shown: Vec<String> = l.iter().take(15).map(|p| format!("  {p}")).collect();
+            let more = if l.len() > 15 { format!("\n  … and {} more", l.len() - 15) } else { String::new() };
+            format!("\n{title} ({}):\n{}{more}\n", l.len(), shown.join("\n"))
+        };
+        let text = format!(
+            "Put these files back the way they were before the command ran?\n{}{}{}{}\nFiles you or anything else changed afterwards are left exactly as they are. This is not atomic and cannot recover anything Nexus did not observe (changes outside the project folder, or in dependency folders).",
+            part("Will be restored", "restored"),
+            part("Left alone (already as they were)", "skipped"),
+            part("Left alone (changed since - in conflict)", "conflicted"),
+            part("Cannot be recovered", "unrecoverable"),
+        );
+        if !d.confirm("Restore files changed by a command", &text)? {
+            return Err("cancelled".into());
+        }
+        ic::exec_restore_apply(&sock, execution_id, digest, "desktop").map_err(|e| e.message)
+    }
+
+    /// What one command changed, trimmed for display (no per-file hashes, no grant internals).
+    pub fn exec_effects_view(&self, execution_id: &str) -> Result<serde_json::Value, String> {
+        let mut v = ic::exec_effects(&self.sock(), execution_id).map_err(|e| e.message)?;
+        if let Some(rec) = v.get_mut("effects").and_then(|e| e.as_object_mut()) {
+            for k in ["postState", "grant", "timingMs", "pre", "post"] {
+                rec.remove(k);
+            }
+            if let Some(fx) = rec.get_mut("effects").and_then(|e| e.as_object_mut()) {
+                fx.remove("postSha256");
+            }
+        }
+        Ok(v)
     }
 
     /// Revoke (`clear == false`) or remove (`clear == true`) the project's standing permissions after a
@@ -638,6 +964,110 @@ impl Runtime {
             return Err("cancelled".into());
         }
         ic::project_forget(&self.sock(), id).map_err(|e| e.message)
+    }
+}
+
+/// A complete permission set to be previewed, confirmed and stored.
+#[derive(Debug, Clone)]
+pub struct GrantDraft {
+    pub fs: String,
+    pub net: String,
+    pub approval: String,
+    pub expires_in_secs: Option<u64>,
+    pub checkpoint: String,
+    pub hard_links: String,
+    pub dest: ic::NetChoice,
+}
+
+impl GrantDraft {
+    /// The broker's description of an ACTIVE grant, ready to be amended. The remaining lifetime is kept
+    /// (never extended); an ended grant is not amended - the person sets permissions up again.
+    pub fn from_view(g: &serde_json::Value) -> Result<GrantDraft, String> {
+        if g["status"] != "active" {
+            return Err("ended: these permissions were revoked or have expired; set them up again first".into());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let s = |k: &str, d: &str| g[k].as_str().unwrap_or(d).to_owned();
+        let ports = |v: &serde_json::Value| -> Vec<u16> {
+            v.as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_u64().and_then(|n| u16::try_from(n).ok())).collect())
+                .unwrap_or_default()
+        };
+        let hosts = g["netPolicy"]["hosts"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| {
+                        let host = h["host"].as_str()?;
+                        let p = ports(&h["ports"]);
+                        Some(if p.is_empty() {
+                            host.to_owned()
+                        } else {
+                            format!("{host}:{}", p.iter().map(u16::to_string).collect::<Vec<_>>().join(","))
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(GrantDraft {
+            fs: s("fs", "scratch"),
+            net: s("net", "offline"),
+            approval: s("approval", "auto"),
+            expires_in_secs: g["expiresAtMs"]
+                .as_i64()
+                .map(|e| ((e - now) / 1000).max(1) as u64),
+            checkpoint: s("checkpoint", "best-effort"),
+            hard_links: s("hardLinks", "protect"),
+            dest: ic::NetChoice {
+                presets: vec![],
+                hosts,
+                local_ports: ports(&g["netPolicy"]["local_ports"]),
+                git_write: g["gitWrite"] == true,
+                dev_ports: ports(&g["devPorts"]),
+            },
+        })
+    }
+}
+
+/// Sorted, de-duplicated, valid.
+pub fn normalized_ports(p: &[u16]) -> Vec<u16> {
+    let mut v: Vec<u16> = p.iter().copied().filter(|p| *p > 0).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// What this computer offers the application, for first-run guidance. Read-only, and it names only what
+/// is found (a program name or "none"), never a path outside what the person's own PATH already is.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvCheck {
+    pub platform: &'static str,
+    /// `kdialog` | `zenity` | none: without one, the system dialogs Nexus needs cannot be shown.
+    pub dialog_tool: Option<&'static str>,
+    /// Opens a preview in the default browser.
+    pub opener: Option<&'static str>,
+    /// Programs a project's own build and test commands commonly need, and whether they were found.
+    pub toolchains: Vec<(&'static str, bool)>,
+}
+
+pub fn environment_check() -> EnvCheck {
+    let which = |name: &str| {
+        std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
+            .unwrap_or(false)
+    };
+    EnvCheck {
+        platform: std::env::consts::OS,
+        dialog_tool: ["kdialog", "zenity"].into_iter().find(|n| which(n)),
+        opener: ["xdg-open"].into_iter().find(|n| which(n)),
+        toolchains: ["git", "node", "npm", "python3", "cargo"]
+            .into_iter()
+            .map(|n| (n, which(n)))
+            .collect(),
     }
 }
 

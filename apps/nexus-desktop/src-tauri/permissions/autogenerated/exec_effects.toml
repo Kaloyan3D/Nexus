@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-exec-effects"
+description = "Enables the exec_effects command without any pre-configured scope."
+commands.allow = ["exec_effects"]
+
+[[permission]]
+identifier = "deny-exec-effects"
+description = "Denies the exec_effects command without any pre-configured scope."
+commands.deny = ["exec_effects"]

@@ -43,6 +43,9 @@ pub struct JobRecord {
     pub task: String,
     /// Digest/label of the frozen grant the job was started under.
     pub authority: String,
+    /// The project the job runs in (empty for records written before this field existed).
+    #[serde(default)]
+    pub project: String,
     pub started_at_ms: i64,
     pub ended_at_ms: Option<i64>,
     pub exit_code: Option<i32>,
@@ -73,6 +76,8 @@ pub struct JobStart {
     pub display: String,
     pub task: String,
     pub authority: String,
+    /// The project the job runs in; shown with the job, never used for authorization.
+    pub project: String,
     /// Ports the frozen grant allows to expose (`grant.dev_ports`).
     pub authorized_ports: Vec<u16>,
     /// `(sandbox port, requested host port; 0 = ephemeral)` to expose on host loopback.
@@ -225,6 +230,7 @@ impl JobManager {
             display: start.display.clone(),
             task: start.task.clone(),
             authority: start.authority.clone(),
+            project: start.project.clone(),
             started_at_ms: now_ms(),
             ended_at_ms: None,
             exit_code: None,

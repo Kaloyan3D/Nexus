@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-allow-installs"
+description = "Enables the project_allow_installs command without any pre-configured scope."
+commands.allow = ["project_allow_installs"]
+
+[[permission]]
+identifier = "deny-project-allow-installs"
+description = "Denies the project_allow_installs command without any pre-configured scope."
+commands.deny = ["project_allow_installs"]
