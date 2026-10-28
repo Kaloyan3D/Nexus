@@ -79,14 +79,17 @@ pub const MUSE_V1_PRODUCTION_ENABLED: bool = true;
 /// * a coding run of the experimental `muse-v1-signals` engine only: `RepoCodeMuseSignalsV1`
 ///   (`RepoCodeV1` plus `muse_update_reasoning_state`). That id exists only in `test-engines` builds.
 ///
-/// * a coding run of the active `nexus-adaptive-v1` engine (EM-04C2 S6): the same `RepoCodeMuseSignalsV1`
-///   catalog, deliberately by row and not by flag. Its digest is the frozen one; the signals tool is
-///   scoped to Muse engines only.
+/// * a coding run of the active `nexus-adaptive-v1` engine: `RepoCodeAdaptiveJobsV1`
+///   (`RepoCodeMuseSignalsV1` plus the four broker-handled job tools), by exact
+///   id. Conversations whose first run was bound to the signals catalog keep
+///   it (see `inspect` — a conversation never silently switches catalogs);
+///   the historical signals catalog itself is unchanged.
 pub fn tool_catalog_profile(engine_id: &str, code_run: bool) -> nexus_model::ToolProfile {
     use nexus_model::ToolProfile as P;
     match (code_run, engine_id) {
         (false, _) => P::RepoInspectV1,
-        (true, muse_v1::SIGNALS_ENGINE_ID | muse_v1::ACTIVE_ENGINE_ID) => P::RepoCodeMuseSignalsV1,
+        (true, muse_v1::SIGNALS_ENGINE_ID) => P::RepoCodeMuseSignalsV1,
+        (true, muse_v1::ACTIVE_ENGINE_ID) => P::RepoCodeAdaptiveJobsV1,
         (true, muse_v0::JOBS_ENGINE_ID) => P::RepoCodeJobsV1,
         (true, _) => P::RepoCodeV1,
     }

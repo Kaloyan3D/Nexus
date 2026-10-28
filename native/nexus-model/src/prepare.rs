@@ -176,7 +176,8 @@ pub fn prepare(
                     profile @ (crate::request::ToolProfile::RepoInspectV1
                     | crate::request::ToolProfile::RepoCodeV1
                     | crate::request::ToolProfile::RepoCodeJobsV1
-                    | crate::request::ToolProfile::RepoCodeMuseSignalsV1),
+                    | crate::request::ToolProfile::RepoCodeMuseSignalsV1
+                    | crate::request::ToolProfile::RepoCodeAdaptiveJobsV1),
                 ) => serde_json::json!({
                     "model": target.remote_model_id_confirmed,
                     "input": input.items.iter().map(responses_input_item).collect::<Vec<_>>(),

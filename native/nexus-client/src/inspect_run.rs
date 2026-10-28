@@ -393,7 +393,8 @@ pub fn run_inspect_turn(
         // the signals and job tools are broker-handled: the Kernel scope stays repo-code
         ToolProfile::RepoCodeV1
         | ToolProfile::RepoCodeMuseSignalsV1
-        | ToolProfile::RepoCodeJobsV1 => nexus_kernel::SCOPE_REPO_CODE,
+        | ToolProfile::RepoCodeJobsV1
+        | ToolProfile::RepoCodeAdaptiveJobsV1 => nexus_kernel::SCOPE_REPO_CODE,
     };
     if grant.scope != want_scope {
         return Err(ClientError::usage(

@@ -36,10 +36,10 @@ fn the_catalog_follows_the_sealed_engine_identity_and_nothing_else() {
         tool_catalog_profile(muse_v1::SIGNALS_ENGINE_ID, true),
         P::RepoCodeMuseSignalsV1
     );
-    // EM-04C2 S6: the ACTIVE engine has its own row, by exact id (the same frozen catalog)
+    // The ACTIVE engine has its own row, by exact id: Adaptive + Jobs.
     assert_eq!(
         tool_catalog_profile(muse_v1::ACTIVE_ENGINE_ID, true),
-        P::RepoCodeMuseSignalsV1
+        P::RepoCodeAdaptiveJobsV1
     );
     for near in [
         "nexus-adaptive-v1 ",
@@ -101,9 +101,11 @@ fn the_signals_catalog_is_reached_in_production_only_through_the_sealed_adaptive
         P::RepoCodeJobsV1
     );
     assert_eq!(tool_catalog_profile("muse-v0", true), P::RepoCodeV1);
+    // Adaptive + Jobs: the active adaptive engine now carries its own frozen
+    // combined catalog; the experimental signals engine keeps the signals one
     assert_eq!(
         tool_catalog_profile(muse_v1::ACTIVE_ENGINE_ID, true),
-        P::RepoCodeMuseSignalsV1
+        P::RepoCodeAdaptiveJobsV1
     );
     assert!(!prod.contains(&muse_v1::SIGNALS_ENGINE_ID));
     assert!(!prod.contains(&"muse-v1-shadow"));
@@ -132,10 +134,10 @@ fn only_the_sealed_signals_capable_engine_descriptors_carry_the_signals_catalog(
         .map(|e| e.descriptor().engine_id)
         .filter(|id| tool_catalog_profile(id, true) == P::RepoCodeMuseSignalsV1)
         .collect();
-    assert_eq!(
-        signals_capable,
-        [muse_v1::ACTIVE_ENGINE_ID, muse_v1::SIGNALS_ENGINE_ID]
-    );
+    // only the experimental signals engine still maps to the historical
+    // signals catalog; the active adaptive engine carries the combined one,
+    // which still CONTAINS the signals tool (checked in repo_tools)
+    assert_eq!(signals_capable, [muse_v1::SIGNALS_ENGINE_ID]);
     // its descriptor reserves nothing: the tool's real bytes are in every measured request
     assert_eq!(MUSE_V1_SIGNALS.descriptor().request_reserve_bytes, 0);
     assert_eq!(MUSE_V1_ACTIVE.descriptor().request_reserve_bytes, 0);

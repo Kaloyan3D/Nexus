@@ -1272,7 +1272,24 @@ pub(crate) fn run(
             "the run is already bound to another tool catalog, or the binding could not be recorded; nothing was sent",
         )));
     }
-    let signals_run = catalog_profile == nexus_model::ToolProfile::RepoCodeMuseSignalsV1;
+    // Explicit catalog migration (Adaptive + Jobs): a conversation whose
+    // FIRST run was offered the signals catalog keeps that catalog for its
+    // whole life — a conversation never silently switches tool catalogs
+    // mid-history (prompt-cache stability and run-to-run continuity). Only
+    // conversations with no prior catalog binding adopt the new one.
+    let catalog_profile =
+        if catalog_profile == nexus_model::ToolProfile::RepoCodeAdaptiveJobsV1
+            && conversation_bound_to_signals(ctx.b, run_id)
+        {
+            nexus_model::ToolProfile::RepoCodeMuseSignalsV1
+        } else {
+            catalog_profile
+        };
+    let signals_run = matches!(
+        catalog_profile,
+        nexus_model::ToolProfile::RepoCodeMuseSignalsV1
+            | nexus_model::ToolProfile::RepoCodeAdaptiveJobsV1
+    );
     if [
         crate::engine::muse_v1::ENGINE_ID,
         crate::engine::muse_v1::SIGNALS_ENGINE_ID,
@@ -1430,7 +1447,11 @@ pub(crate) fn run(
             expected: expected.clone(),
             ctx_budget,
             signals: signals_run,
-            jobs: catalog_profile == nexus_model::ToolProfile::RepoCodeJobsV1,
+            jobs: matches!(
+                catalog_profile,
+                nexus_model::ToolProfile::RepoCodeJobsV1
+                    | nexus_model::ToolProfile::RepoCodeAdaptiveJobsV1
+            ),
             profile: catalog_profile,
         },
         &mut loop_state,
@@ -1837,6 +1858,32 @@ fn task_binding_continuity(b: &Broker, run_id: &str, issued: &Value) -> Result<(
 
 /// The read-only facts an Engineering Mode extension may see at a hook: the runtime's receipts
 /// and the Controller's classification of the request. No handle, grant, credential, target or
+/// Whether this run's conversation was first bound to the historical
+/// signals catalog (its earliest run carries that catalog digest).
+fn conversation_bound_to_signals(b: &crate::server::Broker, run_id: &str) -> bool {
+    let Some(rec) = b.store.load(run_id) else {
+        return false;
+    };
+    let Some(tid) = rec.run.thread_id.as_deref() else {
+        return false;
+    };
+    let Some(th) = b.threads.load(tid) else {
+        return false;
+    };
+    let Some(first) = th.runs.first() else {
+        return false;
+    };
+    if first.run_id == run_id {
+        return false;
+    }
+    b.store
+        .load(&first.run_id)
+        .and_then(|r| r.tool_catalog_digest)
+        .is_some_and(|d| {
+            d == nexus_model::repo_tools::REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST
+        })
+}
+
 /// path beyond the names of files this run created.
 fn engine_snapshot(
     ls: &LoopState,
@@ -3530,7 +3577,8 @@ fn track_execution_claim(
         act.args_digest.as_deref().unwrap_or(""),
     );
     match act.status.as_str() {
-        "executed" if act.exit_code == Some(0) => {
+        // a job_start has no exit code: broker-executed means the job exists
+        "executed" if call.name == "job_start" || act.exit_code == Some(0) => {
             ls.unexecuted.remove(&key);
             if is_verification_command(&call.arguments) {
                 return;
