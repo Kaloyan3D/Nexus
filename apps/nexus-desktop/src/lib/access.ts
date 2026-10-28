@@ -102,12 +102,13 @@ export function needsOf(run: IntentRun | null | undefined, project: ProjectView 
   const acts = run.toolActivity ?? [];
   const a = accessOf(project);
   const out: Need[] = [];
-  const startedLater = (i: number) => acts.slice(i + 1).some((x) => x.tool === "job_start" && x.status === "executed");
+  const startedLater = (i: number, ports?: number[]) =>
+    acts.slice(i + 1).some((x) => x.tool === "job_start" && x.status === "executed" && (!ports || ports.every((p) => (x.requestedPorts ?? []).includes(p))));
   acts.forEach((t, i) => {
     if (t.tool === "job_start" && t.status === "refused") {
       if (t.errorCode === "dev-port-not-authorized") {
         const missing = (t.requestedPorts ?? []).filter((p) => !a.previewPorts.includes(p));
-        if (missing.length > 0 && !startedLater(i) && !out.some((n) => n.kind === "preview-port" && missing.every((p) => n.ports.includes(p)))) {
+        if (missing.length > 0 && !startedLater(i, missing) && !out.some((n) => n.kind === "preview-port" && missing.every((p) => n.ports.includes(p)))) {
           out.push({ kind: "preview-port", ports: missing, command: t.argsSummary });
         }
       } else if (t.errorCode && NO_GRANT_CODES.has(t.errorCode) && !a.previewsPossible && !startedLater(i) && !out.some((n) => n.kind === "work")) {

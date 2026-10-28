@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { accessOf, accessSentence, isInstallCommand, needsOf, parsePreviewPorts } from "../lib/access";
-import type { IntentRun, ProjectView, ToolActivity } from "../lib/contracts";
+import type { IntentRun, JobView, ProjectView, ToolActivity } from "../lib/contracts";
+import { jobStateView } from "../features/jobs/useJobs";
 import { fakeRun } from "./fakeApi";
 
 function project(over: Partial<ProjectView> = {}): ProjectView {
@@ -72,6 +73,8 @@ describe("what a run asked for and was not allowed", () => {
   it("is gone once the permissions cover the port, or a later start worked", () => {
     expect(needsOf(run([refusedPort]), direct(grant({ devPorts: [5173] })))).toEqual([]);
     expect(needsOf(run([refusedPort, act({ index: 2, status: "executed", requestedPorts: [5173] })]), direct(grant()))).toEqual([]);
+    // a later start WITHOUT the port (seen live: the model started the server after the refusal, with no preview) still needs the request
+    expect(needsOf(run([refusedPort, act({ index: 2, status: "executed", requestedPorts: [] })]), direct(grant()))).toHaveLength(1);
     // permissions that ended do not cover anything
     expect(needsOf(run([refusedPort]), direct(grant({ status: "revoked", devPorts: [5173] })))).toHaveLength(1);
   });
@@ -101,5 +104,14 @@ describe("what a run asked for and was not allowed", () => {
     expect(needsOf(null, project())).toEqual([]);
     expect(needsOf(run([refusedPort]), undefined)).toEqual([]);
     expect(needsOf(run([]), project())).toEqual([]);
+  });
+});
+
+describe("a running process's state in words", () => {
+  const job = (o: Partial<JobView>): JobView => ({ jobId: "j", state: "running", command: "npm start", task: "t", startedAtMs: 0, exposed: [], ready: false, logBytes: 0, logTruncated: false, ...o });
+  it("is Running when nothing is exposed (seen live: it said Starting… forever), Starting… only while a preview port is not answering yet", () => {
+    expect(jobStateView(job({})).label).toBe("Running");
+    expect(jobStateView(job({ exposed: [{ port: 5173, hostPort: 40000, url: "http://127.0.0.1:40000" }] })).label).toBe("Starting…");
+    expect(jobStateView(job({ exposed: [{ port: 5173, hostPort: 40000, url: "http://127.0.0.1:40000" }], ready: true })).label).toBe("Running");
   });
 });

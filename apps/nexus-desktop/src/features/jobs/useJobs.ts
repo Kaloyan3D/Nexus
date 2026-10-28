@@ -43,7 +43,8 @@ export type JobTone = "success" | "warning" | "error" | "neutral";
 export function jobStateView(j: JobView): { label: string; tone: JobTone; running: boolean } {
   switch (j.state) {
     case "running":
-      return j.ready ? { label: "Running", tone: "success", running: true } : { label: "Starting…", tone: "warning", running: true };
+      // a process with nothing exposed has nothing to wait for: it is simply running (no preview address)
+      return j.ready || j.exposed.length === 0 ? { label: "Running", tone: "success", running: true } : { label: "Starting…", tone: "warning", running: true };
     case "stopped":
       return { label: "Stopped", tone: "neutral", running: false };
     case "exited":
