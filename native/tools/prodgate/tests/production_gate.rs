@@ -213,16 +213,26 @@ fn the_frozen_tool_catalog_digests_are_the_pinned_ones() {
     );
     assert!(rt::frozen_catalog_digest(P::RepoInspectV1).starts_with("b06d9c9f"));
     assert!(rt::frozen_catalog_digest(P::RepoCodeMuseSignalsV1).starts_with("7c7c9bc1"));
-    for p in [P::RepoCodeV1, P::RepoInspectV1, P::RepoCodeMuseSignalsV1] {
+    // the unified Adaptive+Jobs catalog is a new frozen profile; history unchanged above
+    assert!(rt::frozen_catalog_digest(P::RepoCodeAdaptiveJobsV1).starts_with("d8650029"));
+    assert!(rt::frozen_catalog_digest(P::RepoCodeJobsV1).starts_with("18168580"));
+    for p in [
+        P::RepoCodeV1,
+        P::RepoInspectV1,
+        P::RepoCodeMuseSignalsV1,
+        P::RepoCodeJobsV1,
+        P::RepoCodeAdaptiveJobsV1,
+    ] {
         assert!(
             rt::verify_catalog(p),
             "{p:?}: this build offers exactly its frozen bytes"
         );
     }
-    // the adaptive engine's row exists, by exact id only
+    // the adaptive engine's row exists, by exact id only: the unified
+    // Adaptive+Jobs catalog (existing conversations keep signals, broker-side)
     assert_eq!(
         engine::tool_catalog_profile("nexus-adaptive-v1", true),
-        P::RepoCodeMuseSignalsV1
+        P::RepoCodeAdaptiveJobsV1
     );
     assert_eq!(
         engine::tool_catalog_profile("nexus-adaptive-v1 ", true),
