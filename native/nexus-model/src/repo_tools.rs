@@ -82,13 +82,15 @@ pub fn tool_id_for_profile(
     match profile {
         P::RepoInspectV1 => tool_id_for(model_name),
         // the signals and job tools are broker-handled: they have no Kernel tool id
-        P::RepoCodeV1 | P::RepoCodeMuseSignalsV1 | P::RepoCodeJobsV1 | P::RepoCodeAdaptiveJobsV1 => tool_id_for(model_name)
-            .or_else(|| {
-                CODE_EXTRA
-                    .iter()
-                    .find(|t| t.model_name == model_name)
-                    .map(|t| t.tool_id)
-            }),
+        P::RepoCodeV1
+        | P::RepoCodeMuseSignalsV1
+        | P::RepoCodeJobsV1
+        | P::RepoCodeAdaptiveJobsV1 => tool_id_for(model_name).or_else(|| {
+            CODE_EXTRA
+                .iter()
+                .find(|t| t.model_name == model_name)
+                .map(|t| t.tool_id)
+        }),
     }
 }
 
@@ -395,16 +397,34 @@ mod tests {
             "d8650029799af93456f31c0c9b42cafeab46afc88490ada1197ed50105a87ecd"
         );
         // historical catalogs are byte-identical to their frozen identities
-        assert_eq!(catalog_digest_for(P::RepoInspectV1), REPO_INSPECT_V1_CATALOG_DIGEST);
-        assert_eq!(catalog_digest_for(P::RepoCodeV1), REPO_CODE_V1_CATALOG_DIGEST);
+        assert_eq!(
+            catalog_digest_for(P::RepoInspectV1),
+            REPO_INSPECT_V1_CATALOG_DIGEST
+        );
+        assert_eq!(
+            catalog_digest_for(P::RepoCodeV1),
+            REPO_CODE_V1_CATALOG_DIGEST
+        );
         assert_eq!(
             catalog_digest_for(P::RepoCodeMuseSignalsV1),
             REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST
         );
-        assert_eq!(catalog_digest_for(P::RepoCodeJobsV1), REPO_CODE_JOBS_V1_CATALOG_DIGEST);
+        assert_eq!(
+            catalog_digest_for(P::RepoCodeJobsV1),
+            REPO_CODE_JOBS_V1_CATALOG_DIGEST
+        );
         // the signals and job tools stay broker-handled under the new profile
-        for name in ["job_start", "job_status", "job_logs", "job_stop", MUSE_SIGNALS_TOOL] {
-            assert!(tool_id_for_profile(P::RepoCodeAdaptiveJobsV1, name).is_none(), "{name}");
+        for name in [
+            "job_start",
+            "job_status",
+            "job_logs",
+            "job_stop",
+            MUSE_SIGNALS_TOOL,
+        ] {
+            assert!(
+                tool_id_for_profile(P::RepoCodeAdaptiveJobsV1, name).is_none(),
+                "{name}"
+            );
         }
         // measured provider overhead of adding jobs to the adaptive catalog:
         // exactly the four job definitions, nothing else moved
