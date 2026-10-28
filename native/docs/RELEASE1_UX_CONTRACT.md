@@ -1,7 +1,7 @@
 # Release 1 — UX contract
 
 Principle: Nexus is simple to use *because* the machinery underneath is strict, not despite it. A person never has
-to open a terminal (one declared exception, below), edit a file, set a variable or learn what a grant, port list,
+to open a terminal, edit a file, set a variable or learn what a grant, port list,
 tool profile or sandbox is. Every authority change is a native system dialog showing the broker's exact text.
 
 ## 1. Information architecture
@@ -31,7 +31,9 @@ No model, route, request-mode, path, limit, digest or approval control exists in
 3. **Inspect** — result word (Verified / Not verified / Failed / Refused / Stopped / Unavailable) + the evidence
    behind it (commands with exit codes, changed files, diff). The model's own claim is never the source.
 4. **Recover** — Evidence & recovery → what each command changed → **Review recovery…** (changes nothing) →
-   **Restore N files…** → system dialog with the exact outcome → result counts. Conflicts are left alone.
+   **Restore N files…** → system dialog with the exact outcome → result counts. The same panel offers
+   **Restore changes…** for the files Nexus itself edited or created. Files you changed afterwards (conflicts)
+   are left exactly as they are; files Nexus created are removed only while they are still unchanged.
 5. **Stop / resume** — Stop cancels the run; Resume (broker-decided, with a stated reason when not allowed) continues it.
 6. **Revoke** — Projects → *Stop allowing* previews, or Advanced → Revoke: running servers stop; running tasks lose the permission.
 
@@ -60,9 +62,12 @@ Rules the UI and native layer enforce (each has a test):
 
 - "Verified" is only said when a recorded command passed in the project. A run cancelled after a passing test says
   *Last test command passed*, under **Stopped**.
-- Direct edits: "Nexus keeps the original of every file it changes (30 days) … cannot put edited files back with
-  one click yet." No promise of a universal undo anywhere.
-- Ask-before-each-action requires a separate terminal approver; the project shows a warning and how to switch to automatic.
+- Direct edits: "Nexus keeps the original of every file it changes (30 days) … you can restore its changes from a run's
+  details; files you changed since are left alone. It is not an undo for everything." No promise of a universal undo
+  anywhere; dependency/build folders, Git, downloads and anything outside the project are never claimed recoverable.
+- Ask-before-each-action is **not offered** in Release 1 (nothing in the application could answer it). A project that
+  already asks shows why and a one-click, natively confirmed switch to automatic approval. The project-level consent
+  dialogs remain the authority.
 - Capabilities the machine lacks are shown disabled **with the reason** (sandbox, network gatekeeper, approver).
 
 ## 5. Accessibility and layout
