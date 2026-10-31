@@ -6,6 +6,7 @@
 //! sent). No real provider, credential or network.
 #![allow(dead_code)]
 
+mod common;
 use nexus_broker::{BrokerConfig, BrokerHandle, WorkspaceSpec};
 use nexus_client::intent_client as ic;
 use nexus_client::intent_contract::{IntentLimits, NexusIntentV1, ResponseMode};
@@ -36,15 +37,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn native_bin(name: &str) -> PathBuf {
-    // a build in a custom target directory (CI, the Nexus sandbox) is where cargo put the binaries
-    if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR") {
-        return PathBuf::from(dir).join("debug").join(name);
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("target")
-        .join("debug")
-        .join(name)
+    common::native_bin(name)
 }
 
 fn node_json(args: &[&str]) -> serde_json::Value {
@@ -924,6 +917,8 @@ impl Fx {
             project_snapshots: None,
             context_budget_bytes: None,
             request_budget_bytes: None,
+            verification_shadow: true,
+            verification_feedback: Default::default(),
         }
     }
 
@@ -1452,6 +1447,10 @@ fn git_out(dir: &Path, args: &[&str]) -> String {
 /// the tests, sees them FAIL, diagnoses from the failure output, corrects,
 /// re-runs, then summarizes.
 fn fix_loop_responder() -> Responder {
+    fix_loop_responder_with(r#"{"program":"cargo","args":["test","--offline"]}"#)
+}
+
+fn fix_loop_responder_with(test_cmd: &'static str) -> Responder {
     Arc::new(|n, body| {
         let resp = format!("resp_{n}");
         let out = last_output(body);
@@ -1484,13 +1483,7 @@ fn fix_loop_responder() -> Responder {
             3 => {
                 let o = out.expect("edit output");
                 assert_ne!(o["status"], "refused", "{o}");
-                Answer::Frames(call_frames(
-                    &resp,
-                    n,
-                    "c_test1",
-                    "proc_run",
-                    r#"{"program":"cargo","args":["test","--offline"]}"#,
-                ))
+                Answer::Frames(call_frames(&resp, n, "c_test1", "proc_run", test_cmd))
             }
             4 => {
                 let o = out.expect("test output");
@@ -1507,13 +1500,7 @@ fn fix_loop_responder() -> Responder {
                 let args = json!({"path": "src/lib.rs", "edits": [{"oldText": "a * b", "newText": "a + b"}]}).to_string();
                 Answer::Frames(call_frames(&resp, n, "c_edit2", "fs_edit", &args))
             }
-            5 => Answer::Frames(call_frames(
-                &resp,
-                n,
-                "c_test2",
-                "proc_run",
-                r#"{"program":"cargo","args":["test","--offline"]}"#,
-            )),
+            5 => Answer::Frames(call_frames(&resp, n, "c_test2", "proc_run", test_cmd)),
             _ => {
                 let o = out.expect("final test output");
                 assert_eq!(o["verification"], "pass", "{o}");
@@ -6256,8 +6243,15 @@ fn open_managed_project(fx: &Fx, sock: &Path, folder: &Path) -> String {
         .to_owned()
 }
 
+thread_local! {
+    /// Phase 05: the feedback policy the NEXT `managed_broker` of this test thread starts with.
+    static MANAGED_FEEDBACK: std::cell::Cell<nexus_broker::verification::feedback::FeedbackPolicy> =
+        const { std::cell::Cell::new(nexus_broker::verification::feedback::FeedbackPolicy::Observe) };
+}
+
 fn managed_broker(fx: &Fx, name: &str) -> BrokerHandle {
     let mut c = fx.config(name);
+    c.verification_feedback = MANAGED_FEEDBACK.with(|p| p.get());
     c.code_sources = Vec::new();
     c.project_registry = Some((
         fx.reg_dir.clone().unwrap(),
@@ -21975,4 +21969,1953 @@ fn rel2_adaptive_runs_well_past_a_hundred_turns_with_a_stable_body_and_the_froze
         );
     }
     b.shutdown();
+}
+
+// ─── Verification Engine Phase 01/02: shadow evidence ledger ────────────────
+
+/// Run the real edit/test(fail)/edit/test(pass) loop and check the shadow ledger the Core wrote.
+/// Engine-agnostic: the same recorder serves every Engineering Mode.
+fn verification_shadow_checks(fx: &Fx, b: &BrokerHandle, name: &str, key: &str) {
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent("Fix the failing add test in this crate.", key, |_| {}),
+        240,
+    );
+    assert!(run.terminal, "{run:?}");
+    let bodies = fx.provider.bodies.lock().unwrap().clone();
+    let state_dir = fx.tmp.path().join(format!("broker-{name}"));
+    let loaded = nexus_broker::verification::persistence::load(&state_dir, &run.run_id);
+    assert!(loaded.is_intact(), "{:?}", loaded.unreadable);
+    let recs = loaded.ledger.records();
+    // the ledger never reaches the model: none of its ids appears in any provider request
+    for body in &bodies {
+        let text = body.to_string();
+        assert!(recs.iter().all(|r| !text.contains(&r.evidence_id)));
+    }
+    use nexus_broker::verification::evidence::{CheckOutcome, ExecutionState, ObservationKind};
+    // plus the run-end boundary record (Phase 03), which is not a tool call
+    assert_eq!(recs.len(), 5, "{recs:#?}");
+    assert_eq!(recs[4].kind, ObservationKind::RunBoundary);
+    let all = recs;
+    let recs: Vec<_> = all
+        .iter()
+        .filter(|r| r.kind != ObservationKind::RunBoundary)
+        .copied()
+        .collect();
+    // 2 edits + 2 test runs; the reads are not verification-relevant
+    assert_eq!(recs.len(), 4, "{recs:#?}");
+    let kinds: Vec<_> = recs.iter().map(|r| r.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ObservationKind::FileMutation,
+            ObservationKind::Command,
+            ObservationKind::FileMutation,
+            ObservationKind::Command
+        ]
+    );
+    for (r, a) in recs.iter().zip(
+        run.tool_activity
+            .iter()
+            .filter(|a| matches!(a.tool.as_str(), "fs_edit" | "fs_write" | "proc_run")),
+    ) {
+        assert_eq!(r.run_id, run.run_id);
+        assert_eq!(r.task_instance_id, run.task_instance_id);
+        assert_eq!(r.receipt.execution_id, a.execution_id);
+        assert_eq!(r.receipt.journal_seq, a.journal_seq);
+        assert_eq!(r.receipt.args_digest, a.args_digest);
+        assert!(r.receipt.execution_id.is_some());
+    }
+    // a failing test is an executed process with a failed check, not a tool error
+    assert_eq!(recs[1].execution, ExecutionState::Executed);
+    assert_eq!(
+        recs[1].check.as_ref().unwrap().outcome,
+        CheckOutcome::ProcessFailed
+    );
+    assert_eq!(
+        recs[3].check.as_ref().unwrap().outcome,
+        CheckOutcome::ProcessExitedZero
+    );
+    assert_eq!(loaded.ledger.check_exit_zero_count(), 1);
+    assert_eq!(
+        recs[0].mutation.as_ref().unwrap().post_sha256,
+        run.tool_activity[2].post_sha256
+    );
+    // restart / replay: opening the run's recorder again adds nothing
+    let again = nexus_broker::verification::ShadowRecorder::new(&state_dir, &run.run_id, true);
+    assert_eq!(again.len(), 5);
+    // the durable log holds no command text or output
+    let raw = std::fs::read_to_string(
+        state_dir
+            .join("verification")
+            .join(format!("{}.jsonl", run.run_id)),
+    )
+    .unwrap();
+    assert!(
+        !raw.contains("cargo test") && !raw.contains("--offline") && !raw.contains("stdout"),
+        "{raw}"
+    );
+}
+
+#[test]
+fn verification_shadow_ledger_records_the_default_engine_run() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture(fix_loop_responder());
+    let _appr = Approver::start(&fx, approve_all());
+    let b = fx.start("vshadow-default");
+    verification_shadow_checks(&fx, &b, "vshadow-default", "vshadow-default-0001");
+}
+
+#[test]
+fn verification_shadow_ledger_is_shared_by_a_different_engineering_mode() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_engine(fix_loop_responder(), "muse-v1-shadow");
+    let b = em04a_broker(&fx, "vshadow-engine", None, None);
+    verification_shadow_checks(&fx, &b, "vshadow-engine", "vshadow-engine-0001");
+}
+
+// ─── Verification Engine: the shadow recorder changes nothing (differential) ─
+
+/// Everything a user, the model, an Engine or the Kernel could observe about one run, with the
+/// run-specific identifiers replaced by stable placeholders.
+struct Observed {
+    run: Value,
+    bodies: Vec<String>,
+    requests: usize,
+    engine: Value,
+    ledger_records: usize,
+    /// The verification summary the owner-visible run carried (Phase 04), if any.
+    summary: Option<ic::VerificationSummary>,
+    /// The `tools` of every provider request, untouched (the catalog the model was offered).
+    tools: Vec<Value>,
+    /// Feedback journal (stage names in order) and the run's state dir.
+    journal: Vec<(String, String)>,
+    state_dir: PathBuf,
+    /// Byte counts that include rendered wall-clock durations ("0.9s" vs "0.10s"): compared with
+    /// a small tolerance instead of exactly (the text itself is compared above).
+    timed_bytes: Vec<i64>,
+}
+
+/// The only legitimate run-to-run noise: wall-clock durations printed by cargo and the Kernel
+/// (`finished in 0.32s`, `"wallMs":412`). Everything else must match byte for byte.
+fn vs_strip_timing(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < b.len() {
+        let rest = &s[i..];
+        let digits = |from: usize| {
+            rest.as_bytes()[from..]
+                .iter()
+                .take_while(|c| c.is_ascii_digit())
+                .count()
+        };
+        if rest.starts_with("in ") && rest.as_bytes().get(3).is_some_and(u8::is_ascii_digit) {
+            let a = digits(3);
+            if rest.as_bytes().get(3 + a) == Some(&b'.') {
+                let f = digits(4 + a);
+                if rest.as_bytes().get(4 + a + f) == Some(&b's') {
+                    out.push_str("in <T>s");
+                    i += 5 + a + f;
+                    continue;
+                }
+            }
+        }
+        if let Some(r) = rest.strip_prefix("wallMs\\\":") {
+            let n = r.bytes().take_while(u8::is_ascii_digit).count();
+            out.push_str("wallMs\\\":<N>");
+            i += (rest.len() - r.len()) + n;
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// The same fix loop (the `cargo test` argument policy forbids filters, so the project itself has
+/// a single test) and request bodies can be compared byte for byte.
+fn vs_responder() -> Responder {
+    fix_loop_responder_with(r#"{"program":"cargo","args":["test","--offline"]}"#)
+}
+
+/// One test in the project, so the command's output (order of tests, thread ids) is deterministic.
+fn vs_one_test(repo: &Path) {
+    std::fs::write(
+        repo.join("tests/add.rs"),
+        "#[test]\nfn adds_positive_numbers() {\n    assert_eq!(calc::add(2, 3), 5);\n}\n",
+    )
+    .unwrap();
+}
+
+fn vs_run(engine: Option<&str>, shadow: bool, key: &str) -> Observed {
+    vs_run_with(
+        engine,
+        shadow,
+        nexus_broker::verification::feedback::FeedbackPolicy::Observe,
+        vs_responder(),
+        key,
+    )
+}
+
+fn vs_run_with(
+    engine: Option<&str>,
+    shadow: bool,
+    policy: nexus_broker::verification::feedback::FeedbackPolicy,
+    responder: Responder,
+    key: &str,
+) -> Observed {
+    let fx = match engine {
+        Some(e) => fixture_engine_with(responder, e, Box::new(vs_one_test)),
+        None => fixture_with(responder, Box::new(vs_one_test)),
+    };
+    let _appr = engine
+        .is_none()
+        .then(|| Approver::start(&fx, approve_all()));
+    let name = format!("vdiff-{}", if shadow { "on" } else { "off" });
+    let mut c = fx.config(&name);
+    c.verification_shadow = shadow;
+    c.verification_feedback = policy;
+    if engine.is_some() {
+        c.code_sources = Vec::new();
+        c.project_registry = Some((
+            fx.reg_dir.clone().unwrap(),
+            nexus_tools::registry::Trust::default(),
+        ));
+        c.interactive = true;
+    }
+    let state_dir = c.state_dir.clone();
+    let b = nexus_broker::start(c).expect("broker starts");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent("Fix the failing add test in this crate.", key, |_| {}),
+        240,
+    );
+    assert!(run.terminal, "{run:?}");
+    let task = run.task_instance_id.clone().unwrap();
+    let engine_v = if engine.is_some() {
+        let _ = em03_state_settled(&fx, &name, &task);
+        ic::engine_summary(b.socket_path(), &run.run_id).unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    let ids: Vec<String> = [
+        Some(run.run_id.clone()),
+        Some(task.clone()),
+        run.attempt_id.clone(),
+        run.conversation_id.clone(),
+        run.command_id.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let tmp = fx.tmp.path().to_string_lossy().into_owned();
+    let norm = |s: String| -> String {
+        let mut s = vs_strip_timing(&s.replace(&tmp, "<TMP>"));
+        for (i, id) in ids.iter().enumerate() {
+            s = s.replace(id.as_str(), &format!("<ID{i}>"));
+        }
+        s
+    };
+    let summary = run.verification.clone();
+    let mut rv = serde_json::to_value(&run).unwrap();
+    // the summary exists only when the recorder is on: compared separately, not as run noise
+    rv.as_object_mut().unwrap().remove("verification");
+    for k in [
+        "createdAtMs",
+        "updatedAtMs",
+        "latencyMs",
+        "firstTokenMs",
+        "providerRequestId",
+        "worktreeCommit",
+        "approvalId",
+    ] {
+        rv.as_object_mut().unwrap().remove(k);
+    }
+    let mut timed_bytes = vec![rv["toolResultBytes"].as_i64().unwrap_or(-1)];
+    rv.as_object_mut().unwrap().remove("toolResultBytes");
+    if let Some(a) = rv.get_mut("toolActivity").and_then(|a| a.as_array_mut()) {
+        for t in a {
+            for k in ["executionId", "approvalId"] {
+                t.as_object_mut().unwrap().remove(k);
+            }
+            // a command's result digest covers its rendered output, which holds wall-clock
+            // durations (normalized in the request bodies above, compared there)
+            if t["tool"] == "proc_run" {
+                timed_bytes.push(t["resultBytes"].as_i64().unwrap_or(-1));
+                t.as_object_mut().unwrap().remove("resultDigest");
+                t.as_object_mut().unwrap().remove("resultBytes");
+            }
+        }
+    }
+    let bodies = fx
+        .provider
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| norm(b.to_string()))
+        .collect();
+    let requests = fx.provider.accepted.load(Ordering::SeqCst);
+    let tools: Vec<Value> = fx
+        .provider
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| b["tools"].clone())
+        .collect();
+    let journal = nexus_broker::verification::feedback::load_journal(&state_dir, &run.run_id)
+        .entries
+        .iter()
+        .map(|e| {
+            (
+                e.key.clone(),
+                serde_json::to_value(e.stage)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            )
+        })
+        .collect();
+    let ledger_records = nexus_broker::verification::persistence::load(&state_dir, &run.run_id)
+        .ledger
+        .len();
+    Observed {
+        run: serde_json::from_str(&norm(rv.to_string())).unwrap(),
+        bodies,
+        requests,
+        engine: serde_json::from_str(&norm(engine_v.to_string())).unwrap(),
+        ledger_records,
+        summary,
+        tools,
+        journal,
+        state_dir: state_dir.clone(),
+        timed_bytes,
+    }
+}
+
+fn vs_diff(path: &str, a: &Value, b: &Value, out: &mut Vec<String>) {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            for k in x.keys().chain(y.keys().filter(|k| !x.contains_key(*k))) {
+                vs_diff(
+                    &format!("{path}/{k}"),
+                    x.get(k).unwrap_or(&Value::Null),
+                    y.get(k).unwrap_or(&Value::Null),
+                    out,
+                );
+            }
+        }
+        (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
+            for (i, (p, q)) in x.iter().zip(y).enumerate() {
+                vs_diff(&format!("{path}/{i}"), p, q, out);
+            }
+        }
+        _ if a != b => out.push(format!("{path}: on={a} off={b}")),
+        _ => {}
+    }
+}
+
+fn vs_assert_identical(on: &Observed, off: &Observed) {
+    // not vacuous: the loop really ran (an engine may end it differently, but identically)
+    assert_eq!(on.run["toolCalls"], 6, "{}", on.run);
+    assert_eq!(on.run["lastTestVerification"], "pass", "{}", on.run);
+    assert!(on.ledger_records > 0, "the enabled run recorded evidence");
+    assert_eq!(off.ledger_records, 0, "the disabled run recorded nothing");
+    assert!(on.summary.is_some(), "the enabled run reports verification");
+    assert!(off.summary.is_none(), "the disabled run reports none");
+    assert_eq!(on.requests, off.requests, "provider request count");
+    assert_eq!(on.bodies.len(), off.bodies.len());
+    for (i, (a, b)) in on.bodies.iter().zip(&off.bodies).enumerate() {
+        if a != b {
+            let at = a
+                .bytes()
+                .zip(b.bytes())
+                .position(|(x, y)| x != y)
+                .unwrap_or(a.len().min(b.len()));
+            let lo = at.saturating_sub(120);
+            panic!(
+                "provider request body {i} differs at byte {at}:\n on: {}\noff: {}",
+                &a[lo..(at + 160).min(a.len())],
+                &b[lo..(at + 160).min(b.len())]
+            );
+        }
+    }
+    assert_eq!(on.timed_bytes.len(), off.timed_bytes.len());
+    for (a, b) in on.timed_bytes.iter().zip(&off.timed_bytes) {
+        assert!((a - b).abs() <= 8, "timed byte counts {a} vs {b}");
+    }
+    let mut d = Vec::new();
+    vs_diff("run", &on.run, &off.run, &mut d);
+    vs_diff("engine", &on.engine, &off.engine, &mut d);
+    assert!(d.is_empty(), "differences:\n{}", d.join("\n"));
+}
+
+#[test]
+fn verification_shadow_is_non_interfering_default_engine() {
+    if !sandbox_ready() {
+        return;
+    }
+    let on = vs_run(None, true, "vdiff-default-0001");
+    let off = vs_run(None, false, "vdiff-default-0001");
+    eprintln!(
+        "default: state={} requests={}",
+        on.run["state"], on.requests
+    );
+    vs_assert_identical(&on, &off);
+}
+
+#[test]
+fn verification_shadow_is_non_interfering_muse_v1_shadow() {
+    if !sandbox_ready() {
+        return;
+    }
+    let on = vs_run(Some("muse-v1-shadow"), true, "vdiff-muse-0000001");
+    let off = vs_run(Some("muse-v1-shadow"), false, "vdiff-muse-0000001");
+    eprintln!(
+        "muse-v1-shadow: state={} stop={} completion={} requests={}",
+        on.run["state"], on.run["stopReason"], on.run["completion"], on.requests
+    );
+    vs_assert_identical(&on, &off);
+}
+
+// ─── Verification Engine Phase 03: target identity and freshness, real path ─
+
+fn p3_ledger(state: &Path, run: &ic::IntentRun) -> nexus_broker::verification::ledger::Ledger {
+    let l = nexus_broker::verification::persistence::load(state, &run.run_id);
+    assert!(l.is_intact(), "{:?}", l.unreadable);
+    l.ledger
+}
+
+/// Real edit -> failing test -> edit -> passing test through the Kernel, sandbox and daemon: the
+/// earlier results are stale after the edit, the rerun is current, and the daemon's own end-of-run
+/// change set (read from the same `worktree-diff` finalization already makes) agrees with the receipts.
+#[test]
+fn verification_phase03_isolated_freshness_follows_the_real_receipts() {
+    use nexus_broker::verification::freshness::{self, Freshness};
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture(fix_loop_responder());
+    let _appr = Approver::start(&fx, approve_all());
+    let b = fx.start("p3-iso");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent(
+            "Fix the failing add test in this crate.",
+            "p3-iso-0000000001",
+            |_| {},
+        ),
+        240,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let ledger = p3_ledger(&fx.tmp.path().join("broker-p3-iso"), &run);
+    let rep = freshness::report(&ledger);
+    assert_eq!(rep.len(), 2, "two trusted check results: {rep:#?}");
+    // the failing test ran before the second edit: still a recorded failure, no longer current
+    assert_eq!(rep[0].original_result, "process-failed");
+    assert!(
+        matches!(rep[0].freshness, Freshness::Stale { .. }),
+        "{}",
+        rep[0]
+    );
+    // the rerun passed on the final source
+    assert_eq!(rep[1].original_result, "process-exited-zero");
+    assert_eq!(rep[1].freshness, Freshness::Current, "{}", rep[1]);
+    assert_eq!(rep[1].recorded_target, rep[1].current_target);
+    // the daemon's change set explained by receipts: one file, nothing unexplained
+    let b = ledger
+        .records()
+        .into_iter()
+        .find_map(|r| r.boundary.clone())
+        .expect("run boundary record");
+    assert!(b.cross_check, "{b:?}");
+    assert_eq!((b.changed_paths, b.unreceipted_paths), (1, 0));
+    assert!(b.diff_digest.is_some());
+    // targets name the daemon's snapshot commit and say the workspace is the isolated copy
+    let t = ledger.records()[0].target.clone().unwrap();
+    assert_eq!(
+        serde_json::to_value(t.workspace.kind).unwrap(),
+        json!("isolated")
+    );
+    assert_eq!(t.workspace.baseline_commit, run.worktree_commit);
+    assert!(t.workspace.baseline_commit.is_some());
+}
+
+/// A file written into the daemon-owned working copy by something other than the Kernel's tools,
+/// between two checks: the final change set holds a path no receipt explains, so the later check is
+/// NOT reported current (and the earlier one is stale by the receipted edit).
+#[test]
+fn verification_phase03_an_external_write_during_the_run_is_never_current() {
+    use nexus_broker::verification::freshness::{self, Freshness};
+    if !sandbox_ready() {
+        return;
+    }
+    let wt_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    let inner = fix_loop_responder();
+    let r2 = wt_root.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        if n == 4 {
+            // after the first test, before the second edit: an outside writer
+            if let Some(root) = r2.lock().unwrap().clone() {
+                if let Some(wc) = std::fs::read_dir(&root).ok().and_then(|d| {
+                    d.flatten()
+                        .map(|e| e.path())
+                        .find(|p| p.join(".git").exists())
+                }) {
+                    std::fs::write(wc.join("sneaky.txt"), "not from a tool\n").unwrap();
+                }
+            }
+        }
+        inner(n, body)
+    });
+    let fx = fixture(responder);
+    *wt_root.lock().unwrap() = Some(fx.worktrees.clone());
+    let _appr = Approver::start(&fx, approve_all());
+    let b = fx.start("p3-ext");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent(
+            "Fix the failing add test in this crate.",
+            "p3-ext-0000000001",
+            |_| {},
+        ),
+        240,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let ledger = p3_ledger(&fx.tmp.path().join("broker-p3-ext"), &run);
+    let rep = freshness::report(&ledger);
+    assert_eq!(rep.len(), 2, "{rep:#?}");
+    assert!(matches!(rep[0].freshness, Freshness::Stale { .. }));
+    assert!(
+        matches!(&rep[1].freshness, Freshness::Indeterminate { reason } if reason.contains("no-receipt-explains")),
+        "an unexplained outside write must not leave the later check current: {}",
+        rep[1]
+    );
+    let bnd = ledger
+        .records()
+        .into_iter()
+        .find_map(|r| r.boundary.clone())
+        .unwrap();
+    assert_eq!(
+        (bnd.changed_paths, bnd.unreceipted_paths),
+        (2, 1),
+        "{bnd:?}"
+    );
+}
+
+/// Direct Workspace: the project's real folder has other possible writers, so the Core never claims
+/// currency from equal identities; a receipted edit after a check still proves it stale. The daemon's
+/// copy-diff is not available there, and that is recorded, not guessed.
+#[test]
+fn verification_phase03_direct_workspace_is_never_current_but_edits_still_stale() {
+    use nexus_broker::verification::freshness::{self, Freshness};
+    if !sandbox_ready() {
+        return;
+    }
+    let env = direct_env("p3-direct", move |_cell| {
+        Arc::new(move |n, body| {
+            let resp = format!("resp_{n}");
+            let call = |id: &str, name: &str, args: &str| {
+                Answer::Frames(call_frames(&resp, n, id, name, args))
+            };
+            let test = r#"{"program":"cargo","args":["test","--offline"]}"#;
+            match tool_calls_done(body) {
+                0 => call("c0", "fs_edit", &lib_edit()),
+                1 => call("c1", "proc_run", test),
+                2 => call(
+                    "c2",
+                    "fs_write",
+                    r#"{"path":"docs/NEW.md","mode":"create","content":"x\n"}"#,
+                ),
+                3 => call("c3", "proc_run", test),
+                _ => Answer::Frames(text_frames(&resp, "Done.")),
+            }
+        })
+    });
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(&env, "Fix the failing add test.", "p3-direct-00000001"),
+        300,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.workspace_kind.as_deref(), Some("direct"));
+    let ledger = p3_ledger(&env.fx.tmp.path().join("broker-p3-direct"), &run);
+    let rep = freshness::report(&ledger);
+    assert_eq!(rep.len(), 2, "{rep:#?}");
+    assert!(
+        matches!(rep[0].freshness, Freshness::Stale { .. }),
+        "{}",
+        rep[0]
+    );
+    assert!(
+        matches!(&rep[1].freshness, Freshness::Indeterminate { reason } if reason.contains("direct-workspace")),
+        "{}",
+        rep[1]
+    );
+    let t = ledger.records()[0].target.clone().unwrap();
+    assert_eq!(
+        serde_json::to_value(t.workspace.kind).unwrap(),
+        json!("direct")
+    );
+    // no copy-diff cross-check exists for the real folder
+    if let Some(b) = ledger
+        .records()
+        .into_iter()
+        .find_map(|r| r.boundary.clone())
+    {
+        assert!(!b.cross_check);
+    }
+}
+
+/// Phase 04 audit of Phase 03: an outside writer changes a file the Kernel ALREADY edited (same path,
+/// new content) after the passing check. The daemon's change set lists the same path either way, so
+/// path membership alone would keep the check `Current`. The receipted content hash must disagree
+/// with the file on disk, and the check must not be reported current.
+#[test]
+fn verification_phase04_an_external_write_to_an_already_receipted_file_is_never_current() {
+    use nexus_broker::verification::freshness::{self, Freshness};
+    if !sandbox_ready() {
+        return;
+    }
+    let wt_root: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    let inner = fix_loop_responder();
+    let r2 = wt_root.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        if n == 6 {
+            // after the passing test, before the final answer: same path, different bytes
+            if let Some(root) = r2.lock().unwrap().clone() {
+                if let Some(wc) = std::fs::read_dir(&root).ok().and_then(|d| {
+                    d.flatten()
+                        .map(|e| e.path())
+                        .find(|p| p.join(".git").exists())
+                }) {
+                    let f = wc.join("src/lib.rs");
+                    let mut t = std::fs::read_to_string(&f).unwrap();
+                    t.push_str("// changed behind the Kernel's back\n");
+                    std::fs::write(&f, t).unwrap();
+                }
+            }
+        }
+        inner(n, body)
+    });
+    let fx = fixture(responder);
+    *wt_root.lock().unwrap() = Some(fx.worktrees.clone());
+    let _appr = Approver::start(&fx, approve_all());
+    let b = fx.start("p4-same");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent(
+            "Fix the failing add test in this crate.",
+            "p4-same-000000001",
+            |_| {},
+        ),
+        240,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let ledger = p3_ledger(&fx.tmp.path().join("broker-p4-same"), &run);
+    let rep = freshness::report(&ledger);
+    assert_eq!(rep.len(), 2, "{rep:#?}");
+    assert!(
+        matches!(rep[1].freshness, Freshness::Indeterminate { .. }),
+        "the last check must not be current after an outside write to a receipted path: {}",
+        rep[1]
+    );
+    // the daemon's change set still has exactly the receipted path: membership cannot see this
+    let bnd = ledger
+        .records()
+        .into_iter()
+        .find_map(|r| r.boundary.clone())
+        .unwrap();
+    assert_eq!(
+        (bnd.changed_paths, bnd.unreceipted_paths),
+        (1, 0),
+        "{bnd:?}"
+    );
+}
+
+/// Phase 04 on the real path: the run's lifecycle, the legacy completion classification and the
+/// verification summary are three separate things, and the reconciliation reads the same under the
+/// default engine and under `muse-v1-shadow` (whose run ends differently).
+#[test]
+fn verification_phase04_summary_is_separate_from_lifecycle_and_completion_and_engine_independent() {
+    if !sandbox_ready() {
+        return;
+    }
+    let default = vs_run(None, true, "p4-sep-default-001");
+    let muse = vs_run(Some("muse-v1-shadow"), true, "p4-sep-muse-0000001");
+    // lifecycle and the legacy completion are what they always were, and they differ here
+    assert_eq!(default.run["state"], "completed");
+    assert_eq!(default.run["completion"], "fulfilled");
+    assert_eq!(muse.run["state"], "limit-reached");
+    assert_eq!(muse.run["completion"], "incomplete");
+    // the verification summary reads the evidence, not those fields
+    let (d, m) = (
+        default.summary.clone().unwrap(),
+        muse.summary.clone().unwrap(),
+    );
+    for s in [&d, &m] {
+        assert_eq!(s.verdict, "verified-within-scope", "{s:#?}");
+        assert_eq!(s.acceptance, "not-assessed");
+        assert_eq!(s.ledger, "intact");
+        assert_eq!(
+            (
+                s.current_passing,
+                s.current_failing,
+                s.stale,
+                s.indeterminate
+            ),
+            (1, 0, 0, 0)
+        );
+        assert_eq!(s.checks.len(), 1);
+        assert_eq!(
+            s.checks[0].basis, "attested",
+            "run-end attestation confirmed the receipts"
+        );
+        assert!(s.evidence_digest.is_some());
+    }
+    // identical reading of identical evidence, whatever the engine and however the run ended
+    let view = |s: &ic::VerificationSummary| {
+        (
+            s.verdict.clone(),
+            s.checks
+                .iter()
+                .map(|c| {
+                    (
+                        c.check.clone(),
+                        c.result.clone(),
+                        c.freshness.clone(),
+                        c.basis.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            s.limitations.clone(),
+        )
+    };
+    assert_eq!(view(&d), view(&m));
+    // the model-facing request bodies carry none of it
+    for o in [&default, &muse] {
+        for b in &o.bodies {
+            assert!(
+                !b.contains("verified-within-scope") && !b.contains("acceptance"),
+                "summary leaked into a request"
+            );
+        }
+    }
+}
+
+// ─── Verification Engine Phase 05: same-agent feedback, real lifecycle ──────
+
+const VF_MARKER: &str = "Nexus verification feedback";
+
+fn vf_has_feedback(body: &Value) -> bool {
+    body["input"].as_array().is_some_and(|a| {
+        a.iter()
+            .any(|i| i["content"].as_str().is_some_and(|c| c.contains(VF_MARKER)))
+    })
+}
+
+/// list, read, a WRONG edit, a failing test, then the model announces it is done. `fixes` says what
+/// it does once the Core has told it the check failed: repair and rerun, or just repeat itself.
+fn vf_responder(fixes: bool) -> Responder {
+    Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let call = |id: &str, name: &str, args: &str| {
+            Answer::Frames(call_frames(&resp, n, id, name, args))
+        };
+        let test = r#"{"program":"cargo","args":["test","--offline"]}"#;
+        match tool_calls_done(body) {
+            0 => call("c_list", "fs_list", r#"{"path":"."}"#),
+            1 => call("c_read", "fs_read", r#"{"path":"src/lib.rs"}"#),
+            2 => call(
+                "c_edit1",
+                "fs_edit",
+                &json!({"path":"src/lib.rs","edits":[{"oldText":"a - b","newText":"a * b"}]})
+                    .to_string(),
+            ),
+            3 => call("c_test1", "proc_run", test),
+            4 if fixes && vf_has_feedback(body) => call(
+                "c_edit2",
+                "fs_edit",
+                &json!({"path":"src/lib.rs","edits":[{"oldText":"a * b","newText":"a + b"}]})
+                    .to_string(),
+            ),
+            4 => Answer::Frames(text_frames(&resp, "I fixed it.")),
+            5 => call("c_test2", "proc_run", test),
+            _ => Answer::Frames(text_frames(&resp, "Fixed.")),
+        }
+    })
+}
+
+fn vf_count(o: &Observed) -> usize {
+    o.bodies.iter().filter(|b| b.contains(VF_MARKER)).count()
+}
+
+/// Observe: the decision is recorded and nothing else changes, for both engines. Compared with the
+/// recorder-off baseline under the same normalization as the earlier differential tests.
+#[test]
+fn verification_phase05_observe_mode_records_the_decision_and_changes_nothing() {
+    use nexus_broker::verification::feedback::FeedbackPolicy;
+    if !sandbox_ready() {
+        return;
+    }
+    for (engine, key) in [
+        (None, "p5-obs-default-001"),
+        (Some("muse-v1-shadow"), "p5-obs-shadow-0001"),
+    ] {
+        let observe = vs_run_with(
+            engine,
+            true,
+            FeedbackPolicy::Observe,
+            vf_responder(true),
+            key,
+        );
+        let off = vs_run_with(
+            engine,
+            false,
+            FeedbackPolicy::Observe,
+            vf_responder(true),
+            key,
+        );
+        // the failure was observed and recorded...
+        assert!(
+            observe.journal.iter().any(|(_, s)| s == "observed"),
+            "{engine:?}: {:?}",
+            observe.journal
+        );
+        assert!(
+            observe.journal.iter().all(|(_, s)| s == "observed"),
+            "nothing was delivered: {:?}",
+            observe.journal
+        );
+        // ...and no request carries it; everything the model could see is the baseline
+        assert_eq!(vf_count(&observe), 0);
+        assert_eq!(observe.requests, off.requests, "{engine:?}");
+        assert_eq!(
+            observe.bodies, off.bodies,
+            "{engine:?}: normalized request bodies"
+        );
+        assert_eq!(observe.tools, off.tools);
+        let mut d = Vec::new();
+        vs_diff("run", &observe.run, &off.run, &mut d);
+        vs_diff("engine", &observe.engine, &off.engine, &mut d);
+        d.retain(|l| !l.contains("resultBytes") && !l.contains("toolResultBytes"));
+        assert!(d.is_empty(), "{engine:?}: {d:?}");
+    }
+}
+
+/// Active: exactly one feedback message, after the Engineering Mode has finished guiding, the same
+/// tool catalog, the same authorization trail. The model repairs and reruns; the failure resolves.
+#[test]
+fn verification_phase05_active_mode_delivers_one_message_and_the_model_repairs() {
+    use nexus_broker::verification::feedback::FeedbackPolicy;
+    if !sandbox_ready() {
+        return;
+    }
+    for (engine, key) in [
+        (None, "p5-act-default-001"),
+        (Some("muse-v1-shadow"), "p5-act-shadow-0001"),
+    ] {
+        let observe = vs_run_with(
+            engine,
+            true,
+            FeedbackPolicy::Observe,
+            vf_responder(true),
+            key,
+        );
+        let active = vs_run_with(
+            engine,
+            true,
+            FeedbackPolicy::Active,
+            vf_responder(true),
+            key,
+        );
+        // the feedback joined the conversation once (it then stays in the history of later requests)
+        let first = active
+            .bodies
+            .iter()
+            .position(|b| b.contains(VF_MARKER))
+            .expect("delivered");
+        eprintln!(
+            "p5 {engine:?}: {} requests; feedback first appears in request #{first}; engine-guidance requests between the final answer and it: {}",
+            active.bodies.len(),
+            active.bodies[..first].iter().filter(|b| b.contains("I fixed it.")).count()
+        );
+        assert!(
+            active.bodies[first..]
+                .iter()
+                .all(|b| b.matches(VF_MARKER).count() == 1),
+            "never twice in one request"
+        );
+        assert!(active.bodies[..first]
+            .iter()
+            .all(|b| !b.contains(VF_MARKER)));
+        // it came after the final answer the model gave while the check was failing
+        assert!(active.bodies[first].contains("I fixed it."));
+        // no authority changed: the same tool catalog on every request that both runs made
+        for (a, o) in active.tools.iter().zip(&observe.tools) {
+            assert_eq!(a, o, "{engine:?}: tool catalog");
+        }
+        // the model acted on it and the check passed on the new source
+        assert_eq!(active.run["toolCalls"], 6, "{engine:?}: {}", active.run);
+        assert_eq!(active.run["lastTestVerification"], "pass");
+        let s = active.summary.clone().unwrap();
+        assert_eq!(s.verdict, "verified-within-scope", "{s:#?}");
+        // journal: prepared, admitted, incorporated by a provider answer, then resolved
+        let stages: Vec<&str> = active.journal.iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(
+            stages,
+            ["prepared", "admitted", "incorporated", "resolved"],
+            "{engine:?}"
+        );
+        // Observe saw the same failure, delivered nothing, and ended as the baseline did
+        assert_eq!(vf_count(&observe), 0);
+        // every edit and command still ran under the same approvals
+        for a in active.run["toolActivity"].as_array().unwrap() {
+            if matches!(a["tool"].as_str(), Some("fs_edit" | "proc_run")) {
+                assert_eq!(a["approvalOutcome"], "approved", "{a}");
+            }
+        }
+    }
+}
+
+/// A model that answers the same thing again is not re-prompted: the second finish is allowed with a
+/// truthful unresolved verification result. Same under both engines.
+#[test]
+fn verification_phase05_a_repeated_final_answer_is_not_reprompted() {
+    use nexus_broker::verification::feedback::FeedbackPolicy;
+    if !sandbox_ready() {
+        return;
+    }
+    for (engine, key) in [
+        (None, "p5-rep-default-001"),
+        (Some("muse-v1-shadow"), "p5-rep-shadow-0001"),
+    ] {
+        let o = vs_run_with(
+            engine,
+            true,
+            FeedbackPolicy::Active,
+            vf_responder(false),
+            key,
+        );
+        let first = o
+            .bodies
+            .iter()
+            .position(|b| b.contains(VF_MARKER))
+            .expect("delivered once");
+        assert!(
+            o.bodies[first..]
+                .iter()
+                .all(|b| b.matches(VF_MARKER).count() == 1),
+            "{engine:?}"
+        );
+        let stages: Vec<&str> = o.journal.iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(
+            stages,
+            ["prepared", "admitted", "incorporated"],
+            "one delivery, still unresolved: {engine:?}"
+        );
+        // the run ended; the failure is reported as it is, apart from lifecycle and completion
+        assert!(o.run["terminal"].as_bool().unwrap());
+        let s = o.summary.clone().unwrap();
+        assert_eq!(s.verdict, "failed-verification", "{s:#?}");
+        assert_eq!((s.current_failing, s.current_passing), (1, 0));
+        assert_eq!(s.acceptance, "not-assessed");
+    }
+}
+
+/// The provider drops the connection on the very request that carries the feedback. The existing
+/// termination semantics apply untouched: the run ends `uncertain`, the request is not repeated to
+/// regenerate anything, no tool runs again, and the journal says the delivery outcome is unknown
+/// instead of claiming it was delivered.
+#[test]
+fn verification_phase05_a_provider_failure_on_the_feedback_request_is_uncertain_and_never_replayed()
+{
+    use nexus_broker::verification::feedback::FeedbackPolicy;
+    if !sandbox_ready() {
+        return;
+    }
+    let inner = vf_responder(true);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let d2 = dropped.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        if vf_has_feedback(body) {
+            d2.fetch_add(1, Ordering::SeqCst);
+            return Answer::Close;
+        }
+        inner(n, body)
+    });
+    let o = vs_run_with(
+        None,
+        true,
+        FeedbackPolicy::Active,
+        responder,
+        "p5-prov-fail-0001",
+    );
+    assert_eq!(
+        o.run["state"], "uncertain",
+        "lifecycle stays truthful: {}",
+        o.run
+    );
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "the feedback request was sent once and never re-sent"
+    );
+    let stages: Vec<&str> = o.journal.iter().map(|(_, s)| s.as_str()).collect();
+    assert_eq!(
+        stages,
+        ["prepared", "admitted", "outcome-uncertain"],
+        "delivery is not claimed"
+    );
+    // no tool ran again: the first edit and the first (failing) test only
+    let acts = o.run["toolActivity"].as_array().unwrap();
+    assert_eq!(acts.iter().filter(|a| a["tool"] == "fs_edit").count(), 1);
+    assert_eq!(acts.iter().filter(|a| a["tool"] == "proc_run").count(), 1);
+    // the verification summary still tells the truth about the unresolved failure
+    let s = o.summary.clone().unwrap();
+    assert_eq!(s.verdict, "failed-verification", "{s:#?}");
+}
+
+// ─── Phase 05 hardening: real interruptions ─────────────────────────────────
+
+fn p5_active_broker(fx: &Fx, name: &str, tune: impl Fn(&mut BrokerConfig)) -> BrokerHandle {
+    let mut c = fx.config(name);
+    c.verification_feedback = nexus_broker::verification::feedback::FeedbackPolicy::Active;
+    tune(&mut c);
+    nexus_broker::start(c).expect("broker starts")
+}
+
+fn p5_journal(state: &Path, run: &str) -> Vec<String> {
+    nexus_broker::verification::feedback::load_journal(state, run)
+        .entries
+        .iter()
+        .map(|e| {
+            serde_json::to_value(e.stage)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
+}
+
+fn p5_write_into_working_copy(root: &Mutex<Option<PathBuf>>) {
+    if let Some(root) = root.lock().unwrap().clone() {
+        if let Some(wc) = std::fs::read_dir(&root).ok().and_then(|d| {
+            d.flatten()
+                .map(|e| e.path())
+                .find(|p| p.join(".git").exists())
+        }) {
+            let f = wc.join("src/lib.rs");
+            let mut t = std::fs::read_to_string(&f).unwrap();
+            t.push_str("// outside writer\n");
+            std::fs::write(&f, t).unwrap();
+        }
+    }
+}
+
+/// An outside writer changes the file the Kernel already edited, AFTER the failed check and BEFORE
+/// the model's final answer. The receipts still say the check is current; the file on disk no longer
+/// matches its receipt. The Core must not present the failure as verified-current: it says nothing.
+#[test]
+fn verification_phase05_an_outside_write_before_the_final_answer_withholds_the_feedback() {
+    if !sandbox_ready() {
+        return;
+    }
+    let wt: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    let inner = vf_responder(true);
+    let w2 = wt.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        if tool_calls_done(body) == 4 && !vf_has_feedback(body) {
+            p5_write_into_working_copy(&w2);
+        }
+        inner(n, body)
+    });
+    let fx = fixture(responder);
+    *wt.lock().unwrap() = Some(fx.worktrees.clone());
+    let _appr = Approver::start(&fx, approve_all());
+    let b = p5_active_broker(&fx, "p5-ext", |_| {});
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent(
+            "Fix the failing add test in this crate.",
+            "p5-ext-00000000001",
+            |_| {},
+        ),
+        240,
+    );
+    let state = fx.tmp.path().join("broker-p5-ext");
+    assert!(run.terminal, "{run:?}");
+    let bodies = fx.provider.bodies.lock().unwrap().clone();
+    assert!(
+        bodies.iter().all(|b| !vf_has_feedback(b)),
+        "feedback must not be sent on receipts that the disk contradicts"
+    );
+    assert!(
+        p5_journal(&state, &run.run_id).is_empty(),
+        "no decision was made to deliver anything"
+    );
+    // and the owner-visible summary does not call it a current failure either
+    let s = run.verification.clone().unwrap();
+    assert_eq!(s.verdict, "inconclusive", "{s:#?}");
+    assert_eq!(s.current_failing, 0);
+}
+
+/// Cancellation during the feedback continuation: the request that carries the feedback is in flight
+/// when the owner cancels. No further request or tool call follows, nothing is claimed delivered, and
+/// the summary still reports the unresolved failure.
+#[test]
+fn verification_phase05_cancellation_during_the_feedback_turn_stops_everything() {
+    if !sandbox_ready() {
+        return;
+    }
+    let inner = vf_responder(true);
+    let held = Arc::new(AtomicUsize::new(0));
+    let h2 = held.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        if vf_has_feedback(body) {
+            h2.fetch_add(1, Ordering::SeqCst);
+            return Answer::Slow {
+                frames: vec![],
+                gap_ms: 0,
+                hold_ms: 60_000,
+            };
+        }
+        inner(n, body)
+    });
+    let fx = fixture(responder);
+    let _appr = Approver::start(&fx, approve_all());
+    let b = p5_active_broker(&fx, "p5-cancel", |c| c.limits.read_timeout_ms = 60_000);
+    let run = ic::submit(
+        b.socket_path(),
+        &code_intent(
+            "Fix the failing add test in this crate.",
+            "p5-cancel-0000001",
+            |_| {},
+        ),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(120);
+    while held.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < end, "the feedback request never arrived");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let requests_at_cancel = fx.provider.accepted.load(Ordering::SeqCst);
+    ic::cancel(b.socket_path(), &run.run_id).unwrap();
+    let done = wait_terminal(b.socket_path(), &run.run_id, 60);
+    assert_eq!(done.state, "cancelled", "{done:?}");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        fx.provider.accepted.load(Ordering::SeqCst),
+        requests_at_cancel,
+        "no autonomous request after cancel"
+    );
+    assert_eq!(held.load(Ordering::SeqCst), 1, "the feedback was sent once");
+    // no tool ran after the cancel: the first edit and the first (failing) test only
+    let acts = &done.tool_activity;
+    assert_eq!(acts.iter().filter(|a| a.tool == "fs_edit").count(), 1);
+    assert_eq!(acts.iter().filter(|a| a.tool == "proc_run").count(), 1);
+    // durable record: admitted, answer never arrived -> uncertain; the failure is still reported
+    let state = fx.tmp.path().join("broker-p5-cancel");
+    assert_eq!(
+        p5_journal(&state, &run.run_id),
+        ["prepared", "admitted", "outcome-uncertain"]
+    );
+    let s = done.verification.clone().unwrap();
+    assert_eq!(s.verdict, "failed-verification", "{s:#?}");
+}
+
+/// Direct Workspace: a failing check can never be `Current` there, so the Core says nothing and the
+/// run ends; there is no continuation, loop or journal entry.
+#[test]
+fn verification_phase05_direct_workspace_never_produces_active_feedback() {
+    if !sandbox_ready() {
+        return;
+    }
+    MANAGED_FEEDBACK.with(|p| p.set(nexus_broker::verification::feedback::FeedbackPolicy::Active));
+    let env = direct_env("p5-direct", move |_cell| {
+        Arc::new(move |n, body| {
+            let resp = format!("resp_{n}");
+            match tool_calls_done(body) {
+                0 => Answer::Frames(call_frames(
+                    &resp,
+                    n,
+                    "c0",
+                    "proc_run",
+                    r#"{"program":"cargo","args":["test","--offline"]}"#,
+                )),
+                _ => Answer::Frames(text_frames(&resp, "The test fails; I stop here.")),
+            }
+        })
+    });
+    let run = submit_wait(
+        &env.sock,
+        &direct_intent(&env, "Check the project.", "p5-direct-0000001"),
+        300,
+    );
+    assert!(run.terminal, "{run:?}");
+    assert_eq!(run.workspace_kind.as_deref(), Some("direct"));
+    let bodies = env.fx.provider.bodies.lock().unwrap().clone();
+    assert!(bodies.iter().all(|b| !vf_has_feedback(b)));
+    assert!(bodies.len() <= 6, "no loop: {} requests", bodies.len());
+    let state = env.fx.tmp.path().join("broker-p5-direct");
+    assert!(p5_journal(&state, &run.run_id).is_empty());
+    let s = run.verification.clone().unwrap();
+    assert_eq!(s.verdict, "inconclusive", "{s:#?}");
+    assert_eq!(
+        s.current_failing, 0,
+        "an unattestable failure is not a current failure"
+    );
+}
+
+fn vf_marker_count(body: &Value) -> usize {
+    body["input"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|i| i["content"].as_str().is_some_and(|c| c.contains(VF_MARKER)))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// fails -> feedback -> a different wrong edit -> fails again -> new feedback -> then either the right
+/// edit and a pass (`finish`), or an irrelevant read and an honest stop. Decisions depend only on the
+/// conversation state the test model can see: how many feedback messages it has received.
+fn vf_long_responder(finish: bool) -> Responder {
+    Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let call = |id: &str, name: &str, args: &str| {
+            Answer::Frames(call_frames(&resp, n, id, name, args))
+        };
+        let test = r#"{"program":"cargo","args":["test","--offline"]}"#;
+        let edit = |from: &str, to: &str| {
+            json!({"path":"src/lib.rs","edits":[{"oldText":from,"newText":to}]}).to_string()
+        };
+        let (done, fb) = (tool_calls_done(body), vf_marker_count(body));
+        match (done, fb) {
+            (0, _) => call("c_list", "fs_list", r#"{"path":"."}"#),
+            (1, _) => call("c_read", "fs_read", r#"{"path":"src/lib.rs"}"#),
+            (2, _) => call("c_edit1", "fs_edit", &edit("a - b", "a * b")),
+            (3, _) => call("c_test1", "proc_run", test),
+            (4, 0) => Answer::Frames(text_frames(&resp, "I fixed it.")),
+            (4, _) => call("c_edit2", "fs_edit", &edit("a * b", "a / b")), // a different wrong edit
+            (5, _) => call("c_test2", "proc_run", test),
+            (6, 1) => Answer::Frames(text_frames(&resp, "Now it is fixed.")),
+            (6, _) if finish => call("c_edit3", "fs_edit", &edit("a / b", "a + b")),
+            (6, _) => call("c_irrelevant", "fs_read", r#"{"path":"README.md"}"#),
+            (7, _) if finish => call("c_test3", "proc_run", test),
+            (7, _) => Answer::Frames(text_frames(
+                &resp,
+                "I could not fix it; the check still fails.",
+            )),
+            _ => Answer::Frames(text_frames(&resp, "Done.")),
+        }
+    })
+}
+
+#[test]
+fn verification_phase05_a_long_repair_sequence_gets_one_message_per_genuine_new_failure() {
+    use nexus_broker::verification::feedback::FeedbackPolicy;
+    if !sandbox_ready() {
+        return;
+    }
+    let o = vs_run_with(
+        None,
+        true,
+        FeedbackPolicy::Active,
+        vf_long_responder(true),
+        "p5-long-ok-000001",
+    );
+    assert_eq!(o.run["state"], "completed", "{}", o.run);
+    // two distinct messages were delivered, the second only after a changed source and a new failure
+    let last = o.bodies.last().unwrap();
+    assert_eq!(
+        last.matches(VF_MARKER).count(),
+        2,
+        "exactly two feedback messages in the history"
+    );
+    assert!(
+        last.contains("tool call #4") && last.contains("tool call #6"),
+        "each names its own check run"
+    );
+    let keys: std::collections::BTreeSet<&String> = o.journal.iter().map(|(k, _)| k).collect();
+    assert_eq!(
+        keys.len(),
+        2,
+        "two different feedback identities: {:?}",
+        o.journal
+    );
+    for k in &keys {
+        let st: Vec<&str> = o
+            .journal
+            .iter()
+            .filter(|(kk, _)| kk == *k)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        assert_eq!(
+            st,
+            ["prepared", "admitted", "incorporated", "resolved"],
+            "{k}"
+        );
+    }
+    // no request ever carried a third message; the final reading is the latest applicable evidence
+    assert!(o.bodies.iter().all(|b| b.matches(VF_MARKER).count() <= 2));
+    let s = o.summary.clone().unwrap();
+    assert_eq!(s.verdict, "verified-within-scope", "{s:#?}");
+    assert!(
+        s.limitations
+            .iter()
+            .any(|l| l.starts_with("earlier-failures-superseded-by-rerun")),
+        "{:?}",
+        s.limitations
+    );
+    // no progress score, budget or counter appears in anything the Core added to the conversation
+    let msg = |b: &str| b.to_lowercase();
+    for w in [
+        "progress score",
+        "repair budget",
+        "attempts remaining",
+        "quality",
+        "improv",
+    ] {
+        assert!(o.bodies.iter().all(|b| !msg(b).contains(w)), "{w}");
+    }
+}
+
+#[test]
+fn verification_phase05_an_honest_stop_after_two_messages_is_allowed_and_an_irrelevant_read_changes_nothing(
+) {
+    use nexus_broker::verification::feedback::FeedbackPolicy;
+    if !sandbox_ready() {
+        return;
+    }
+    let o = vs_run_with(
+        None,
+        true,
+        FeedbackPolicy::Active,
+        vf_long_responder(false),
+        "p5-long-stop-0001",
+    );
+    assert!(o.run["terminal"].as_bool().unwrap());
+    let last = o.bodies.last().unwrap();
+    assert_eq!(
+        last.matches(VF_MARKER).count(),
+        2,
+        "the read after the second message produced no third"
+    );
+    let stages: Vec<&str> = o.journal.iter().map(|(_, s)| s.as_str()).collect();
+    assert_eq!(
+        stages,
+        [
+            "prepared",
+            "admitted",
+            "incorporated",
+            "prepared",
+            "admitted",
+            "incorporated"
+        ],
+        "unresolved: nothing marked resolved"
+    );
+    let s = o.summary.clone().unwrap();
+    assert_eq!(
+        s.verdict, "failed-verification",
+        "the unresolved failure is reported truthfully: {s:#?}"
+    );
+    assert_eq!((s.current_failing, s.current_passing), (1, 0));
+    // the model's own words are not in the verification record
+    assert!(!serde_json::to_string(&s).unwrap().contains("could not fix"));
+}
+
+/// The feedback message is compacted out of the conversation by the existing context manager. The
+/// authoritative state stays on disk, the message is not sent again, and the model is still told, in
+/// the runtime's own record (the existing compaction note), that the failure was reported and stands.
+#[test]
+fn verification_phase05_compaction_drops_the_message_but_not_the_facts() {
+    if !sandbox_ready() {
+        return;
+    }
+    // After the message arrives the model lists the directory for 30 requests, then stops. Its
+    // behaviour is driven by the request ordinal, not by what the (compacting) conversation holds.
+    let fb_at = Arc::new(AtomicUsize::new(usize::MAX));
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let call = |id: &str, name: &str, args: &str| {
+            Answer::Frames(call_frames(&resp, n, id, name, args))
+        };
+        let test = r#"{"program":"cargo","args":["test","--offline"]}"#;
+        if vf_has_feedback(body) {
+            let _ = fb_at.compare_exchange(usize::MAX, n, Ordering::SeqCst, Ordering::SeqCst);
+        }
+        let at = fb_at.load(Ordering::SeqCst);
+        if at != usize::MAX {
+            return if n - at < 30 {
+                call(&format!("c_l{n}"), "fs_list", r#"{"path":"."}"#)
+            } else {
+                Answer::Frames(text_frames(&resp, "I stop; the check still fails."))
+            };
+        }
+        match tool_calls_done(body) {
+            0 => call("c_list", "fs_list", r#"{"path":"."}"#),
+            1 => call("c_read", "fs_read", r#"{"path":"src/lib.rs"}"#),
+            2 => call(
+                "c_edit1",
+                "fs_edit",
+                &json!({"path":"src/lib.rs","edits":[{"oldText":"a - b","newText":"a * b"}]})
+                    .to_string(),
+            ),
+            3 => call("c_test1", "proc_run", test),
+            _ => Answer::Frames(text_frames(&resp, "I fixed it.")),
+        }
+    });
+    let fx = fixture_with(responder, Box::new(vs_one_test));
+    let _appr = Approver::start(&fx, approve_all());
+    let b = p5_active_broker(&fx, "p5-compact", |c| c.context_budget_bytes = Some(1_500));
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent(
+            "Fix the failing add test in this crate.",
+            "p5-compact-000001",
+            |_| {},
+        ),
+        300,
+    );
+    assert!(run.terminal, "{run:?}");
+    assert!(
+        run.context_compactions > 0,
+        "the scenario must really compact: {run:?}"
+    );
+    let bodies = fx.provider.bodies.lock().unwrap().clone();
+    let first = bodies.iter().position(vf_has_feedback).expect("delivered");
+    let last = bodies.last().unwrap();
+    // gone from the model's context...
+    assert!(
+        !vf_has_feedback(last),
+        "the message was compacted out of the conversation"
+    );
+    // ...but the runtime's own record still tells it, from the ledger and journal
+    let text = last.to_string();
+    assert!(
+        text.contains("verification feedback was given earlier in this run"),
+        "{}",
+        &text[..text.len().min(400)]
+    );
+    assert!(text.contains("still fail on the current source"));
+    // it was never sent twice, and the durable state is intact
+    let state = fx.tmp.path().join("broker-p5-compact");
+    assert_eq!(
+        p5_journal(&state, &run.run_id),
+        ["prepared", "admitted", "incorporated"]
+    );
+    assert!(bodies[first..].iter().all(|b| vf_marker_count(b) <= 1));
+    assert!(
+        bodies.len() > first + 20,
+        "the model kept working for many turns without being re-prompted"
+    );
+    // the verification reading is the Core's, not the model's closing words
+    let s = run.verification.clone().unwrap();
+    assert_eq!(s.verdict, "failed-verification");
+}
+
+// ─── Phase 05 hardening: a REAL broker process is killed around feedback admission ──
+
+/// Child entry point: a real broker process built from the same fixture (daemon, credentials,
+/// registry, provider CA) the parent test prepared. Run only via `p5_crash_run`.
+#[test]
+#[ignore = "child entry point for the feedback crash tests; run only via the parent tests"]
+fn p5_broker_child() {
+    let Ok(p) = std::env::var("A56_P5_CFG") else {
+        return;
+    };
+    let v: Value = serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(
+            std::fs::read(v["ca"].as_str().unwrap()).unwrap(),
+        ))
+        .unwrap();
+    let tls = nexus_model::egress::tls_config_with_roots(roots);
+    let factory = nexus_client::TransportFactory(Arc::new(move |binding| {
+        nexus_model::HttpSseTransport::with_parts(
+            binding,
+            Arc::new(nexus_model::testkit::ScriptedResolver::new(vec![vec![
+                "127.0.0.1".parse().unwrap(),
+            ]])),
+            nexus_model::egress::AddressPolicy::PublicOrLoopbackForTests,
+            tls.clone(),
+        )
+    }));
+    let p = |k: &str| PathBuf::from(v[k].as_str().unwrap());
+    let ws = |id: &str| WorkspaceSpec {
+        id: id.into(),
+        root: p("repo"),
+        allowed_uids: vec![],
+        pinned_commit: None,
+        write_allow: Vec::new(),
+    };
+    let cfg = BrokerConfig {
+        state_dir: p("state"),
+        socket_path: p("socket"),
+        socket_group: None,
+        allowed_uids: vec![],
+        daemon_socket: p("daemon_socket"),
+        cap_path: p("cap"),
+        credentials_path: p("creds"),
+        transcript_dir: p("transcripts"),
+        repo_root: p("install_root"),
+        registry_data_root: p("registry"),
+        ledger_workspace: p("ledger"),
+        node: "node".into(),
+        extra_trusted_owner_uids: vec![],
+        max_active: 4,
+        rate_per_minute: 50,
+        limits: nexus_client::TransportLimits {
+            read_timeout_ms: 60_000,
+            total_timeout_ms: 120_000,
+            ..Default::default()
+        },
+        allow_models: vec![],
+        transport: Some(factory),
+        workspaces: vec![ws("demo")],
+        code_sources: vec![ws("proj")],
+        approval_ttl_ms: None,
+        project_registry: None,
+        code_caps: Default::default(),
+        interactive: false,
+        project_snapshots: None,
+        context_budget_bytes: None,
+        request_budget_bytes: None,
+        verification_shadow: true,
+        verification_feedback: nexus_broker::verification::feedback::FeedbackPolicy::Active,
+    };
+    let _b = nexus_broker::start(cfg).expect("child broker starts");
+    // live until killed
+    std::thread::sleep(Duration::from_secs(600));
+}
+
+struct CrashObs {
+    run_before: ic::IntentRun,
+    run_after: ic::IntentRun,
+    journal: Vec<String>,
+    markers_seen_by_provider: usize,
+    requests_before_restart: usize,
+    requests_after_restart: usize,
+    file_before: String,
+    file_after: String,
+}
+
+/// `point`: a crash point inside the child (`before-admission`, `after-admission`, `after-response`)
+/// or `dispatch-unknown` (the provider holds the feedback request open and the test kills the child).
+fn p5_crash_run(point: &str, key: &str) -> CrashObs {
+    use nexus_broker::verification::feedback::FeedbackPolicy;
+    let seen = Arc::new(AtomicUsize::new(0));
+    let s2 = seen.clone();
+    let inner = vf_responder(true);
+    let dispatch_hold = point == "dispatch-unknown";
+    let responder: Responder = Arc::new(move |n, body| {
+        if vf_has_feedback(body) {
+            s2.fetch_add(1, Ordering::SeqCst);
+            if dispatch_hold {
+                return Answer::Slow {
+                    frames: vec![],
+                    gap_ms: 0,
+                    hold_ms: 120_000,
+                };
+            }
+        }
+        inner(n, body)
+    });
+    let fx = fixture_with(responder, Box::new(vs_one_test));
+    let _appr = Approver::start(&fx, approve_all());
+    let cfg = fx.config("p5crash");
+    let ca = fx.tmp.path().join("ca.der");
+    std::fs::write(&ca, &fx.pki.ca_der).unwrap();
+    let cfg_path = fx.tmp.path().join("p5-child.json");
+    std::fs::write(
+        &cfg_path,
+        serde_json::to_vec(&json!({
+            "state": cfg.state_dir, "socket": cfg.socket_path, "daemon_socket": cfg.daemon_socket,
+            "cap": cfg.cap_path, "creds": cfg.credentials_path, "transcripts": cfg.transcript_dir,
+            "install_root": cfg.repo_root, "registry": cfg.registry_data_root,
+            "ledger": cfg.ledger_workspace, "repo": fx.repo, "ca": ca,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut cmd = Command::new(std::env::current_exe().unwrap());
+    cmd.args(["p5_broker_child", "--exact", "--ignored", "--nocapture"])
+        .env("A56_P5_CFG", &cfg_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if !dispatch_hold {
+        cmd.env("NEXUS_TEST_FEEDBACK_CRASH_AT", point);
+    }
+    let mut child = cmd.spawn().unwrap();
+    let sock = cfg.socket_path.clone();
+    let up = Instant::now() + Duration::from_secs(60);
+    while ic::models(&sock).is_err() {
+        assert!(Instant::now() < up, "child broker never came up");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let run = ic::submit(
+        &sock,
+        &code_intent("Fix the failing add test in this crate.", key, |_| {}),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(180);
+    if dispatch_hold {
+        while seen.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < end, "the feedback request never arrived");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        kill(&mut child);
+    } else {
+        // the crash point kills the process itself
+        while child.try_wait().unwrap().is_none() {
+            assert!(
+                Instant::now() < end,
+                "the crash point never fired at {point}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            child.wait().unwrap().signal(),
+            Some(9),
+            "killed by the injected crash"
+        );
+    }
+    let state = cfg.state_dir.clone();
+    let wc = || {
+        let d = std::fs::read_dir(&fx.worktrees).unwrap();
+        let wc = d
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.join(".git").exists())
+            .unwrap();
+        std::fs::read_to_string(wc.join("src/lib.rs")).unwrap()
+    };
+    let file_before = wc();
+    let requests_before_restart = fx.provider.accepted.load(Ordering::SeqCst);
+    // the run as the dead broker left it (read from its durable record)
+    let run_before = nexus_broker::store::Store::open(&state)
+        .unwrap()
+        .load(&run.run_id)
+        .unwrap()
+        .run;
+    // a new broker over the same durable state: recovery closes the run
+    let _ = std::fs::remove_file(&sock);
+    let mut c2 = fx.config("p5crash");
+    c2.verification_feedback = FeedbackPolicy::Active;
+    let b = nexus_broker::start(c2).expect("restarted broker");
+    let run_after = wait_terminal(b.socket_path(), &run.run_id, 60);
+    std::thread::sleep(Duration::from_secs(3));
+    CrashObs {
+        run_before,
+        run_after,
+        journal: p5_journal(&state, &run.run_id),
+        markers_seen_by_provider: seen.load(Ordering::SeqCst),
+        requests_before_restart,
+        requests_after_restart: fx.provider.accepted.load(Ordering::SeqCst),
+        file_before,
+        file_after: wc(),
+    }
+}
+
+fn p5_assert_nothing_replayed(o: &CrashObs) {
+    assert!(
+        o.run_after.terminal,
+        "recovery closes the run: {:?}",
+        o.run_after
+    );
+    assert_ne!(
+        o.run_after.state, "completed",
+        "a killed run is never reported completed"
+    );
+    assert_eq!(
+        o.requests_after_restart, o.requests_before_restart,
+        "no provider request after the restart"
+    );
+    assert_eq!(
+        o.file_before, o.file_after,
+        "no tool side effect after the restart"
+    );
+    assert!(
+        o.markers_seen_by_provider <= 1,
+        "the feedback reached the provider at most once"
+    );
+    // the recovered record carries the Core's reading of what was durable
+    let s = o
+        .run_after
+        .verification
+        .clone()
+        .expect("recovery attaches the summary");
+    assert_eq!(s.verdict, "failed-verification", "{s:#?}");
+}
+
+#[test]
+fn verification_phase05_crash_before_admission_leaves_no_feedback_state() {
+    if !sandbox_ready() {
+        return;
+    }
+    let o = p5_crash_run("before-admission", "p5-crash-before-001");
+    p5_assert_nothing_replayed(&o);
+    assert!(
+        o.journal.is_empty(),
+        "nothing was admitted: {:?}",
+        o.journal
+    );
+    assert_eq!(o.markers_seen_by_provider, 0, "the model was never told");
+    let _ = &o.run_before;
+}
+
+#[test]
+fn verification_phase05_crash_after_admission_before_dispatch_is_recorded_as_uncertain() {
+    if !sandbox_ready() {
+        return;
+    }
+    let o = p5_crash_run("after-admission", "p5-crash-admit-0001");
+    p5_assert_nothing_replayed(&o);
+    // the journal cannot know whether a request went out: admitted, then settled uncertain by recovery
+    assert_eq!(o.journal, ["prepared", "admitted", "outcome-uncertain"]);
+    assert_eq!(
+        o.markers_seen_by_provider, 0,
+        "in this window the request had not been sent"
+    );
+}
+
+#[test]
+fn verification_phase05_crash_with_the_provider_outcome_unknown_is_uncertain_and_not_resent() {
+    if !sandbox_ready() {
+        return;
+    }
+    let o = p5_crash_run("dispatch-unknown", "p5-crash-sent-00001");
+    p5_assert_nothing_replayed(&o);
+    assert_eq!(o.journal, ["prepared", "admitted", "outcome-uncertain"]);
+    assert_eq!(
+        o.markers_seen_by_provider, 1,
+        "the provider received it exactly once, answer unknown"
+    );
+}
+
+#[test]
+fn verification_phase05_crash_after_the_answer_before_incorporation_is_recorded_without_claiming_more(
+) {
+    if !sandbox_ready() {
+        return;
+    }
+    let o = p5_crash_run("after-response", "p5-crash-answer-001");
+    p5_assert_nothing_replayed(&o);
+    // the model DID receive and answer it, but the broker died before writing `incorporated`:
+    // the durable record honestly says the outcome is unknown, never that it was delivered
+    assert_eq!(o.journal, ["prepared", "admitted", "outcome-uncertain"]);
+    assert_eq!(o.markers_seen_by_provider, 1);
+}
+
+// ---- Phase 06: task acceptance contract, real path ----------------------------------------
+
+const AC_ENGINE: &str = "muse-v0-acceptance";
+
+/// The model proposes criteria on its first turn, then the ordinary fix loop runs (so the run
+/// ends the usual way). `args` is the tool's raw argument string.
+fn ac_responder(args: &'static str) -> Responder {
+    let rest = vs_responder();
+    Arc::new(move |n, body| {
+        if n == 0 {
+            Answer::Frames(call_frames(
+                "resp_0",
+                n,
+                "c_acc",
+                "acceptance_propose",
+                args,
+            ))
+        } else if n > AC_FIX_LOOP_REQUESTS - 1 {
+            // a closing report the completion heuristics accept as an ending
+            Answer::Frames(text_frames(
+                &format!("resp_{n}"),
+                "Changed `add` in src/lib.rs from subtraction to addition. Summary: the crate's test passes.",
+            ))
+        } else {
+            rest(n - 1, body)
+        }
+    })
+}
+
+/// The number of provider requests the plain fix loop makes (turns 0..=6).
+const AC_FIX_LOOP_REQUESTS: usize = 7;
+
+fn ac_start(fx: &Fx, name: &str) -> nexus_broker::BrokerHandle {
+    let mut c = fx.config(name);
+    c.verification_shadow = true;
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    nexus_broker::start(c).expect("broker starts")
+}
+
+#[test]
+fn acceptance_phase06_model_proposal_is_recorded_as_model_proposed_with_no_extra_provider_request()
+{
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_engine_with(
+        ac_responder(r#"{"criteria":[{"description":"add() returns the sum of its arguments"}]}"#),
+        AC_ENGINE,
+        Box::new(vs_one_test),
+    );
+    let b = ac_start(&fx, "ac-model");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent(
+            "Fix the failing add test in this crate.",
+            "ac-model-0001",
+            |_| {},
+        ),
+        240,
+    );
+    assert!(run.terminal, "{run:?}");
+    let a = run.acceptance.clone().expect("a contract exists");
+    assert_eq!(a.candidates, 1, "{a:?}");
+    assert_eq!(a.authoritative, 0, "{a:?}");
+    assert_eq!(a.overall, "not-assessed", "{a:?}");
+    assert_eq!(a.requirements[0].origin, "model-proposed");
+    assert!(!a.requirements[0].authoritative);
+    assert_eq!(
+        fx.provider.accepted.load(Ordering::SeqCst),
+        1 + AC_FIX_LOOP_REQUESTS,
+        "only the model's own turns: nothing was requested to extract criteria"
+    );
+    let t = run
+        .tool_activity
+        .iter()
+        .find(|t| t.tool == "acceptance_propose")
+        .expect("tool activity");
+    assert_eq!(t.status, "executed", "{t:?}");
+    // the Kernel was never involved: no approval, no execution id
+    assert!(t.approval_id.is_none() && t.execution_id.is_none(), "{t:?}");
+}
+
+#[test]
+fn acceptance_phase06_the_model_cannot_name_an_authority_through_the_tool() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_engine_with(
+        ac_responder(
+            r#"{"criteria":[{"description":"must never log secrets","provenance":"user-explicit"}]}"#,
+        ),
+        AC_ENGINE,
+        Box::new(vs_one_test),
+    );
+    let b = ac_start(&fx, "ac-forge");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent(
+            "Fix the failing add test in this crate.",
+            "ac-forge-0001",
+            |_| {},
+        ),
+        240,
+    );
+    assert!(run.terminal, "{run:?}");
+    let t = run
+        .tool_activity
+        .iter()
+        .find(|t| t.tool == "acceptance_propose")
+        .expect("tool activity");
+    assert_eq!(t.status, "refused", "{t:?}");
+    let a = run.acceptance.clone();
+    assert!(
+        a.as_ref()
+            .is_none_or(|a| a.authoritative == 0 && a.candidates == 0),
+        "nothing may have been recorded: {a:?}"
+    );
+}
+
+#[test]
+fn acceptance_phase06_a_trusted_requirement_survives_a_broker_restart_and_stays_authoritative() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_engine_with(
+        ac_responder(r#"{"criteria":[{"description":"a model-side reading"}]}"#),
+        AC_ENGINE,
+        Box::new(vs_one_test),
+    );
+    let b = ac_start(&fx, "ac-restart");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent(
+            "Fix the failing add test in this crate.",
+            "ac-restart-001",
+            |_| {},
+        ),
+        240,
+    );
+    assert!(run.terminal, "{run:?}");
+    let sock = b.socket_path().to_owned();
+    let added = ic::acceptance_add(
+        &sock,
+        ic::AcceptanceTarget::Task {
+            run_id: &run.run_id,
+        },
+        "login must reject an empty password",
+        None,
+    )
+    .expect("trusted add");
+    assert_eq!(added["duplicate"], false, "{added}");
+    drop(b);
+    let b2 = ac_start(&fx, "ac-restart");
+    let got = ic::acceptance_get(b2.socket_path(), &run.run_id).expect("get");
+    let s = got.to_string();
+    assert!(s.contains("login must reject an empty password"), "{s}");
+    assert!(s.contains("user-explicit"), "{s}");
+    // the live reading (the run record keeps the reading from when the run ended)
+    let a = &got["acceptance"];
+    assert_eq!(a["authoritative"], 1, "{a}");
+    assert_eq!(a["candidates"], 1, "{a}");
+    // an authoritative requirement with no bound check is unverified, never verified by default
+    assert_eq!(a["overall"], "unverified", "{a}");
+}
+
+#[test]
+fn acceptance_phase06_default_engines_never_see_the_tool_and_report_no_contract() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture(vs_responder());
+    fx.provider.accepted.store(0, Ordering::SeqCst);
+    let _appr = Approver::start(&fx, approve_all());
+    let b = fx.start("ac-default");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent(
+            "Fix the failing add test in this crate.",
+            "ac-default-001",
+            |_| {},
+        ),
+        240,
+    );
+    assert!(run.terminal, "{run:?}");
+    assert!(run.acceptance.is_none(), "{:?}", run.acceptance);
+    for body in fx.provider.bodies.lock().unwrap().iter() {
+        assert!(
+            !body["tools"].to_string().contains("acceptance_propose"),
+            "the default catalog must not carry the opt-in tool"
+        );
+    }
 }

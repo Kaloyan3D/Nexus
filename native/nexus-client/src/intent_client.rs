@@ -221,6 +221,141 @@ pub struct IntentRun {
     /// References the model made that no tool result in this run supports.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub citations_unverified: Vec<String>,
+    /// What the Core's evidence ledger supports about verification (Verification Engine, Phase 04).
+    /// Informational and independent of `state` (lifecycle) and `completion` (legacy classification);
+    /// never sent to the model. Absent when the recorder is off or the run has nothing to verify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<VerificationSummary>,
+    /// Which of the task's requirements the Core's evidence supports (Phase 06). A third concept,
+    /// independent of `state` (lifecycle), `completion` (legacy) and `verification` (checks): a run
+    /// can be completed, have passing checks, and still have unverified acceptance. Absent when the
+    /// task has no acceptance contract. Never sent to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance: Option<AcceptanceSummary>,
+}
+
+/// The task's requirements and what the evidence does and does not establish about each
+/// (Verification Engine, Phase 06). Provenance and coverage authority are explicit: a requirement
+/// the model proposed, or a coverage claim the model made, is shown as such and can never be
+/// counted as verified. There is no percentage and no score.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptanceSummary {
+    pub schema_version: u32,
+    /// Stable identity of the task's contract (and the revision of it this reading used).
+    pub contract_id: String,
+    pub revision: u64,
+    /// `not-assessed` | `unverified` | `inconclusive` | `partially-verified` |
+    /// `verified-within-scope` | `failed`. Only AUTHORITATIVE requirements (explicit user or trusted
+    /// project policy) decide it; with none, it is `not-assessed` however many candidates exist.
+    pub overall: String,
+    /// Digest of the original request this task started from (the immutable reference).
+    pub source_request_digest: String,
+    pub authoritative: u32,
+    /// Model-proposed criteria and assumptions: tracked, never authoritative.
+    pub candidates: u32,
+    pub verified: u32,
+    pub failed: u32,
+    pub unverified: u32,
+    pub inconclusive: u32,
+    pub superseded: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirements: Vec<RequirementView>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub requirements_omitted: u32,
+    /// What evidence was considered (this run's ledger) and what that cannot say.
+    pub scope_note: String,
+    /// False when the contract journal had unreadable lines: nothing is then reported verified.
+    pub contract_intact: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RequirementView {
+    pub id: String,
+    pub description: String,
+    /// `user-explicit` | `project-policy` | `model-proposed` | `assumption`
+    pub origin: String,
+    pub authoritative: bool,
+    pub revision: u64,
+    /// `verified-within-scope` | `failed` | `unverified` | `inconclusive` | `superseded`
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<EvidenceView>,
+    /// What is missing for this requirement to be verified, in plain words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceView {
+    /// Who established that this check covers the requirement: `trusted-binding` | `model-asserted`.
+    pub origin: String,
+    /// The check (family) this link names, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_id: Option<String>,
+    /// `process-exited-zero` | `process-failed` | absent when the check has not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// `current` | `stale` | `indeterminate`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<String>,
+    /// Whether this evidence counted toward the requirement's status (model-asserted never does).
+    pub counted: bool,
+}
+
+/// A compact, deterministic reading of a run's verification evidence. It describes which checks
+/// ran, whether each still applies to the current source, and what that supports. It NEVER states
+/// that the task's requirements are met: `acceptance` is `not-assessed` unless an explicit
+/// acceptance contract exists (none does yet).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationSummary {
+    pub schema_version: u32,
+    /// `verified-within-scope` | `partially-verified` | `unverified` | `failed-verification` |
+    /// `inconclusive` | `not-applicable`
+    pub verdict: String,
+    /// `not-assessed`: no acceptance contract exists, so task-level correctness is not claimed.
+    pub acceptance: String,
+    /// The checks whose latest result is reported, in call order (windowed; see `checks_omitted`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<CheckSummary>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub checks_omitted: u32,
+    pub current_passing: u32,
+    pub current_failing: u32,
+    pub stale: u32,
+    pub indeterminate: u32,
+    /// Plain statements of what the evidence does not cover (`environment-unobserved`, ...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitations: Vec<String>,
+    /// `intact` | `damaged` | `absent`
+    pub ledger: String,
+    /// Digest of the evidence this summary was computed from (same ledger, same digest).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckSummary {
+    /// The check family (`cargo-test`, `npm-test`, ...).
+    pub check: String,
+    pub call_index: u32,
+    pub execution_id: Option<String>,
+    /// The factual result of that execution: `process-exited-zero` | `process-failed`.
+    pub result: String,
+    /// Whether the result still applies to the current source: `current` | `stale` | `indeterminate`.
+    pub freshness: String,
+    /// `attested` | `receipt-consistent`: what a `current` rests on.
+    pub basis: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -1432,6 +1567,101 @@ pub fn project_adopt(socket: &Path, run_id: &str) -> Result<serde_json::Value, C
         "project-adopt",
         serde_json::json!({ "runId": run_id }),
         60_000,
+    )
+}
+
+// ---- Phase 06 acceptance contract (trusted verbs; the model has no access to these) ------------
+
+/// What an acceptance verb is about: one run's task, or a project's standing policy.
+#[derive(Debug, Clone, Copy)]
+pub enum AcceptanceTarget<'a> {
+    Task { run_id: &'a str },
+    Project { project_id: &'a str },
+}
+
+fn target_params(t: AcceptanceTarget<'_>) -> serde_json::Value {
+    match t {
+        AcceptanceTarget::Task { run_id } => serde_json::json!({ "runId": run_id }),
+        AcceptanceTarget::Project { project_id } => serde_json::json!({ "projectId": project_id }),
+    }
+}
+
+fn merged(mut base: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
+    if let (Some(b), Some(e)) = (base.as_object_mut(), extra.as_object()) {
+        for (k, v) in e {
+            b.insert(k.clone(), v.clone());
+        }
+    }
+    base
+}
+
+/// Add an AUTHORITATIVE requirement (explicit for a task, project policy for a project), optionally
+/// superseding an earlier one. Only an authenticated client can do this.
+pub fn acceptance_add(
+    socket: &Path,
+    target: AcceptanceTarget<'_>,
+    description: &str,
+    supersedes: Option<&str>,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "acceptance-add",
+        merged(
+            target_params(target),
+            serde_json::json!({ "description": description, "supersedes": supersedes }),
+        ),
+        30_000,
+    )
+}
+
+/// Retire a requirement without replacing it.
+pub fn acceptance_withdraw(
+    socket: &Path,
+    target: AcceptanceTarget<'_>,
+    requirement_id: &str,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "acceptance-withdraw",
+        merged(
+            target_params(target),
+            serde_json::json!({ "requirementId": requirement_id }),
+        ),
+        30_000,
+    )
+}
+
+/// Declare that a check (a recognized command) covers a requirement: the acceptance test.
+pub fn acceptance_bind(
+    socket: &Path,
+    target: AcceptanceTarget<'_>,
+    requirement_id: &str,
+    program: &str,
+    args: &[&str],
+    name: Option<&str>,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "acceptance-bind",
+        merged(
+            target_params(target),
+            serde_json::json!({
+                "requirementId": requirement_id,
+                "check": { "program": program, "args": args },
+                "name": name,
+            }),
+        ),
+        30_000,
+    )
+}
+
+/// The run's acceptance reading plus the contract's full history.
+pub fn acceptance_get(socket: &Path, run_id: &str) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "acceptance-get",
+        serde_json::json!({ "runId": run_id }),
+        30_000,
     )
 }
 

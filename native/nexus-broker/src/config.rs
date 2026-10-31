@@ -150,6 +150,13 @@ pub struct BrokerConfig {
     /// request budget: requests are byte-identical to EM-03. Tests and the future mode-level
     /// activation (EM-04B) only.
     pub request_budget_bytes: Option<usize>,
+    /// Verification Engine shadow evidence recorder. `true` in production; `false` only lets a
+    /// differential test (or an operator) prove the recorder changes nothing.
+    pub verification_shadow: bool,
+    /// Verification feedback to the same model at the final-response boundary (Phase 05).
+    /// `Observe` (the default) only records what would have been eligible; `Active` delivers it.
+    /// Broker-owned: nothing the model, a tool or an Engineering Mode says can change it.
+    pub verification_feedback: crate::verification::feedback::FeedbackPolicy,
 }
 
 impl BrokerConfig {

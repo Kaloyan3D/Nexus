@@ -6,6 +6,7 @@
 //! sent). No real provider, credential or network.
 #![allow(dead_code)]
 
+mod common;
 use nexus_broker::{BrokerConfig, BrokerHandle, WorkspaceSpec};
 use nexus_client::intent_client as ic;
 use nexus_client::intent_contract::{IntentLimits, NexusIntentV1, ResponseMode};
@@ -32,15 +33,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn native_bin(name: &str) -> PathBuf {
-    // a build in a custom target directory (CI, the Nexus sandbox) is where cargo put the binaries
-    if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR") {
-        return PathBuf::from(dir).join("debug").join(name);
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("target")
-        .join("debug")
-        .join(name)
+    common::native_bin(name)
 }
 
 fn node_json(args: &[&str]) -> serde_json::Value {
@@ -650,6 +643,8 @@ impl Fx {
             project_snapshots: None,
             context_budget_bytes: None,
             request_budget_bytes: None,
+            verification_shadow: true,
+            verification_feedback: Default::default(),
         }
     }
 

@@ -1759,6 +1759,10 @@ impl Broker {
                     .map_err(|_| ("internal", "the conversation could not be read".to_owned()))?;
                 Ok(json!({ "view": view }))
             }
+            "acceptance-add" => crate::acceptance::verbs::add(self, client, params),
+            "acceptance-withdraw" => crate::acceptance::verbs::withdraw(self, client, params),
+            "acceptance-bind" => crate::acceptance::verbs::bind(self, client, params),
+            "acceptance-get" => crate::acceptance::verbs::get(self, client, params),
             "thread-send" => crate::threads::send(self, client, params),
             "thread-list" => crate::threads::list(self, client, params),
             "thread-get" => crate::threads::get(self, client, params),
@@ -2090,6 +2094,25 @@ fn recover(b: &Broker) {
                                     ));
                                 }
                             }
+                        }
+                        // Verification Engine: a run that never reached its finalization keeps
+                        // what is durable. Anything admitted for feedback but never answered is
+                        // marked outcome-uncertain (nothing is re-sent), and the summary is read
+                        // from the ledger on disk, never from memory.
+                        if r.run.intent_type == nexus_contracts::intent::INTENT_REPO_CODE
+                            && b.cfg.verification_shadow
+                        {
+                            crate::verification::feedback::settle(&b.cfg.state_dir, &id);
+                            r.run.verification = Some(crate::verification::reconcile::evaluate(
+                                &b.cfg.state_dir,
+                                &id,
+                                &crate::verification::reconcile::RunFacts {
+                                    code_run: true,
+                                    tool_calls: r.run.tool_calls,
+                                },
+                            ));
+                            r.run.acceptance =
+                                crate::acceptance::report_for_run(&b.store, &b.cfg.state_dir, &id);
                         }
                         r.run.updated_at_ms = now_ms();
                         let _ = b.store.put(&r);

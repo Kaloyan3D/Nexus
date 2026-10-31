@@ -52,6 +52,13 @@ pub struct Store {
     lock: Mutex<()>,
 }
 
+impl Store {
+    /// The state directory this store lives in.
+    pub fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+}
+
 pub fn valid_run_id(id: &str) -> bool {
     id.len() == 36
         && id.starts_with("run_")

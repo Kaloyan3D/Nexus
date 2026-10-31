@@ -91,6 +91,7 @@ pub fn tool_catalog_profile(engine_id: &str, code_run: bool) -> nexus_model::Too
         (true, muse_v1::SIGNALS_ENGINE_ID) => P::RepoCodeMuseSignalsV1,
         (true, muse_v1::ACTIVE_ENGINE_ID) => P::RepoCodeAdaptiveJobsV1,
         (true, muse_v0::JOBS_ENGINE_ID) => P::RepoCodeJobsV1,
+        (true, muse_v0::ACCEPTANCE_ENGINE_ID) => P::RepoCodeAcceptanceV1,
         (true, _) => P::RepoCodeV1,
     }
 }
@@ -501,6 +502,7 @@ fn engines_with(test_build: bool, muse_v1_enabled: bool) -> Vec<&'static dyn Eng
     if test_build {
         v.push(&muse_v1::MUSE_V1);
         v.push(&muse_v1::MUSE_V1_SIGNALS);
+        v.push(&muse_v0::MUSE_V0_ACCEPTANCE);
     }
     #[cfg(feature = "test-engines")]
     if test_build {

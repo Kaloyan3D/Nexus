@@ -694,6 +694,8 @@ struct Ctx<'a> {
     flag: &'a Arc<AtomicBool>,
     /// How many of `ls.activity` are already in the run's durable activity log.
     persisted: std::cell::Cell<usize>,
+    /// Verification Engine (Phase 02, Shadow Mode): observes finished calls, never steers the run.
+    verif: crate::verification::ShadowRecorder,
 }
 
 fn now_ms() -> u64 {
@@ -742,6 +744,11 @@ pub(crate) fn run(
         run_id,
         flag,
         persisted: std::cell::Cell::new(0),
+        verif: crate::verification::ShadowRecorder::new(
+            &b.cfg.state_dir,
+            run_id,
+            b.cfg.verification_shadow,
+        ),
     };
     let started = Instant::now();
     let mode = Mode::of(intent);
@@ -1476,6 +1483,11 @@ pub(crate) fn run(
     let _ = ctx_budget;
     let bound_out_cap = crate::resolution::effective_output_cap(None, sealed_out);
     let _ = bound_out_cap;
+    ctx.verif.set_task(&task_id, &task_instance);
+    ctx.verif.set_workspace(
+        verification_binding(b, run_id, &task_instance, mode == Mode::Code),
+        Some(std::path::Path::new(&root)),
+    );
     let result = turn_loop(
         &ctx,
         &mut session,
@@ -1505,6 +1517,10 @@ pub(crate) fn run(
                 catalog_profile,
                 nexus_model::ToolProfile::RepoCodeJobsV1
                     | nexus_model::ToolProfile::RepoCodeAdaptiveJobsV1
+            ),
+            acceptance: matches!(
+                catalog_profile,
+                nexus_model::ToolProfile::RepoCodeAcceptanceV1
             ),
             profile: catalog_profile,
         },
@@ -1565,6 +1581,9 @@ struct Shared<'a> {
     /// M7D: the run's catalog carries the broker-handled background-job tools
     /// (the `muse-v0-jobs` engine in a coding run).
     jobs: bool,
+    /// Phase 06: the run's catalog carries the broker-handled `acceptance_propose` tool (the
+    /// opt-in `muse-v0-acceptance` engine). The model proposes; provenance is fixed by the Core.
+    acceptance: bool,
     /// The tool catalog every request of this run offers.
     profile: nexus_model::ToolProfile,
 }
@@ -1576,6 +1595,10 @@ struct LoopState {
     /// Provider interruptions recovered from (autonomy-first refactor).
     recoveries: u32,
     activity: Vec<ToolActivity>,
+    /// Phase 05: the feedback admitted for delivery whose provider answer has not arrived yet.
+    feedback_inflight: Option<crate::verification::feedback::JournalEntry>,
+    /// Verification Engine: Kernel receipt facts per call index (digests and exit facts only).
+    receipt_facts: BTreeMap<u32, crate::verification::ReceiptFacts>,
     /// EM-04A: trusted activity observations derived from `activity` receipts (engine feed).
     observations: Vec<crate::engine::ActivityObservation>,
     /// EM-04B: validated reasoning signals (model claims; kept apart from `observations`).
@@ -1655,6 +1678,7 @@ impl Ctx<'_> {
         let skip = ls.activity.len().saturating_sub(MAX_ACTIVITY);
         let window: Vec<ToolActivity> = ls.activity[skip..].to_vec();
         let total = ls.activity.len() as u32;
+        self.verif.observe(&ls.activity, &ls.receipt_facts);
         self.b.update(self.run_id, |r| {
             r.state = state.to_owned();
             r.turn = ls.turns;
@@ -1663,6 +1687,127 @@ impl Ctx<'_> {
             r.tool_activity = window;
             r.activity_total = total;
         });
+    }
+}
+
+/// The runtime's own record for the context manager: the activity receipts, plus, once verification
+/// feedback has actually been delivered in this run, the Core's durable account of which delivered
+/// failures still stand. Built from the ledger and journal, never from model text; unchanged
+/// (byte for byte) when no feedback was delivered.
+fn core_receipts(ctx: &Ctx<'_>, ls: &LoopState) -> String {
+    let base = receipts_summary(&ls.activity);
+    if ctx.b.cfg.verification_shadow && ls.mode_code {
+        if let Some(note) =
+            crate::verification::feedback::compaction_note(&ctx.b.cfg.state_dir, ctx.run_id)
+        {
+            return format!("{base} {note}");
+        }
+    }
+    if ctx.b.cfg.verification_shadow && ls.mode_code {
+        if let Some(note) =
+            crate::acceptance::compaction_note(&ctx.b.store, &ctx.b.cfg.state_dir, ctx.run_id)
+        {
+            return format!("{base} {note}");
+        }
+    }
+    base
+}
+
+/// Phase 05. At the final-response boundary: is there a justified, not-yet-delivered verification
+/// feedback for the model? In `Observe` the decision is only recorded and `None` is returned (the
+/// run is untouched). In `Active` the message is returned only after it was made durable; if the
+/// journal cannot be written nothing is delivered and the run ends as it would have.
+fn verification_feedback(
+    ctx: &Ctx<'_>,
+    ls: &mut LoopState,
+    sh: &Shared<'_>,
+    limits: &Limits,
+    turn: u32,
+    started: &Instant,
+) -> Option<String> {
+    use crate::verification::feedback::{self, Decision, FeedbackPolicy, JournalEntry, Stage};
+    let b = ctx.b;
+    if sh.mode != Mode::Code || !b.cfg.verification_shadow {
+        return None;
+    }
+    // the ledger must hold every call made so far before it is read
+    ctx.verif.observe(&ls.activity, &ls.receipt_facts);
+    let can_act = b.store.load(ctx.run_id).is_some_and(|r| !r.run.read_only);
+    let room = !limits.turns.is_some_and(|t| turn >= t)
+        && !limits.runtime_exceeded(*started)
+        && !limits.tool_calls.is_some_and(|c| ls.tool_calls >= c)
+        && !limits.result_bytes.is_some_and(|c| ls.result_bytes >= c);
+    let facts = feedback::Facts {
+        task_instance: sh.task_instance,
+        can_act,
+        cancelled: ctx.stop(),
+        room_for_another_turn: room,
+        // read-only, receipted files only: a mid-run `Current` is not trusted on receipts alone
+        attested: matches!(
+            ctx.verif.attest_now(),
+            crate::verification::attest::Attestation::Attested { .. }
+        ),
+    };
+    let Decision::Eligible(e) = feedback::decide(&b.cfg.state_dir, ctx.run_id, &facts) else {
+        return None;
+    };
+    feedback::crash_point("before-admission");
+    let entry = |stage| JournalEntry {
+        key: e.key.clone(),
+        stage,
+        checks: e.checks.clone(),
+    };
+    let write = |stage| feedback::record(&b.cfg.state_dir, ctx.run_id, &entry(stage));
+    match b.cfg.verification_feedback {
+        FeedbackPolicy::Observe => {
+            if !feedback::load_journal(&b.cfg.state_dir, ctx.run_id).has(&e.key, Stage::Observed) {
+                let _ = write(Stage::Observed);
+            }
+            None
+        }
+        FeedbackPolicy::Active => {
+            if let Err(err) = write(Stage::Prepared).and_then(|_| write(Stage::Admitted)) {
+                crate::verification::persistence::diagnostic(
+                    &b.cfg.state_dir,
+                    ctx.run_id,
+                    "feedback-journal-write-failed",
+                    &err.to_string(),
+                );
+                return None;
+            }
+            ls.feedback_inflight = Some(entry(Stage::Admitted));
+            feedback::crash_point("after-admission");
+            Some(e.message)
+        }
+    }
+}
+
+/// The workspace the run executes in, for the verification target (read from the run record the
+/// broker already keeps; nothing new is asked of the daemon).
+fn verification_binding(
+    b: &Arc<Broker>,
+    run_id: &str,
+    task_instance: &str,
+    code: bool,
+) -> crate::verification::target::WorkspaceBinding {
+    use crate::verification::target::{Baseline, WorkspaceBinding, WorkspaceKind};
+    let r = b.store.load(run_id).map(|r| r.run);
+    let kind = match r.as_ref().map(|r| r.workspace_kind.as_deref()) {
+        Some(Some("direct")) => WorkspaceKind::Direct,
+        _ if code && r.is_some() => WorkspaceKind::Isolated,
+        _ => WorkspaceKind::Unknown,
+    };
+    let baseline = match r.as_ref().and_then(|r| r.workspace_relation.as_deref()) {
+        Some("fresh") => Baseline::Fresh,
+        Some("continued" | "rebased") => Baseline::Seeded,
+        _ => Baseline::Unknown,
+    };
+    WorkspaceBinding {
+        kind,
+        task_instance_id: Some(task_instance.to_owned()),
+        baseline_commit: r.as_ref().and_then(|r| r.worktree_commit.clone()),
+        baseline,
+        in_place_execution: r.as_ref().is_some_and(|r| r.exec_scope.is_some()),
     }
 }
 
@@ -2294,6 +2439,70 @@ fn signal_call(
     })
 }
 
+/// Phase 06: one call of the acceptance-criteria tool. Everything the model sends is validated
+/// strictly; what is recorded is model-proposed by construction. Nothing here can raise an
+/// authority, touch the workspace, or cause a provider request.
+fn acceptance_call(
+    ctx: &Ctx<'_>,
+    sh: &Shared<'_>,
+    ls: &mut LoopState,
+    act: &mut ToolActivity,
+    args: &Value,
+) -> Rendered {
+    let tool = crate::acceptance::TOOL;
+    act.tool = tool.to_owned();
+    let refuse = |act: &mut ToolActivity, code: &str, msg: &str| {
+        act.status = "refused".into();
+        act.error_code = Some(code.to_owned());
+        render_error(tool, code, msg)
+    };
+    let criteria = match crate::acceptance::tool::validate(args) {
+        Ok(c) => c,
+        Err(e) => {
+            act.args_summary = "invalid criteria".into();
+            return refuse(act, e.code, &e.message);
+        }
+    };
+    act.args_summary = format!("{} criteria", criteria.len());
+    let _ = sh;
+    // claims about checks resolve against the ledger, which must hold every call made so far
+    ctx.verif.observe(&ls.activity, &ls.receipt_facts);
+    let Some(anchor) = crate::acceptance::store::anchor_for_run(&ctx.b.store, ctx.run_id) else {
+        return refuse(
+            act,
+            "no-task",
+            "this run belongs to no project, so there is no task to record criteria for",
+        );
+    };
+    match crate::acceptance::tool::handle(
+        &ctx.b.cfg.state_dir,
+        &anchor,
+        ctx.run_id,
+        act.index,
+        &criteria,
+    ) {
+        Ok(out) => {
+            act.status = "executed".into();
+            let text = crate::acceptance::tool::render(&out);
+            Rendered {
+                digest: digest_of(&text),
+                text,
+                is_error: false,
+                truncated: false,
+            }
+        }
+        Err(r) => {
+            act.status = "failed".into();
+            act.error_code = Some(r.code().to_owned());
+            render_error(
+                tool,
+                r.code(),
+                "the criteria were not recorded; nothing changed",
+            )
+        }
+    }
+}
+
 /// EM-04A: the trusted observation an executed tool call yields, from the Core's own receipt
 /// (status, Kernel execution id, Native verification verdict) - never from model text. Refused,
 /// failed, uncertain or cancelled calls, reads and non-verification commands yield none.
@@ -2664,7 +2873,7 @@ fn turn_loop(
             (sh.ctx_budget as f64 * crate::recovery::context_scale(failures_in_a_row)) as usize;
         if sh.mode == Mode::Code
             && !ls.memory_requested
-            && crate::context::compact(&mut items, &receipts_summary(&ls.activity), ctx_budget)
+            && crate::context::compact(&mut items, &core_receipts(ctx, ls), ctx_budget)
         {
             ls.compactions += 1;
             let n = ls.compactions;
@@ -2993,6 +3202,21 @@ fn turn_loop(
                 }
             }
         };
+        if let Some(mut e) = ls.feedback_inflight.take() {
+            crate::verification::feedback::crash_point("after-response");
+            // a provider answer arrived after the feedback was sent: it was incorporated
+            e.stage = crate::verification::feedback::Stage::Incorporated;
+            if let Err(err) =
+                crate::verification::feedback::record(&b.cfg.state_dir, ctx.run_id, &e)
+            {
+                crate::verification::persistence::diagnostic(
+                    &b.cfg.state_dir,
+                    ctx.run_id,
+                    "feedback-journal-write-failed",
+                    &err.to_string(),
+                );
+            }
+        }
         if let Some((i, o)) = out.usage {
             ls.usage_in += i;
             ls.usage_out += o;
@@ -3006,11 +3230,7 @@ fn turn_loop(
                 // a memory (or an unusable answer: then plain shortening takes over next turn);
                 // either way this reply is NOT the end of the task
                 let folded = mem.len() >= 200
-                    && crate::context::fold_into_memory(
-                        &mut items,
-                        &mem,
-                        &receipts_summary(&ls.activity),
-                    );
+                    && crate::context::fold_into_memory(&mut items, &mem, &core_receipts(ctx, ls));
                 if !folded
                     && matches!(items.last(), Some(InputItem::Message { content, .. }) if content == crate::context::MEMORY_PROMPT)
                 {
@@ -3071,6 +3291,22 @@ fn turn_loop(
                     continue;
                 }
                 Ok(_) => {}
+            }
+            // Verification feedback comes AFTER the Engineering Mode: when the Engine already asked
+            // the model to continue (above) this turn is not ours; the two never both continue it.
+            if let Some(msg) = verification_feedback(ctx, ls, sh, limits, turn, started) {
+                let _ = session.state(
+                    nexus_client::model_run::ModelRunState::ToolRunning,
+                    "A verification check failed on the current source; reporting that to the model.",
+                    None,
+                );
+                push_model_reasoning(&mut items, &out);
+                push_model_text(&mut items, &out);
+                items.push(InputItem::Message {
+                    role: "user".into(),
+                    content: msg,
+                });
+                continue;
             }
             let (v, u) = check_citations(&out.text, &evidence);
             ls.citations_verified = v;
@@ -3186,6 +3422,19 @@ fn turn_loop(
                     idx,
                     &call_id,
                     &call.name,
+                    &args_echo,
+                    if r.is_error { "refused" } else { "executed" },
+                    r.is_error,
+                );
+                r
+            } else if sh.acceptance && call.name == crate::acceptance::TOOL {
+                // Control-plane input like the signals tool: no Kernel tool, no approval, no file,
+                // no provider request. Provenance of whatever it records is fixed by the Core.
+                let r = acceptance_call(ctx, sh, ls, &mut act, &call.arguments);
+                let _ = session.tool_call(
+                    idx,
+                    &call_id,
+                    crate::acceptance::TOOL,
                     &args_echo,
                     if r.is_error { "refused" } else { "executed" },
                     r.is_error,
@@ -3427,6 +3676,16 @@ fn turn_loop(
                                             p.model_name,
                                             &p.args,
                                             &result,
+                                        );
+                                        ls.receipt_facts.insert(
+                                            act.index,
+                                            crate::verification::ReceiptFacts::from_result(
+                                                p.model_name,
+                                                &p.args,
+                                                result.get("output"),
+                                                (p.model_name == "proc_run")
+                                                    .then(|| is_verification_command(&p.args)),
+                                            ),
                                         );
                                         record_receipts(ls, &mut act, &cp, &result);
                                         pending_observation = observe(
@@ -4341,6 +4600,7 @@ fn finalize(
     // isolated working copy (kept for review whatever the outcome).
     let mut changed: Vec<nexus_client::intent_client::ChangedFile> = Vec::new();
     let mut diff_digest: Option<String> = None;
+    let (mut diff_seen, mut diff_truncated) = (false, false);
     if ls.mode_code {
         if let Some(t) = ctx
             .b
@@ -4363,6 +4623,15 @@ fn finalize(
                     .pointer("/diff/diffDigest")
                     .and_then(|v| v.as_str())
                     .map(str::to_owned);
+                diff_seen = true;
+                diff_truncated = resp
+                    .pointer("/diff/diffTruncated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true)
+                    || resp
+                        .pointer("/diff/filesTruncated")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
             }
         }
     }
@@ -4380,6 +4649,44 @@ fn finalize(
         &ls.activity,
         ctx.persisted.get(),
     ));
+    ctx.verif.observe(&ls.activity, &ls.receipt_facts);
+    if ls.mode_code && ctx.b.cfg.verification_shadow {
+        // anything admitted but never answered is uncertain; a delivered failure that no longer
+        // stands is resolved (never re-sends anything)
+        crate::verification::feedback::settle(&ctx.b.cfg.state_dir, ctx.run_id);
+    }
+    if ls.mode_code {
+        // the change set read above, as the end-of-run cross-check of the receipts (shadow only)
+        let paths: Vec<String> = changed.iter().map(|c| c.path.clone()).collect();
+        ctx.verif
+            .finish(&crate::verification::shadow::FinalChangeSet {
+                available: diff_seen,
+                truncated: diff_truncated,
+                paths: &paths,
+                diff_digest: diff_digest.as_deref(),
+            });
+    }
+    // Phase 04, reporting only: what the persisted evidence supports about verification. Computed
+    // from the durable ledger (not the recorder's memory), kept apart from `state` and `completion`,
+    // and never sent to the model.
+    let verification = (ls.mode_code && ctx.b.cfg.verification_shadow).then(|| {
+        crate::verification::reconcile::evaluate(
+            &ctx.b.cfg.state_dir,
+            ctx.run_id,
+            &crate::verification::reconcile::RunFacts {
+                code_run: true,
+                tool_calls: ls.tool_calls,
+            },
+        )
+    });
+    // Phase 06, reporting only: which of the task's requirements the evidence supports. Read from the
+    // durable contract journals and this run's ledger; independent of lifecycle, legacy completion
+    // and the verification summary; absent when the task has no contract.
+    let acceptance = if ls.mode_code {
+        crate::acceptance::report_for_run(&ctx.b.store, &ctx.b.cfg.state_dir, ctx.run_id)
+    } else {
+        None
+    };
     let skip = ls.activity.len().saturating_sub(MAX_ACTIVITY);
     let activity_total = ls.activity.len() as u32;
     let activity: Vec<ToolActivity> = ls.activity[skip..].to_vec();
@@ -4397,6 +4704,8 @@ fn finalize(
         r.tool_result_bytes = bytes;
         r.activity_total = activity_total;
         r.tool_activity = activity;
+        r.verification = verification;
+        r.acceptance = acceptance;
         r.citations_verified = verified;
         r.citations_unverified = unverified;
         r.pending_approval = None;
