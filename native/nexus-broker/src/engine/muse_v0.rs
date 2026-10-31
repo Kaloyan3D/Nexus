@@ -63,6 +63,24 @@ pub static MUSE_V0_JOBS: MuseV0 = MuseV0 {
     },
 };
 
+/// Phase 06: the opt-in acceptance variant of `muse-v0` - identical run logic, a catalog that
+/// additionally carries `acceptance_propose` (`RepoCodeAcceptanceV1`). Registered only in
+/// `test-engines` builds until it is deliberately promoted to a Registry mode; production builds do
+/// not contain it, so the production catalog and request bodies cannot change by accident.
+pub const ACCEPTANCE_ENGINE_ID: &str = "muse-v0-acceptance";
+pub static MUSE_V0_ACCEPTANCE: MuseV0 = MuseV0 {
+    descriptor: EngineDescriptor {
+        engine_id: ACCEPTANCE_ENGINE_ID,
+        contract_version: super::ENGINE_CONTRACT_VERSION,
+        mode_ids: &["engineering-v2"],
+        roles: &["muse_main"],
+        state_schema: 1,
+        may_propose_effort: false,
+        inherits_state: false,
+        request_reserve_bytes: 0,
+    },
+};
+
 /// Engine state: the stall budgets and the narration window. Nothing else.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MuseV0State {

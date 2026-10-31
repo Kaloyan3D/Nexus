@@ -14,6 +14,7 @@
 //!   shell or a filesystem operation;
 //! * clients can only see and cancel runs owned by their own client id.
 
+pub mod acceptance;
 pub mod attempt_target;
 pub mod code;
 pub mod completion;
@@ -38,6 +39,7 @@ pub mod state_lock;
 pub mod store;
 pub mod threads;
 pub mod trust;
+pub mod verification;
 pub mod worktree_ops;
 
 pub use config::{BrokerConfig, CodeCaps, WorkspaceSpec};

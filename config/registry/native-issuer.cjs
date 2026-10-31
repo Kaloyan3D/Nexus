@@ -56,7 +56,7 @@ const NATIVE_SCOPES = Object.freeze({
     // builds; a production runtime answers `engine-unavailable` for each). Fixture install roots
     // name them in the default mode to drive them end to end, exactly as before this table existed.
     // The adaptive production engine `nexus-adaptive-v1` is NOT among them: it can never be issued here.
-    experimentalEngineIds: Object.freeze(['effort-test-v0', 'muse-v1-shadow', 'muse-v1-signals']),
+    experimentalEngineIds: Object.freeze(['effort-test-v0', 'muse-v1-shadow', 'muse-v1-signals', 'muse-v0-acceptance']),
     role: SUPPORTED_ROLE,
     requiresSavedConfiguration: false,
   }),

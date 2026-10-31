@@ -85,6 +85,7 @@ pub fn tool_id_for_profile(
         P::RepoCodeV1
         | P::RepoCodeMuseSignalsV1
         | P::RepoCodeJobsV1
+        | P::RepoCodeAcceptanceV1
         | P::RepoCodeAdaptiveJobsV1 => tool_id_for(model_name).or_else(|| {
             CODE_EXTRA
                 .iter()
@@ -159,9 +160,16 @@ pub fn definitions_for(profile: crate::request::ToolProfile) -> Vec<Value> {
     let mut v = definitions();
     if matches!(
         profile,
-        P::RepoCodeV1 | P::RepoCodeMuseSignalsV1 | P::RepoCodeJobsV1 | P::RepoCodeAdaptiveJobsV1
+        P::RepoCodeV1
+            | P::RepoCodeMuseSignalsV1
+            | P::RepoCodeJobsV1
+            | P::RepoCodeAcceptanceV1
+            | P::RepoCodeAdaptiveJobsV1
     ) {
         v.extend(code_definitions());
+    }
+    if profile == P::RepoCodeAcceptanceV1 {
+        v.push(acceptance_definition());
     }
     if profile == P::RepoCodeMuseSignalsV1 {
         v.push(muse_signals_definition());
@@ -186,6 +194,42 @@ pub fn definitions_for(profile: crate::request::ToolProfile) -> Vec<Value> {
 /// counter, identity or provider field. A test compares it byte for byte with the definition the
 /// CommonJS module produces.
 pub const MUSE_SIGNALS_TOOL: &str = "muse_update_reasoning_state";
+
+/// Phase 06: the acceptance-criteria tool. Broker-handled control-plane input like the signals tool
+/// (no Kernel tool id, no approval, no file, no provider request). The model proposes; the Core
+/// records the proposal as MODEL-PROPOSED. There is deliberately no field through which a caller could
+/// name an authority, mark a criterion approved or verified, or change an existing requirement.
+pub const ACCEPTANCE_TOOL: &str = "acceptance_propose";
+
+pub fn acceptance_definition() -> Value {
+    json!({
+        "type": "function",
+        "name": ACCEPTANCE_TOOL,
+        "description": "Record the acceptance criteria you are working toward for this task, as YOUR OWN interpretation of what it requires. Each criterion is one observable behavior, for example 'A user can move a card to another column'. Nexus stores them as model-proposed: they are not user requirements, recording a criterion verifies nothing, and restating one that already exists is recognised as a duplicate. Optionally list in `checkedByCalls` the numbers of earlier tool calls in this run (commands that really ran) that you believe check the criterion; that is kept as an advisory claim and never counts as verification. You cannot mark a criterion as required, approved or verified, and you cannot change an existing requirement.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "criteria": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 12,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "description": {"type": "string", "maxLength": 400, "description": "One observable behavior the finished work should have."},
+                            "kind": {"type": "string", "enum": ["criterion", "assumption"], "description": "`assumption` when you are guessing what the task means."},
+                            "checkedByCalls": {"type": "array", "maxItems": 8, "items": {"type": "integer", "minimum": 1}, "description": "Numbers of earlier tool calls in this run that you believe check this criterion (advisory)."},
+                        },
+                        "required": ["description"],
+                        "additionalProperties": false,
+                    },
+                },
+            },
+            "required": ["criteria"],
+            "additionalProperties": false,
+        },
+    })
+}
 
 /// The canonical cognitive phases (historical Governor order).
 pub const MUSE_PHASES: [&str; 7] = [
@@ -344,6 +388,11 @@ pub const REPO_CODE_JOBS_V1_CATALOG_DIGEST: &str =
 pub const REPO_CODE_ADAPTIVE_JOBS_V1_CATALOG_DIGEST: &str =
     "d8650029799af93456f31c0c9b42cafeab46afc88490ada1197ed50105a87ecd";
 
+/// Phase 06: `RepoCodeV1` plus `acceptance_propose`, for the opt-in `muse-v0-acceptance` engine. A NEW
+/// frozen identity; every other catalog is unchanged.
+pub const REPO_CODE_ACCEPTANCE_V1_CATALOG_DIGEST: &str =
+    "8b02b940d0cc0036679718313f30779c83a320d4a4b5b2a8543153b2e12a9edf";
+
 /// The frozen digest of `profile`'s catalog.
 pub fn frozen_catalog_digest(profile: crate::request::ToolProfile) -> &'static str {
     use crate::request::ToolProfile as P;
@@ -352,6 +401,7 @@ pub fn frozen_catalog_digest(profile: crate::request::ToolProfile) -> &'static s
         P::RepoCodeV1 => REPO_CODE_V1_CATALOG_DIGEST,
         P::RepoCodeMuseSignalsV1 => REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST,
         P::RepoCodeJobsV1 => REPO_CODE_JOBS_V1_CATALOG_DIGEST,
+        P::RepoCodeAcceptanceV1 => REPO_CODE_ACCEPTANCE_V1_CATALOG_DIGEST,
         P::RepoCodeAdaptiveJobsV1 => REPO_CODE_ADAPTIVE_JOBS_V1_CATALOG_DIGEST,
     }
 }
@@ -749,5 +799,89 @@ mod job_tools_tests {
         for d in defs.as_array().unwrap() {
             assert!(d["description"].as_str().unwrap().len() < 700);
         }
+    }
+}
+
+#[cfg(test)]
+mod acceptance_profile_tests {
+    use super::*;
+    use crate::request::ToolProfile as P;
+
+    fn names(p: P) -> Vec<String> {
+        definitions_for(p)
+            .iter()
+            .map(|d| d["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn the_acceptance_catalog_is_the_coding_catalog_plus_exactly_one_tool_and_is_frozen() {
+        let code = names(P::RepoCodeV1);
+        let acc = names(P::RepoCodeAcceptanceV1);
+        assert_eq!(
+            acc[..code.len()],
+            code[..],
+            "every existing tool, byte for byte, in the same order"
+        );
+        assert_eq!(acc.len(), code.len() + 1);
+        assert_eq!(acc.last().unwrap(), ACCEPTANCE_TOOL);
+        assert_eq!(
+            catalog_digest_of(&definitions_for(P::RepoCodeAcceptanceV1)),
+            REPO_CODE_ACCEPTANCE_V1_CATALOG_DIGEST,
+            "any edit of this tool's definition is a catalog change and must be deliberate"
+        );
+        assert!(verify_catalog(P::RepoCodeAcceptanceV1));
+        assert_ne!(
+            REPO_CODE_ACCEPTANCE_V1_CATALOG_DIGEST,
+            REPO_CODE_V1_CATALOG_DIGEST
+        );
+    }
+
+    #[test]
+    fn no_other_catalog_offers_the_tool_and_it_has_no_kernel_tool_id() {
+        for p in [
+            P::RepoInspectV1,
+            P::RepoCodeV1,
+            P::RepoCodeMuseSignalsV1,
+            P::RepoCodeJobsV1,
+            P::RepoCodeAdaptiveJobsV1,
+        ] {
+            assert!(!names(p).contains(&ACCEPTANCE_TOOL.to_owned()), "{p:?}");
+        }
+        for p in [P::RepoCodeV1, P::RepoCodeAcceptanceV1] {
+            assert!(
+                tool_id_for_profile(p, ACCEPTANCE_TOOL).is_none(),
+                "{p:?}: broker-handled, never a Kernel tool"
+            );
+        }
+        // the production catalog is untouched by this change
+        assert_eq!(
+            catalog_digest_of(&definitions_for(P::RepoCodeV1)),
+            REPO_CODE_V1_CATALOG_DIGEST
+        );
+    }
+
+    #[test]
+    fn the_definition_offers_no_field_that_could_name_an_authority() {
+        let d = acceptance_definition();
+        let item = &d["parameters"]["properties"]["criteria"]["items"];
+        let props: Vec<&str> = item["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(props, ["checkedByCalls", "description", "kind"]);
+        assert_eq!(item["additionalProperties"], false);
+        assert_eq!(d["parameters"]["additionalProperties"], false);
+        let text = d.to_string().to_lowercase();
+        for forbidden in ["provenance", "authority", "approve", "trusted"] {
+            // the description may SAY the model cannot do these; no property may be named for them
+            assert!(
+                !props.iter().any(|p| p.to_lowercase().contains(forbidden)),
+                "{forbidden}"
+            );
+        }
+        assert!(text.contains("model-proposed") && text.contains("never counts as verification"));
     }
 }

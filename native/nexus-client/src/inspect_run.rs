@@ -394,6 +394,7 @@ pub fn run_inspect_turn(
         ToolProfile::RepoCodeV1
         | ToolProfile::RepoCodeMuseSignalsV1
         | ToolProfile::RepoCodeJobsV1
+        | ToolProfile::RepoCodeAcceptanceV1
         | ToolProfile::RepoCodeAdaptiveJobsV1 => nexus_kernel::SCOPE_REPO_CODE,
     };
     if grant.scope != want_scope {

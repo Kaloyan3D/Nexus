@@ -83,6 +83,12 @@ pub enum ToolProfile {
     /// Adaptive + Jobs: the `nexus-adaptive-v1` catalog — the full coding
     /// catalog, the reasoning-signals tool, and the four job tools.
     RepoCodeAdaptiveJobsV1,
+    /// Phase 06 (opt-in): `RepoCodeV1` plus the broker-handled `acceptance_propose` tool, with which
+    /// the SAME coding model records its proposed acceptance criteria (always as model-proposed
+    /// provenance; it has no Kernel tool id and no authority). Offered only to the `muse-v0-acceptance`
+    /// engine, which exists only in `test-engines` builds until it is deliberately promoted;
+    /// `RepoCodeV1` stays byte-identical.
+    RepoCodeAcceptanceV1,
 }
 
 /// Bounds for a tool-capable conversation.

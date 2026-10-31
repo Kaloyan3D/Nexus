@@ -177,6 +177,7 @@ pub fn prepare(
                     | crate::request::ToolProfile::RepoCodeV1
                     | crate::request::ToolProfile::RepoCodeJobsV1
                     | crate::request::ToolProfile::RepoCodeMuseSignalsV1
+                    | crate::request::ToolProfile::RepoCodeAcceptanceV1
                     | crate::request::ToolProfile::RepoCodeAdaptiveJobsV1),
                 ) => serde_json::json!({
                     "model": target.remote_model_id_confirmed,

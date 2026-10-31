@@ -125,9 +125,11 @@ fn only_the_sealed_signals_capable_engine_descriptors_carry_the_signals_catalog(
         [
             crate::engine::muse_v0::JOBS_ENGINE_ID,
             muse_v1::ACTIVE_ENGINE_ID,
-            muse_v1::SIGNALS_ENGINE_ID
+            muse_v1::SIGNALS_ENGINE_ID,
+            crate::engine::muse_v0::ACCEPTANCE_ENGINE_ID
         ],
-        "the jobs engine plus the two Muse signals-capable engines, and no other"
+        "the jobs engine, the two Muse signals-capable engines and (Phase 06, test-engines only) \
+         the opt-in acceptance engine, and no other"
     );
     let signals_capable: Vec<&str> = engines(true)
         .iter()
