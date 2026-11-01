@@ -111,8 +111,9 @@ pub fn run_host(run: HostRun<'_>) -> Result<SandboxOutcome, ToolError> {
     // cannot. Without a writable cgroup the run honestly falls back to
     // process-group supervision and says so in its outcome.
     let leaf_name = format!(
-        "nexus-host-{}-{}",
+        "nexus-host-{}-{}-{}",
         std::process::id(),
+        supervisor_start(std::process::id()).unwrap_or(0),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
@@ -367,4 +368,69 @@ pub fn manifest_diff(
         "outsideProjectEffects": "not observed: a Full Access command can change anything the OS user can reach; Nexus does not scan outside the project and cannot undo those effects",
         "recoverable": false,
     })
+}
+
+fn supervisor_start(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+/// Only reap leaves whose recorded supervisor is no longer that process.
+/// Live supervisors can belong to another daemon using the same user cgroup.
+fn orphan_host_leaf(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("nexus-host-") else {
+        return false;
+    };
+    let parts: Vec<_> = rest.split('-').collect();
+    if !(parts.len() == 2 || parts.len() == 3) || parts.iter().any(|p| p.parse::<u128>().is_err()) {
+        return false;
+    }
+    let Ok(pid) = parts[0].parse::<u32>() else {
+        return false;
+    };
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        Ok(_) if parts.len() == 2 || parts[1] == "0" => false, // legacy leaf: do not kill a live owner
+        Ok(_) => supervisor_start(pid).is_some_and(|start| Some(start) != parts[1].parse().ok()),
+    }
+}
+
+pub fn reap_orphan_host_cgroups(base: &Path) {
+    if let Ok(entries) = std::fs::read_dir(base) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_str().is_some_and(orphan_host_leaf) {
+                crate::sandbox::kill_and_remove_cgroup(&entry.path());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod supervisor_identity_tests {
+    #[test]
+    fn live_supervisors_and_reused_pids_are_distinguished() {
+        let pid = std::process::id();
+        let start = super::supervisor_start(pid).unwrap();
+        assert!(!super::orphan_host_leaf(&format!(
+            "nexus-host-{pid}-{start}-1"
+        )));
+        assert!(super::orphan_host_leaf(&format!(
+            "nexus-host-{pid}-{}-1",
+            start + 1
+        )));
+        assert!(!super::orphan_host_leaf(&format!("nexus-host-{pid}-1")));
+        assert!(super::orphan_host_leaf("nexus-host-0-1-1"));
+        for name in [
+            "nexus-exec-test",
+            "nexus-host-invalid",
+            "nexus-host-1-2-3-4",
+        ] {
+            assert!(!super::orphan_host_leaf(name));
+        }
+    }
 }

@@ -12658,9 +12658,12 @@ fn em04c1_the_worker_is_lazy_and_inherits_neither_environment_nor_descriptors() 
     for c in &p.cmdlines {
         // nothing but the node binary, the heap flag and the task generation id
         let tail = c.rsplit(" -- ").next().unwrap_or("");
+        let trusted_node = nexus_broker::trust::resolve_node("node", &[]).unwrap();
+        let executable = c.split_whitespace().next().unwrap();
+        assert_eq!(std::fs::canonicalize(executable).unwrap(), trusted_node);
         assert!(
             c.contains(
-                "node --permission --max-old-space-size=48 --max-semi-space-size=2 ... -- task-"
+                " --permission --max-old-space-size=48 --max-semi-space-size=2 ... -- task-"
             ),
             "{c}"
         );

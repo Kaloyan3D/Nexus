@@ -339,7 +339,12 @@ fn https_tunnels_node_fetch_and_the_clients_that_ignore_proxy_settings_fail_with
     let v = run(&mut fx, script, &np, &pol);
     let t = text(&v);
     assert!(t.contains("curl=200/0"), "{t}");
-    assert!(t.contains("node-fetch=OK fixture-lib"), "{t}");
+    assert!(
+        t.lines().any(|line| line.starts_with("node-fetch=")
+            && line.contains("OK fixture-lib")
+            && !line.contains("FAIL")),
+        "{t}"
+    );
     // a client that does not use the proxy cannot reach anything: a clear failure, not a bypass
     assert!(t.contains("node-no-proxy-env=FAIL"), "{t}");
     assert!(

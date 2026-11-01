@@ -288,7 +288,7 @@ fn bwrap_supports_fd_binds() -> bool {
 
 impl ExecBackend for LinuxBwrapBackend {
     fn caps(&self) -> BackendCaps {
-        let fd = bwrap_supports_fd_binds() && cfg!(target_arch = "x86_64");
+        let fd = bwrap_supports_fd_binds() && crate::sandbox::seccomp_supported();
         BackendCaps {
             id: "linux-bwrap/1",
             fs_scopes: if fd {

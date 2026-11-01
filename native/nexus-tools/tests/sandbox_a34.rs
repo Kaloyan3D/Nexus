@@ -27,6 +27,11 @@ impl SandboxControl for Never {
 fn caps_ok(test: &str) -> bool {
     let c = preflight();
     if !c.available {
+        assert!(
+            std::env::var_os("NEXUS_REQUIRE_SANDBOX").is_none(),
+            "mandatory sandbox enforcement ({test}) unavailable: {:?}",
+            c.problems
+        );
         println!("NOT RUN ({test}): sandbox unavailable: {:?}", c.problems);
     }
     c.available
@@ -49,7 +54,7 @@ fn spec(id: &str, program: &str, args: &[&str], src: &std::path::Path) -> Sandbo
     env.insert("PATH".to_owned(), "/usr/bin:/bin".to_owned());
     env.insert("HOME".to_owned(), "/work/out".to_owned());
     SandboxSpec {
-        id: id.to_owned(),
+        id: format!("{id}p{}", std::process::id()),
         program: program.to_owned(),
         args: args.iter().map(|s| s.to_string()).collect(),
         src_dir: src.to_path_buf(),
@@ -140,6 +145,7 @@ res = {{}}
 for p in [{canary:?}, {home:?} + "/.ssh/id_rsa", {home:?} + "/.cargo/credentials.toml",
           "/etc/shadow", "/root", "/home", "/var", "/run/user", "/sys/kernel", "/boot"]:
     res[p] = os.path.exists(p)
+res["etc_listing"] = sorted(os.listdir("/etc")) if os.path.isdir("/etc") else []
 res["root_listing"] = sorted(os.listdir("/"))
 print(json.dumps(res))
 "#,
@@ -155,14 +161,19 @@ print(json.dumps(res))
     );
     let v: serde_json::Value = serde_json::from_str(out(&o).trim()).unwrap();
     for (k, val) in v.as_object().unwrap() {
-        if k != "root_listing" {
+        if k != "root_listing" && k != "etc_listing" {
             assert_eq!(val, false, "{k} is visible inside the sandbox");
         }
     }
+    let etc: Vec<String> = serde_json::from_value(v["etc_listing"].clone()).unwrap();
+    assert!(
+        etc.iter().all(|name| name == "alternatives"),
+        "unexpected host configuration: {etc:?}"
+    );
     let listing: Vec<String> = serde_json::from_value(v["root_listing"].clone()).unwrap();
     for allowed in &listing {
         assert!(
-            ["usr", "bin", "sbin", "lib", "lib64", "proc", "dev", "tmp", "work"]
+            ["usr", "bin", "sbin", "lib", "lib64", "proc", "dev", "tmp", "work", "etc"]
                 .contains(&allowed.as_str()),
             "unexpected root entry {allowed}: {listing:?}"
         );
@@ -360,8 +371,7 @@ def sc(nr, *a):
     r = libc.syscall(nr, *[ctypes.c_long(x) for x in a])
     return (r, ctypes.get_errno())
 res["setuid0"] = "OK" if os.geteuid() == 0 else "not-root"
-for name, nr in [("ptrace", 101), ("mount", 165), ("unshare", 272), ("setns", 308),
-                 ("bpf", 321), ("keyctl", 250), ("io_uring_setup", 425), ("kexec_load", 246)]:
+for name, nr in __SYSCALLS__:
     r, e = sc(nr, 0, 0, 0, 0, 0, 0)
     res[name] = {"ret": r, "errno": e}
 # clone3 is forced to ENOSYS
@@ -373,7 +383,34 @@ except Exception as ex:
     res["os_setuid"] = type(ex).__name__
 print(json.dumps(res))
 "#;
-    let o = py("privesc", code, src.path());
+    let calls = [
+        libc::SYS_ptrace,
+        libc::SYS_mount,
+        libc::SYS_unshare,
+        libc::SYS_setns,
+        libc::SYS_bpf,
+        libc::SYS_keyctl,
+        libc::SYS_io_uring_setup,
+        libc::SYS_kexec_load,
+    ];
+    let names = [
+        "ptrace",
+        "mount",
+        "unshare",
+        "setns",
+        "bpf",
+        "keyctl",
+        "io_uring_setup",
+        "kexec_load",
+    ];
+    let table = names
+        .iter()
+        .zip(calls)
+        .map(|(n, nr)| format!("({n:?}, {nr})"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let code = code.replace("__SYSCALLS__", &format!("[{table}]"));
+    let o = py("privesc", &code, src.path());
     assert_eq!(
         o.exit,
         ExitKind::Exited(0),
@@ -456,6 +493,12 @@ fn memory_exhaustion_is_stopped() {
     s.limits.address_space_bytes = 6 * 1024 * 1024 * 1024;
     s.limits.wall_ms = 20_000;
     let o = run_sandboxed(&s, &mut Never).expect("run");
+    if o.resource_enforcement == "kernel-cgroup" {
+        assert!(
+            o.oom_killed,
+            "scoped OOM evidence must survive scope collection: {o:?}"
+        );
+    }
     assert!(
         matches!(
             o.exit,
@@ -873,6 +916,7 @@ fn preflight_reports_resource_enforcement_honestly() {
 // ============ A3.4 audit: seccomp, procfs, mounts, capabilities ===========
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn x32_abi_and_compat_syscalls_cannot_bypass_the_filter() {
     require_sandbox!("x32");
     let src = stage();
@@ -1002,7 +1046,7 @@ flags = {"newuser": 0x10000000, "newns": 0x00020000, "newnet": 0x40000000,
          "newcgroup": 0x02000000}
 res = {}
 for name, f in flags.items():
-    r = libc.syscall(56, ctypes.c_long(f | SIGCHLD), 0, 0, 0, 0)
+    r = libc.syscall(__CLONE__, ctypes.c_long(f | SIGCHLD), 0, 0, 0, 0)
     e = ctypes.get_errno()
     if r == 0:
         os._exit(0)          # we are the child of an ALLOWED clone
@@ -1011,14 +1055,18 @@ for name, f in flags.items():
         except Exception: pass
     res[name] = {"ret": r, "errno": e}
 # a plain fork-style clone must still work
-r = libc.syscall(56, ctypes.c_long(SIGCHLD), 0, 0, 0, 0)
+r = libc.syscall(__CLONE__, ctypes.c_long(SIGCHLD), 0, 0, 0, 0)
 if r == 0:
     os._exit(0)
 os.waitpid(r, 0)
 res["plain_fork"] = "ok" if r > 0 else "fail"
 print(json.dumps(res))
 "#;
-    let o = py("nested-ns", code, src.path());
+    let code = code.replace(
+        "libc.syscall(__CLONE__,",
+        &format!("libc.syscall({},", libc::SYS_clone),
+    );
+    let o = py("nested-ns", &code, src.path());
     assert_eq!(
         o.exit,
         ExitKind::Exited(0),
@@ -1045,4 +1093,51 @@ print(json.dumps(res))
         v["plain_fork"], "ok",
         "ordinary fork must keep working: {v}"
     );
+}
+
+#[test]
+fn system_linker_configuration_is_minimal_and_read_only() {
+    require_sandbox!("system-linker");
+    let src = stage();
+    let o = py(
+        "systemlinker",
+        r#"
+import os, subprocess
+if os.path.exists('/etc/alternatives/ld'):
+    subprocess.run(['/usr/bin/ld', '--version'], check=True, stdout=subprocess.DEVNULL)
+    try:
+        fd = os.open('/etc/alternatives/ld', os.O_WRONLY)
+    except OSError:
+        pass
+    else:
+        os.close(fd)
+        raise AssertionError('system linker is writable')
+assert not os.path.exists('/etc/shadow')
+assert not os.path.exists('/etc/passwd')
+print('system-linker-ok')
+"#,
+        src.path(),
+    );
+    assert_eq!(
+        o.exit,
+        ExitKind::Exited(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(out(&o).contains("system-linker-ok"));
+}
+
+#[test]
+fn short_commands_are_observed_and_polling_groups_are_reusable() {
+    require_sandbox!("short-commands");
+    let src = stage();
+    for backend in [ResourceBackend::KernelScope, ResourceBackend::Polling] {
+        for _ in 0..12 {
+            let mut s = spec("shortcommands", "/usr/bin/true", &[], src.path());
+            s.limits.backend = backend;
+            let o = run_sandboxed(&s, &mut Never).expect("short command must be supervised");
+            assert_eq!(o.exit, ExitKind::Exited(0));
+            assert!(cgroup_gone(&o.cgroup), "{}", o.cgroup);
+        }
+    }
 }

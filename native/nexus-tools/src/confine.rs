@@ -35,9 +35,9 @@ pub const SCOPE_ABI: u32 = 6;
 
 // ---------------------------------------------------------------------------------------- landlock ABI
 
-const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
-const SYS_LANDLOCK_ADD_RULE: libc::c_long = 445;
-const SYS_LANDLOCK_RESTRICT_SELF: libc::c_long = 446;
+const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = libc::SYS_landlock_create_ruleset;
+const SYS_LANDLOCK_ADD_RULE: libc::c_long = libc::SYS_landlock_add_rule;
+const SYS_LANDLOCK_RESTRICT_SELF: libc::c_long = libc::SYS_landlock_restrict_self;
 
 const FS_EXECUTE: u64 = 1 << 0;
 const FS_WRITE_FILE: u64 = 1 << 1;

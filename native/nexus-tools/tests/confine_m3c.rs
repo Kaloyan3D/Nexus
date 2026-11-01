@@ -24,6 +24,11 @@ fn ready(t: &str) -> bool {
         || !c.launch_gate
         || !Path::new("/usr/bin/python3").exists()
     {
+        assert!(
+            std::env::var_os("NEXUS_REQUIRE_SANDBOX").is_none(),
+            "required sandbox unavailable ({t}): {:?}",
+            c.problems
+        );
         println!(
             "NOT RUN ({t}): sandbox/Landlock/launch gate unavailable: {:?} abi={:?} gate={}",
             c.problems, c.landlock_abi, c.launch_gate

@@ -14,6 +14,11 @@ const PY: &str = "/usr/bin/python3";
 fn sandbox_ok(t: &str) -> bool {
     let c = nexus_tools::sandbox::preflight();
     if !c.available || !std::path::Path::new(PY).exists() {
+        assert!(
+            std::env::var_os("NEXUS_REQUIRE_SANDBOX").is_none(),
+            "required sandbox unavailable ({t}): {:?}",
+            c.problems
+        );
         println!("NOT RUN ({t}): sandbox unavailable: {:?}", c.problems);
         return false;
     }

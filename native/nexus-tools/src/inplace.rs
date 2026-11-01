@@ -178,7 +178,9 @@ struct Dir {
 }
 
 /// `(name, st_mode, dev, ino, nlink)`
-type DirEntryInfo = (Vec<u8>, u32, u64, u64, u64);
+// nlink_t is u32 on Linux AArch64 and u64 on Linux x86_64. Keep its native
+// width: the protection check only compares it with 1 and never narrows it.
+type DirEntryInfo = (Vec<u8>, u32, u64, u64, libc::nlink_t);
 
 fn list_dir(dir: RawFd) -> Option<Vec<DirEntryInfo>> {
     use std::os::unix::ffi::OsStrExt;
@@ -759,6 +761,20 @@ fn git_summary(root: &OwnedFd) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn aarch64_directory_listing_preserves_hard_link_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("one"), b"protected").unwrap();
+        std::fs::hard_link(dir.path().join("one"), dir.path().join("two")).unwrap();
+        let fd = std::fs::File::open(dir.path()).unwrap();
+        let entries = list_dir(fd.as_raw_fd()).unwrap();
+        assert_eq!(entries.len(), 2);
+        for (_, _, _, _, links) in entries {
+            assert_eq!(links, 2);
+        }
+    }
 
     #[test]
     fn user_space_network_and_fat_filesystems_are_refused_with_a_reason() {

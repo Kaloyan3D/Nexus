@@ -254,3 +254,43 @@ fn m81_detached_descendant_is_reaped_when_the_command_exits() {
         "daemonized descendant outlived its command (hb {s1} -> {s2})"
     );
 }
+
+#[test]
+fn orphan_reconciliation_preserves_another_live_supervisors_command() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let base = nexus_tools::sandbox::cgroup_base().expect("cgroup v2");
+    let running = AtomicBool::new(false);
+    let w = world();
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            let mut stop = || {
+                running.store(true, Ordering::SeqCst);
+                None
+            };
+            nexus_tools::host_exec::run_host(nexus_tools::host_exec::HostRun {
+                program: "/usr/bin/sh".into(),
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "sleep 0.3; echo still-supervised".into(),
+                ],
+                cwd: w.root.clone(),
+                env: std::collections::BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+                wall_ms: 5000,
+                tail_bytes: 4096,
+                should_stop: &mut stop,
+            })
+            .unwrap()
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !running.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        nexus_tools::host_exec::reap_orphan_host_cgroups(&base);
+        let out = handle.join().unwrap();
+        assert_eq!(out.resource_enforcement, "kernel-cgroup");
+        assert_eq!(out.exit, nexus_tools::sandbox::ExitKind::Exited(0));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("still-supervised"));
+    });
+}

@@ -6,6 +6,7 @@ description = "Nexus Native Core A2.2 offline model transport: target-bound prep
 license = "MIT"
 
 [dependencies]
+libc = { workspace = true }
 nexus-contracts = { workspace = true }
 nexus-kernel = { workspace = true }
 serde = { workspace = true }

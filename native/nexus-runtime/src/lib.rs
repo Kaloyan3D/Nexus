@@ -202,15 +202,19 @@ fn verify_private_node_with(
     let mut head = [0u8; 20];
     // a file shorter than an ELF header is simply "not an executable of this kind"
     if f.read_exact(&mut head).is_err() {
-        return Err(bad("bin/node is not an x86-64 Linux executable".into()));
+        return Err(bad(
+            "bin/node is not an native 64-bit Linux executable".into()
+        ));
     }
-    // ELF, 64-bit, little-endian, machine x86-64
+    // ELF, 64-bit, little-endian, reviewed native machine.
     if &head[..4] != b"\x7fELF"
         || head[4] != 2
         || head[5] != 1
-        || u16::from_le_bytes([head[18], head[19]]) != 0x3e
+        || !native_elf_machine(u16::from_le_bytes([head[18], head[19]]))
     {
-        return Err(bad("bin/node is not an x86-64 Linux executable".into()));
+        return Err(bad(
+            "bin/node is not an native 64-bit Linux executable".into()
+        ));
     }
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -1094,7 +1098,7 @@ mod node_tests {
         .unwrap();
         assert!(verify_private_node_with(&bin, &ver[..4])
             .unwrap_err()
-            .contains("x86-64 Linux executable"));
+            .contains("native 64-bit Linux executable"));
         // writable by others
         let Some((t, bin, ver)) = install(good) else {
             return;
@@ -1138,5 +1142,27 @@ mod node_tests {
     #[test]
     fn the_environment_variable_name_matches_the_toolchains() {
         assert_eq!(PRIVATE_NODE_ENV, nexus_tools::process::PRIVATE_NODE_ENV);
+    }
+}
+
+fn native_elf_machine(machine: u16) -> bool {
+    (cfg!(all(target_arch = "x86_64", target_endian = "little")) && machine == 62)
+        || (cfg!(all(target_arch = "aarch64", target_endian = "little")) && machine == 183)
+}
+#[cfg(test)]
+mod elf_portability_tests {
+    #[test]
+    fn accepts_only_the_native_reviewed_machine() {
+        assert_eq!(
+            super::native_elf_machine(62),
+            cfg!(all(target_arch = "x86_64", target_endian = "little"))
+        );
+        assert_eq!(
+            super::native_elf_machine(183),
+            cfg!(all(target_arch = "aarch64", target_endian = "little"))
+        );
+        for machine in [0, 3, 40, 243, u16::MAX] {
+            assert!(!super::native_elf_machine(machine));
+        }
     }
 }

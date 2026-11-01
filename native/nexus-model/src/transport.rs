@@ -199,7 +199,7 @@ pub(crate) fn o_nofollow() -> i32 {
 
 #[cfg(target_os = "linux")]
 fn libc_o_nofollow() -> i32 {
-    0o400000 // O_NOFOLLOW on Linux (x86_64/aarch64)
+    libc::O_NOFOLLOW
 }
 
 #[cfg(not(target_os = "linux"))]

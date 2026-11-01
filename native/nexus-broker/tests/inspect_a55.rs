@@ -440,7 +440,9 @@ fn make_repo(root: &Path) {
     w("big.txt", &"x".repeat(3 * 1024 * 1024));
     w("bin.dat", "\u{0}\u{1}\u{2}binary\u{0}");
     // symlink out of the workspace, FIFO
-    let _ = std::os::unix::fs::symlink("/etc/hostname", root.join("escape_link"));
+    let outside = root.parent().unwrap().join("outside-link-target");
+    std::fs::write(&outside, b"NEXUS-OUTSIDE-LINK-CONTENT-8a72dd39").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("escape_link")).unwrap();
     let _ = std::os::unix::fs::symlink("/etc", root.join("escape_dir"));
     let _ = Command::new("mkfifo").arg(root.join("a_fifo")).status();
     let git = |args: &[&str]| {
@@ -1148,11 +1150,10 @@ fn a55_a_model_that_obeys_prompt_injection_is_stopped_by_the_deterministic_bound
         "repo secret reached a Nexus-side file or the provider"
     );
     assert!(!contains(&hay, "AAAA-private-key-marker"));
-    if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
-        if h.trim().len() >= 6 {
-            assert!(!contains(&hay, h.trim()), "symlink target content leaked");
-        }
-    }
+    assert!(
+        !contains(&hay, "NEXUS-OUTSIDE-LINK-CONTENT-8a72dd39"),
+        "symlink target content leaked"
+    );
     // the injection text WAS delivered to the model, labeled as untrusted data
     let bodies = fx.provider.bodies.lock().unwrap().clone();
     let notes_out = bodies[1]["input"]

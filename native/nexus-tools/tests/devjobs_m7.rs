@@ -62,17 +62,35 @@ fn start(
     let mut env = BTreeMap::new();
     env.insert("PATH".to_owned(), "/usr/bin:/bin".to_owned());
     env.insert("HOME".to_owned(), "/work/out".to_owned());
+    // Exercise the same toolchain whether Cargo is system packaged or rustup managed.
+    let mut ro_binds = Vec::new();
+    let mut resolved_program = program.to_owned();
+    if program == "/usr/bin/cargo" && !Path::new(program).exists() {
+        let output = std::process::Command::new("rustup")
+            .args(["which", "cargo"])
+            .output()
+            .expect("rustup toolchain");
+        assert!(output.status.success());
+        let cargo = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+        let root = cargo.parent().unwrap().parent().unwrap().to_path_buf();
+        ro_binds.push((root, "/toolchain/rust".to_owned()));
+        resolved_program = "/toolchain/rust/bin/cargo".to_owned();
+        env.insert(
+            "PATH".to_owned(),
+            "/toolchain/rust/bin:/usr/bin:/bin".to_owned(),
+        );
+    }
     let shim = confine_host::locate_shim().expect("launch gate");
     let sha = confine_host::shim_is_trustworthy(&shim).unwrap();
     let r = nexus_tools::observe::root_identity(&w.ws).unwrap();
     let spec = SandboxSpec {
         id: "job".into(),
-        program: program.into(),
+        program: resolved_program,
         args: args.iter().map(|s| s.to_string()).collect(),
         src_dir: PathBuf::new(),
         cwd: "/work/src".into(),
         env,
-        ro_binds: vec![],
+        ro_binds,
         rw_binds: vec![],
         src_writable: true,
         pinned_root: Some(mount.root_fd()),

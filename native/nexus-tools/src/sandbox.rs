@@ -43,7 +43,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub const SANDBOX_VERSION: u32 = 1;
+// Version 2 binds receipts to the scope lifecycle handshake and system-file mounts.
+pub const SANDBOX_VERSION: u32 = 2;
 const BWRAP: &str = "/usr/bin/bwrap";
 const PRLIMIT: &str = "/usr/bin/prlimit";
 
@@ -194,6 +195,7 @@ impl ConfineSpec {
     pub fn plan(&self, spec: &SandboxSpec) -> crate::confine::Plan {
         use crate::confine::{Expect, Plan};
         let mut ro: Vec<String> = vec!["/usr".into(), "/proc".into(), "/nexus".into()];
+        ro.extend(system_tool_files().map(str::to_owned));
         // TLS trust and name-service files are needed with host networking AND with Controlled
         // Internet (egress): without CA roots no client can verify a real certificate (M6C live).
         if spec.net || spec.egress.is_some() {
@@ -250,14 +252,23 @@ impl ConfineSpec {
     }
 }
 
-const NET_FILES: [&str; 6] = [
+const NET_FILES: [&str; 7] = [
     "/etc/resolv.conf",
     "/etc/hosts",
     "/etc/nsswitch.conf",
     "/etc/ssl",
     "/etc/ca-certificates",
     "/etc/pki",
+    "/etc/crypto-policies",
 ];
+
+// Fedora's public linker alternative is outside /usr. Bind only the selected
+// file, not the alternatives directory or the rest of the host configuration.
+fn system_tool_files() -> impl Iterator<Item = &'static str> {
+    ["/etc/alternatives/ld"]
+        .into_iter()
+        .filter(|p| Path::new(p).is_file())
+}
 
 /// One protected sub-path of a pinned root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,8 +396,8 @@ fn secure_name(id: &str) -> String {
 // ------------------------------------------------------------- seccomp
 
 /// x86_64 syscall numbers denied with EPERM.
-#[cfg(target_arch = "x86_64")]
-const DENY_EPERM: &[u32] = &[
+#[cfg(any(target_arch = "x86_64", test))]
+const DENY_EPERM_X86_64: &[u32] = &[
     101, // ptrace
     165, // mount
     166, // umount2
@@ -436,40 +447,130 @@ const DENY_EPERM: &[u32] = &[
     442, // mount_setattr
 ];
 
+/// AArch64 uses the asm-generic syscall table. Legacy iopl/ioperm have no
+/// AArch64 entry points; every other x86_64 denial has an equivalent here.
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+const DENY_EPERM: &[u32] = &[
+    libc::SYS_ptrace as u32,
+    libc::SYS_mount as u32,
+    libc::SYS_umount2 as u32,
+    libc::SYS_pivot_root as u32,
+    libc::SYS_chroot as u32,
+    libc::SYS_setns as u32,
+    libc::SYS_unshare as u32,
+    libc::SYS_kexec_load as u32,
+    libc::SYS_kexec_file_load as u32,
+    libc::SYS_init_module as u32,
+    libc::SYS_finit_module as u32,
+    libc::SYS_delete_module as u32,
+    libc::SYS_bpf as u32,
+    libc::SYS_add_key as u32,
+    libc::SYS_request_key as u32,
+    libc::SYS_keyctl as u32,
+    libc::SYS_perf_event_open as u32,
+    libc::SYS_userfaultfd as u32,
+    libc::SYS_io_uring_setup as u32,
+    libc::SYS_io_uring_enter as u32,
+    libc::SYS_io_uring_register as u32,
+    libc::SYS_swapon as u32,
+    libc::SYS_swapoff as u32,
+    libc::SYS_reboot as u32,
+    libc::SYS_acct as u32,
+    libc::SYS_quotactl as u32,
+    libc::SYS_settimeofday as u32,
+    libc::SYS_clock_settime as u32,
+    libc::SYS_adjtimex as u32,
+    libc::SYS_clock_adjtime as u32,
+    libc::SYS_open_by_handle_at as u32,
+    libc::SYS_name_to_handle_at as u32,
+    libc::SYS_process_vm_readv as u32,
+    libc::SYS_process_vm_writev as u32,
+    libc::SYS_kcmp as u32,
+    libc::SYS_syslog as u32,
+    libc::SYS_personality as u32,
+    libc::SYS_vhangup as u32,
+    libc::SYS_open_tree as u32,
+    libc::SYS_move_mount as u32,
+    libc::SYS_fsopen as u32,
+    libc::SYS_fsconfig as u32,
+    libc::SYS_fsmount as u32,
+    libc::SYS_fspick as u32,
+    libc::SYS_mount_setattr as u32,
+];
+
+/// Whether the native syscall ABI has a reviewed seccomp policy.
+pub const fn seccomp_supported() -> bool {
+    cfg!(all(
+        target_os = "linux",
+        target_endian = "little",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))
+}
+
 /// Build the raw `struct sock_filter[]` for bwrap `--seccomp FD`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 pub fn seccomp_program() -> Vec<u8> {
+    #[cfg(target_arch = "x86_64")]
+    const AUDIT_ARCH_NATIVE: u32 = 0xC000_003E;
+    #[cfg(target_arch = "aarch64")]
+    const AUDIT_ARCH_NATIVE: u32 = 0xC000_00B7;
+    #[cfg(target_arch = "x86_64")]
+    let deny = DENY_EPERM_X86_64;
+    #[cfg(target_arch = "aarch64")]
+    let deny = DENY_EPERM;
+    build_seccomp_program(AUDIT_ARCH_NATIVE, deny, cfg!(target_arch = "x86_64"))
+}
+
+#[cfg(any(
+    test,
+    all(
+        target_os = "linux",
+        target_endian = "little",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+fn build_seccomp_program(arch: u32, deny: &[u32], x32: bool) -> Vec<u8> {
     const BPF_LD_W_ABS: u16 = 0x20;
     const BPF_JEQ_K: u16 = 0x15;
     const BPF_JGE_K: u16 = 0x35;
     const BPF_RET_K: u16 = 0x06;
-    const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
     const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
     const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
     const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
     let mut ins: Vec<(u16, u8, u8, u32)> = vec![
         (BPF_LD_W_ABS, 0, 0, 4), // arch
-        (BPF_JEQ_K, 1, 0, AUDIT_ARCH_X86_64),
+        (BPF_JEQ_K, 1, 0, arch),
         (BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS),
         (BPF_LD_W_ABS, 0, 0, 0), // nr
     ];
     // x32 ABI: syscalls with bit 30 set arrive with AUDIT_ARCH_X86_64 and
     // would bypass a plain number match. Kill them outright.
-    ins.push((BPF_JGE_K, 0, 1, 0x4000_0000)); // nr >= 0x40000000 ?
-    ins.push((BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS));
+    if x32 {
+        ins.push((BPF_JGE_K, 0, 1, 0x4000_0000));
+        ins.push((BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS));
+    }
     // Layout: [JEQ deny...][JEQ clone3][ALLOW][ERRNO EPERM][ERRNO ENOSYS]
-    let n = DENY_EPERM.len();
+    let n = deny.len();
     let total_jeq = n + 1;
     let first = ins.len();
     let allow_idx = first + total_jeq;
     let eperm_idx = allow_idx + 1;
     let enosys_idx = allow_idx + 2;
-    for (i, nr) in DENY_EPERM.iter().enumerate() {
+    for (i, nr) in deny.iter().enumerate() {
         let here = first + i;
         ins.push((BPF_JEQ_K, (eperm_idx - here - 1) as u8, 0, *nr));
     }
     let here = first + n;
-    ins.push((BPF_JEQ_K, (enosys_idx - here - 1) as u8, 0, 435)); // clone3
+    ins.push((
+        BPF_JEQ_K,
+        (enosys_idx - here - 1) as u8,
+        0,
+        libc::SYS_clone3 as u32,
+    ));
     ins.push((BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW));
     ins.push((BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | 1)); // EPERM
     ins.push((BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | 38)); // ENOSYS
@@ -483,7 +584,11 @@ pub fn seccomp_program() -> Vec<u8> {
     out
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 pub fn seccomp_program() -> Vec<u8> {
     Vec::new()
 }
@@ -621,6 +726,9 @@ pub fn bwrap_argv(spec: &SandboxSpec) -> Vec<String> {
             }
         }
     }
+    for f in system_tool_files() {
+        a.extend(["--ro-bind".to_owned(), f.to_owned(), f.to_owned()]);
+    }
     for (h, s) in &spec.ro_binds {
         a.push("--ro-bind".to_owned());
         a.push(h.to_string_lossy().into_owned());
@@ -753,7 +861,11 @@ fn locate_scope_cgroup(pid: u32, unit: &str) -> Option<PathBuf> {
         if let Ok(raw) = std::fs::read_to_string(format!("/proc/{pid}/cgroup")) {
             if let Some(l) = raw.lines().find(|l| l.starts_with("0::")) {
                 let rel = l.trim_start_matches("0::");
-                if rel.ends_with(&want) {
+                if rel.ends_with(&want)
+                    && std::fs::read_to_string(format!("/proc/{pid}/status")).is_ok_and(|status| {
+                        status.lines().any(|line| line.starts_with("State:\tT"))
+                    })
+                {
                     return Some(PathBuf::from("/sys/fs/cgroup").join(rel.trim_start_matches('/')));
                 }
             }
@@ -789,13 +901,13 @@ pub fn preflight() -> SandboxCapabilities {
         cgroup_base: None,
         cgroup_memory_controller: false,
         kernel_enforced_limits: false,
-        seccomp: cfg!(target_arch = "x86_64"),
+        seccomp: seccomp_supported(),
         backend: "bubblewrap+seccomp+cgroup-v2",
         landlock_abi: crate::confine::landlock_abi(),
         launch_gate: crate::confine_host::locate_shim().is_some(),
     };
-    if !cfg!(target_arch = "x86_64") {
-        problems.push("seccomp filter is implemented for x86_64 only".to_owned());
+    if !seccomp_supported() {
+        problems.push("seccomp filter is unavailable for this syscall ABI".to_owned());
     }
     if !Path::new(BWRAP).exists() {
         problems.push(format!("{BWRAP} not found"));
@@ -902,7 +1014,31 @@ fn rss_bytes(pid: u32) -> u64 {
         .nth(1)
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    pages * 4096
+    resident_bytes(pages, unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
+}
+
+// An unavailable page size must never turn resident memory into an underestimate.
+fn resident_bytes(pages: u64, page_size: libc::c_long) -> u64 {
+    match u64::try_from(page_size).ok().filter(|size| *size > 0) {
+        Some(size) => pages.saturating_mul(size),
+        None => u64::MAX,
+    }
+}
+
+#[cfg(test)]
+mod rss_portability_tests {
+    #[test]
+    fn accounts_for_supported_page_sizes_and_fails_closed() {
+        for size in [4096, 16384, 65536] {
+            assert_eq!(super::resident_bytes(7, size), 7 * size as u64);
+        }
+        assert_eq!(super::resident_bytes(1, -1), u64::MAX);
+        assert_eq!(super::resident_bytes(1, 0), u64::MAX);
+        assert_eq!(super::resident_bytes(u64::MAX, 65536), u64::MAX);
+        let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        assert!(size > 0);
+        assert_eq!(super::resident_bytes(1, size), size as u64);
+    }
 }
 
 /// Kill every process in a cgroup directory and remove it when empty.
@@ -913,9 +1049,11 @@ pub fn kill_and_remove_cgroup(cg: &Path) -> bool {
     }
     let _ = std::fs::write(cg.join("cgroup.kill"), "1");
     for _ in 0..100 {
-        if read_cgroup_pids(cg).is_empty() {
-            return std::fs::remove_dir(cg).is_ok() || !cg.exists();
+        if read_cgroup_pids(cg).is_empty() && (std::fs::remove_dir(cg).is_ok() || !cg.exists()) {
+            return true;
         }
+        // Exiting tasks may have left cgroup.procs before the kernel
+        // releases the last reference. Retry removal within the same bound.
         std::thread::sleep(Duration::from_millis(20));
     }
     false
@@ -1035,8 +1173,8 @@ pub fn run_sandboxed(
     spec: &SandboxSpec,
     control: &mut dyn SandboxControl,
 ) -> Result<SandboxOutcome, ToolError> {
-    if !cfg!(target_arch = "x86_64") {
-        return Err(refuse("sandbox is implemented for x86_64 only"));
+    if !seccomp_supported() {
+        return Err(refuse("sandbox is unavailable for this syscall ABI"));
     }
     if !Path::new(BWRAP).exists() || !Path::new(PRLIMIT).exists() {
         return Err(refuse("bubblewrap/prlimit not found; refusing to run"));
@@ -1150,7 +1288,7 @@ pub fn run_sandboxed(
         c.args([
             "--user".to_owned(),
             "--scope".to_owned(),
-            "--collect".to_owned(),
+            "--expand-environment=no".to_owned(),
             "--quiet".to_owned(),
             format!("--unit={unit}"),
             "-p".to_owned(),
@@ -1160,6 +1298,12 @@ pub fn run_sandboxed(
             "-p".to_owned(),
             format!("TasksMax={}", l.max_procs + 16),
             "--".to_owned(),
+            "/usr/bin/sh".to_owned(),
+            "-c".to_owned(),
+            // Pause before bwrap so even a sub-millisecond command cannot
+            // disappear before the supervisor observes the kernel scope.
+            "kill -STOP \"$$\"; \"$@\"; code=$?; kill -STOP \"$$\"; exit \"$code\"".to_owned(),
+            "nexus-scope-start".to_owned(),
             BWRAP.to_owned(),
         ]);
         c.args(bwrap_argv(spec));
@@ -1232,7 +1376,14 @@ pub fn run_sandboxed(
 
     let cg: PathBuf = if kernel_mode {
         match locate_scope_cgroup(pid, &unit) {
-            Some(p) => p,
+            Some(p) => {
+                if unsafe { libc::kill(pid as i32, libc::SIGCONT) } != 0 {
+                    let _ = std::fs::write(p.join("cgroup.kill"), "1");
+                    let _ = child.wait();
+                    return Err(refuse("cannot resume verified systemd scope"));
+                }
+                p
+            }
             None => {
                 unsafe { libc::kill(pid as i32, libc::SIGKILL) };
                 let mut st = 0;
@@ -1267,7 +1418,28 @@ pub fn run_sandboxed(
     let mut status: libc::c_int = 0;
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
     loop {
-        let r = unsafe { libc::wait4(pid as i32, &mut status, libc::WNOHANG, &mut ru) };
+        let r = unsafe {
+            libc::wait4(
+                pid as i32,
+                &mut status,
+                libc::WNOHANG | libc::WUNTRACED,
+                &mut ru,
+            )
+        };
+        if r == pid as i32 && libc::WIFSTOPPED(status) {
+            // The scope launcher stops after the command exits. Preserve final
+            // accounting before allowing the last member to exit and systemd
+            // to collect the scope. Fast OOM exits otherwise lose their evidence.
+            oom_seen = oom_seen.max(read_event(&cg.join("memory.events"), "oom_kill"));
+            pids_hit = pids_hit.max(read_event(&cg.join("pids.events"), "max"));
+            let peak = std::fs::read_to_string(cg.join("memory.peak"))
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            peak_rss = peak_rss.max(peak);
+            unsafe { libc::kill(pid as i32, libc::SIGCONT) };
+            continue;
+        }
         if r == pid as i32 {
             break;
         }
@@ -1292,7 +1464,9 @@ pub fn run_sandboxed(
                 oom_seen = oom_seen.max(read_event(&cg.join("memory.events"), "oom_kill"));
                 pids_hit = pids_hit.max(read_event(&cg.join("pids.events"), "max"));
             } else {
-                let rss: u64 = pids.iter().map(|p| rss_bytes(*p)).sum();
+                let rss = pids
+                    .iter()
+                    .fold(0u64, |total, p| total.saturating_add(rss_bytes(*p)));
                 peak_rss = peak_rss.max(rss);
                 if forced.is_none() && rss > l.memory_bytes {
                     forced = Some(ExitKind::MemoryLimit);
@@ -1316,6 +1490,39 @@ pub fn run_sandboxed(
             }
         }
         std::thread::sleep(Duration::from_millis(5));
+    }
+    // Stop descendants before any bus query; metadata collection must never
+    // extend the lifetime of an execution tree.
+    let _ = std::fs::write(cg.join("cgroup.kill"), "1");
+    // A scoped OOM can make systemd kill the launcher before its final stop.
+    // Failed scopes deliberately retain their authoritative Result until here;
+    // --collect would discard it before a fast workload could be observed.
+    if kernel_mode {
+        let mut query = Command::new("/usr/bin/systemctl");
+        query.env_clear().args([
+            "--user",
+            "show",
+            "--property=Result",
+            "--value",
+            &format!("{unit}.scope"),
+        ]);
+        systemd_env(&mut query);
+        if let Ok(result) = query.output() {
+            if result.status.success() {
+                let result = String::from_utf8_lossy(&result.stdout);
+                if result.trim() == "oom-kill" {
+                    oom_seen = oom_seen.max(1);
+                }
+                if !result.trim().is_empty() && result.trim() != "success" {
+                    let mut reset = Command::new("/usr/bin/systemctl");
+                    reset
+                        .env_clear()
+                        .args(["--user", "reset-failed", &format!("{unit}.scope")]);
+                    systemd_env(&mut reset);
+                    let _ = reset.stdout(Stdio::null()).stderr(Stdio::null()).status();
+                }
+            }
+        }
     }
     // Whatever happened, make sure nothing from this execution survives.
     oom_seen = oom_seen.max(read_event(&cg.join("memory.events"), "oom_kill"));
@@ -1467,5 +1674,19 @@ mod diagnostics_tests {
         assert_eq!(diagnostic_from(Some(h)), "");
         assert!(t.elapsed() < Duration::from_secs(2));
         drop(tx);
+    }
+}
+
+#[cfg(test)]
+mod seccomp_regression {
+    #[test]
+    fn x86_64_filter_bytes_remain_unchanged() {
+        use sha2::Digest;
+        let bytes = super::build_seccomp_program(0xc000003e, super::DENY_EPERM_X86_64, true);
+        // SHA-256 of the original little-endian x86_64 production filter.
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(bytes)),
+            "ae46543107d6e89ca5be59e8cf4d4c65d6a554fc6b1092237be068ae37cf3fc8"
+        );
     }
 }

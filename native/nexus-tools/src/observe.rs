@@ -199,7 +199,7 @@ impl Acc {
         }
     }
     fn time_up(&mut self) -> bool {
-        if self.t0.elapsed().as_millis() as u64 > self.budget.max_wall_ms {
+        if self.t0.elapsed() >= std::time::Duration::from_millis(self.budget.max_wall_ms) {
             self.reason("time-budget".into());
             self.stop = true;
         }
@@ -426,7 +426,8 @@ fn summarise_bulk(acc: &mut Acc, fd: RawFd, protected: bool) -> Bulk {
                 return;
             }
             if b.entries >= budget
-                || (b.entries.is_multiple_of(512) && t0.elapsed().as_millis() as u64 > deadline)
+                || (b.entries.is_multiple_of(512)
+                    && t0.elapsed() >= std::time::Duration::from_millis(deadline))
             {
                 b.truncated = true;
                 return;
