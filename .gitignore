@@ -55,3 +55,6 @@ credentials.json
 route-verification-authorization*.json
 live-authorization*.json
 live-session-authorization*.json
+engine-image/out/
+engine-image/stage/
+engine-vm/build/
