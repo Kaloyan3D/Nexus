@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-model-io-read"
+description = "Enables the model_io_read command without any pre-configured scope."
+commands.allow = ["model_io_read"]
+
+[[permission]]
+identifier = "deny-model-io-read"
+description = "Denies the model_io_read command without any pre-configured scope."
+commands.deny = ["model_io_read"]

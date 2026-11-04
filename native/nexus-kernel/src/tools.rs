@@ -1,0 +1,2244 @@
+//! Native tool authority (A3.1).
+//!
+//! The Kernel is the only minter of tool grants. A grant is an HMAC-sealed
+//! statement that one accepted command, in its current attempt and lease
+//! generation, may run exactly one read-only tool invocation with exactly
+//! these arguments, against exactly this workspace, under exactly these
+//! budgets. Model- or renderer-supplied JSON is never authority: it must be
+//! bound to a grant the Kernel signed.
+//!
+//! Lifecycle (each phase is journaled exactly once, hash-chained):
+//!   authorize_tool -> `authorized`; begin_tool_execution -> `started`
+//!   (consumes the grant; replay refused); complete_tool_execution ->
+//!   `completed`. A `started` without `completed` is a crashed execution and
+//!   is never silently re-run.
+//!
+//! This module performs no filesystem access on workspaces. It carries no
+//! live-dispatch authority: `Kernel::dispatch_enabled()` stays false.
+
+use crate::{hmac_seal_hex, Kernel};
+use nexus_contracts::{canonical_json, KernelError, KernelErrorCode, KernelResult};
+use nexus_store::{ToolEntryInput, ToolJournalEntry};
+
+pub const TOOL_GRANT_SEAL_DOMAIN: &str = "nexus-tool-grant/v1";
+pub const TOOL_GRANT_TTL_MS: i64 = 120_000;
+pub const TOOL_GRANT_SKEW_MS: i64 = 60_000;
+
+const TOOL_CHECKPOINT_KEY: &str = "tool_journal_checkpoint/v1";
+
+pub const PHASE_AUTHORIZED: &str = "authorized";
+pub const PHASE_STARTED: &str = "started";
+pub const PHASE_COMPLETED: &str = "completed";
+/// Terminal, never an execution outcome: the grant lapsed unexecuted.
+pub const PHASE_EXPIRED: &str = "expired";
+/// Terminal: execution started but no completion was ever recorded
+/// (crash/restart). Outcome is UNCERTAIN; it is never re-executed and no
+/// completion is invented.
+pub const PHASE_INTERRUPTED: &str = "interrupted";
+
+/// Write lifecycle phases (A3.3). Durability points are documented in
+/// `native/A3.3-EVIDENCE.md`.
+pub const PHASE_PLANNED: &str = "planned";
+pub const PHASE_PREPARED: &str = "prepared";
+pub const PHASE_APPLIED: &str = "applied";
+pub const PHASE_VERIFIED: &str = "verified";
+pub const PHASE_FAILED: &str = "failed";
+pub const PHASE_CONFLICT: &str = "conflict";
+
+const WRITE_TERMINALS: [&str; 6] = [
+    PHASE_VERIFIED,
+    PHASE_FAILED,
+    PHASE_CONFLICT,
+    PHASE_INTERRUPTED,
+    PHASE_COMPLETED,
+    PHASE_EXPIRED,
+];
+
+/// Tool identifiers the Kernel will ever seal, with their grant scope.
+/// A `read` grant can never authorize mutation: the scope is sealed into
+/// the grant and re-derived from the tool id at every verification.
+pub fn tool_scope(tool_id: &str) -> Option<&'static str> {
+    match tool_id {
+        "fs.list" | "fs.read" | "fs.search" => Some("read"),
+        "fs.write" | "fs.edit" => Some("write"),
+        "proc.run" => Some("process"),
+        _ => None,
+    }
+}
+
+/// Process lifecycle (A3.4): authorized -> started (grant consumed,
+/// exactly once) -> prepared (snapshot + sandbox digests durable, BEFORE
+/// spawn) -> running (process spawned) -> exited | failed | cancelled |
+/// interrupted.
+pub const PHASE_RUNNING: &str = "running";
+pub const PHASE_EXITED: &str = "exited";
+pub const PHASE_CANCELLED: &str = "cancelled";
+
+const PROCESS_TERMINALS: [&str; 7] = [
+    PHASE_EXITED,
+    PHASE_FAILED,
+    PHASE_CANCELLED,
+    PHASE_INTERRUPTED,
+    PHASE_EXPIRED,
+    PHASE_COMPLETED,
+    PHASE_VERIFIED,
+];
+
+pub const PROCESS_SCOPE_DOMAIN: &str = "nexus-process-scope/v1";
+/// Used for scopes that carry a non-default filesystem scope. A `scratch` scope is sealed and verified
+/// with the v1 domain and canonical form exactly as before, so every existing row keeps verifying and a
+/// `scratch` row can never be read as anything else.
+pub const PROCESS_SCOPE_DOMAIN_V2: &str = "nexus-process-scope/v2";
+/// Used for scopes issued under a standing grant: additionally seals the grant's identity (id, version,
+/// digest) and the three axes (filesystem, network, approval behaviour) the grant gave this command.
+pub const PROCESS_SCOPE_DOMAIN_V3: &str = "nexus-process-scope/v3";
+/// Network scopes a process scope can seal.
+pub const NET_SCOPE_OFFLINE: &str = "offline";
+pub const NET_SCOPE_INSTALL: &str = "install";
+/// Controlled Internet (M5): connections only through the egress service, to the destinations of the grant.
+pub const NET_SCOPE_CONTROLLED: &str = "controlled";
+/// Full Network (M8): the host network, sealable only together with `full` filesystem scope.
+pub const NET_SCOPE_FULL: &str = "full";
+/// Approval behaviours a process scope can seal.
+pub const APPROVAL_ASK: &str = "ask";
+pub const APPROVAL_AUTO: &str = "auto";
+
+/// The identity and axes of the standing grant an operation runs under, as declared by the daemon in the
+/// reviewed (and digested) operation and sealed into the process scope.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GrantSeal {
+    pub grant_id: String,
+    pub version: u64,
+    pub digest: String,
+    pub net: String,
+    pub approval: String,
+}
+
+/// What the reviewed operation declares about its scope (`operation.execFsScope`, `operation.grant`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredScope {
+    pub fs_scope: String,
+    pub grant: Option<GrantSeal>,
+}
+
+impl DeclaredScope {
+    pub fn scratch() -> Self {
+        Self {
+            fs_scope: FS_SCOPE_SCRATCH.to_owned(),
+            grant: None,
+        }
+    }
+
+    /// Read the declaration from an operation description. Absent = scratch without a grant (every
+    /// operation that predates grants). Anything malformed or inconsistent is an error, never a default.
+    pub fn from_operation(op: &serde_json::Value) -> Result<Self, String> {
+        let fs_scope = match op.get("execFsScope") {
+            None | Some(serde_json::Value::Null) => FS_SCOPE_SCRATCH.to_owned(),
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(_) => return Err("execFsScope is not a string".into()),
+        };
+        let grant = match op.get("grant") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(g) => {
+                let st = |k: &str| g.get(k).and_then(|v| v.as_str()).map(str::to_owned);
+                let (Some(id), Some(digest), Some(gfs), Some(net), Some(approval), Some(version)) = (
+                    st("grantId"),
+                    st("digest"),
+                    st("fsScope"),
+                    st("netScope"),
+                    st("approval"),
+                    g.get("version").and_then(|v| v.as_u64()),
+                ) else {
+                    return Err("the grant declaration is incomplete".into());
+                };
+                if gfs != fs_scope {
+                    return Err("the grant's filesystem scope differs from the operation's".into());
+                }
+                if id.is_empty() || id.len() > 64 || digest.len() != 64 || version == 0 {
+                    return Err("the grant identity is malformed".into());
+                }
+                if net != NET_SCOPE_OFFLINE
+                    && net != NET_SCOPE_INSTALL
+                    && net != NET_SCOPE_CONTROLLED
+                    && net != NET_SCOPE_FULL
+                {
+                    return Err("unsupported network scope in a grant".into());
+                }
+                if approval != APPROVAL_ASK && approval != APPROVAL_AUTO {
+                    return Err("unsupported approval behaviour in a grant".into());
+                }
+                Some(GrantSeal {
+                    grant_id: id,
+                    version,
+                    digest,
+                    net,
+                    approval,
+                })
+            }
+        };
+        if fs_scope != FS_SCOPE_SCRATCH
+            && fs_scope != FS_SCOPE_WORKSPACE
+            && fs_scope != FS_SCOPE_FULL
+        {
+            return Err("unsupported filesystem scope for a process scope".into());
+        }
+        // M8: Full Access seals only as fs=full with net=full under a grant; any
+        // other combination would claim an enforcement that does not exist.
+        if let Some(g) = &grant {
+            if g.net == NET_SCOPE_FULL && fs_scope != FS_SCOPE_FULL {
+                return Err(
+                    "network scope `full` is sealable only with filesystem scope `full`".into(),
+                );
+            }
+        }
+        if fs_scope == FS_SCOPE_FULL {
+            match &grant {
+                Some(g) if g.net == NET_SCOPE_FULL => {}
+                _ => {
+                    return Err(
+                        "Full Access must be sealed with a grant whose network scope is `full`"
+                            .into(),
+                    )
+                }
+            }
+        }
+        Ok(Self { fs_scope, grant })
+    }
+}
+/// Filesystem scopes a process scope can seal. `full` (M8) is the host backend: sealable
+/// only under an explicit user grant with network scope `full` (checked above).
+pub const FS_SCOPE_SCRATCH: &str = "scratch";
+pub const FS_SCOPE_WORKSPACE: &str = "workspace";
+pub const FS_SCOPE_FULL: &str = "full";
+
+fn default_fs_scope() -> String {
+    FS_SCOPE_SCRATCH.to_owned()
+}
+pub const WRITE_SCOPE_DOMAIN: &str = "nexus-write-scope/v1";
+pub const WORKSPACE_BINDING_DOMAIN: &str = "nexus-workspace-binding/v1";
+
+/// What the trusted issuer asks the Kernel to authorize.
+#[derive(Debug, Clone)]
+pub struct ToolAuthorizationRequest {
+    pub request_id: String,
+    pub command_id: String,
+    pub task_instance_id: String,
+    pub attempt_id: String,
+    pub lease_epoch: u64,
+    pub store_incarnation: String,
+    pub tool_id: String,
+    pub tool_version: u32,
+    pub args_digest: String,
+    pub workspace_root_digest: String,
+    pub workspace_root_dev: u64,
+    pub workspace_root_ino: u64,
+    pub budget_digest: String,
+    pub cancellation_id: String,
+    /// A5.5: `Some` marks a MODEL-PROPOSED call (opaque, sanitized
+    /// provenance such as `<responseId>/<callId>`). The Kernel then requires
+    /// a dispatched `repo-inspect` command and a read-scope tool.
+    pub ai_origin: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SealedToolGrant {
+    pub execution_id: String,
+    pub request_id: String,
+    pub command_id: String,
+    pub task_instance_id: String,
+    pub attempt_id: String,
+    pub lease_epoch: u64,
+    pub store_incarnation: String,
+    pub tool_id: String,
+    /// `read` or `write`; derived from the tool id and sealed.
+    pub scope: String,
+    pub tool_version: u32,
+    pub args_digest: String,
+    pub workspace_root_digest: String,
+    pub workspace_root_dev: u64,
+    pub workspace_root_ino: u64,
+    pub budget_digest: String,
+    pub cancellation_id: String,
+    pub issued_at_ms: i64,
+    pub expires_at_ms: i64,
+    pub nonce_hex: String,
+    pub tag_hex: String,
+}
+
+/// Controller-published workspace authority for one accepted command.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceBinding {
+    pub command_id: String,
+    pub task_instance_id: String,
+    pub attempt_id: String,
+    pub lease_epoch: u64,
+    pub store_incarnation: String,
+    pub root_path: String,
+    pub root_digest: String,
+    pub root_dev: u64,
+    pub root_ino: u64,
+}
+
+/// Independent write authority for one accepted command (A3.3). Created
+/// only through the approver-authenticated daemon channel; the issuer
+/// capability alone cannot create it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WriteScopeBinding {
+    pub command_id: String,
+    pub task_instance_id: String,
+    pub attempt_id: String,
+    pub lease_epoch: u64,
+    pub store_incarnation: String,
+    pub root_digest: String,
+    pub max_write_bytes: u64,
+    pub approver_id: String,
+    /// True only when the daemon verified the approver credential is held
+    /// by identities disjoint from the issuer's. Never self-asserted.
+    pub independent: bool,
+}
+
+fn write_scope_canonical(b: &WriteScopeBinding) -> String {
+    canonical_json(&serde_json::json!({
+        "domain": WRITE_SCOPE_DOMAIN,
+        "commandId": b.command_id,
+        "taskInstanceId": b.task_instance_id,
+        "attemptId": b.attempt_id,
+        "leaseEpoch": b.lease_epoch,
+        "storeIncarnation": b.store_incarnation,
+        "rootDigest": b.root_digest,
+        "maxWriteBytes": b.max_write_bytes,
+        "approverId": b.approver_id,
+        "independent": b.independent,
+    }))
+}
+
+/// One open (non-terminal) process request, as seen by reconciliation.
+#[derive(Debug, Clone)]
+pub struct OpenProcess {
+    pub request_id: String,
+    pub execution_id: String,
+    pub task_instance_id: String,
+    pub attempt_id: String,
+    pub command_id: String,
+    pub prepared: serde_json::Value,
+    pub running: Option<serde_json::Value>,
+}
+
+/// Independent approval to run sandboxed processes for one accepted
+/// command (A3.4). Separate from read bindings and from write scopes: a
+/// read or write grant can never authorize a subprocess.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProcessScopeBinding {
+    pub command_id: String,
+    pub task_instance_id: String,
+    pub attempt_id: String,
+    pub lease_epoch: u64,
+    pub store_incarnation: String,
+    pub root_digest: String,
+    /// Upper bound on wall-clock runtime the approver allows.
+    pub max_wall_ms: u64,
+    pub approver_id: String,
+    pub independent: bool,
+    /// Filesystem scope the approved command runs under (`scratch` | `workspace`). Rows written before
+    /// this field existed deserialize as `scratch`.
+    #[serde(default = "default_fs_scope")]
+    pub fs_scope: String,
+    /// Identity of the standing grant this command runs under; empty = no grant (legacy).
+    #[serde(default)]
+    pub grant_id: String,
+    #[serde(default)]
+    pub grant_version: u64,
+    #[serde(default)]
+    pub grant_digest: String,
+    /// `offline` | `install`; meaningful only with a grant.
+    #[serde(default)]
+    pub net_scope: String,
+    /// `ask` | `auto`; meaningful only with a grant.
+    #[serde(default)]
+    pub approval: String,
+}
+
+fn process_scope_canonical(b: &ProcessScopeBinding) -> String {
+    if !b.grant_id.is_empty() {
+        return canonical_json(&serde_json::json!({
+            "domain": PROCESS_SCOPE_DOMAIN_V3,
+            "commandId": b.command_id,
+            "taskInstanceId": b.task_instance_id,
+            "attemptId": b.attempt_id,
+            "leaseEpoch": b.lease_epoch,
+            "storeIncarnation": b.store_incarnation,
+            "rootDigest": b.root_digest,
+            "maxWallMs": b.max_wall_ms,
+            "approverId": b.approver_id,
+            "independent": b.independent,
+            "fsScope": b.fs_scope,
+            "netScope": b.net_scope,
+            "approval": b.approval,
+            "grantId": b.grant_id,
+            "grantVersion": b.grant_version,
+            "grantDigest": b.grant_digest,
+        }));
+    }
+    if b.fs_scope != FS_SCOPE_SCRATCH {
+        return canonical_json(&serde_json::json!({
+            "domain": PROCESS_SCOPE_DOMAIN_V2,
+            "commandId": b.command_id,
+            "taskInstanceId": b.task_instance_id,
+            "attemptId": b.attempt_id,
+            "leaseEpoch": b.lease_epoch,
+            "storeIncarnation": b.store_incarnation,
+            "rootDigest": b.root_digest,
+            "maxWallMs": b.max_wall_ms,
+            "approverId": b.approver_id,
+            "independent": b.independent,
+            "fsScope": b.fs_scope,
+        }));
+    }
+    canonical_json(&serde_json::json!({
+        "domain": PROCESS_SCOPE_DOMAIN,
+        "commandId": b.command_id,
+        "taskInstanceId": b.task_instance_id,
+        "attemptId": b.attempt_id,
+        "leaseEpoch": b.lease_epoch,
+        "storeIncarnation": b.store_incarnation,
+        "rootDigest": b.root_digest,
+        "maxWallMs": b.max_wall_ms,
+        "approverId": b.approver_id,
+        "independent": b.independent,
+    }))
+}
+
+/// One open (non-terminal) write request, as seen by reconciliation.
+#[derive(Debug, Clone)]
+pub struct OpenWrite {
+    pub request_id: String,
+    pub execution_id: String,
+    pub task_instance_id: String,
+    pub attempt_id: String,
+    pub command_id: String,
+    pub planned: serde_json::Value,
+    pub prepared: Option<serde_json::Value>,
+    pub applied: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReconcileReport {
+    pub expired: u64,
+    pub interrupted: u64,
+}
+
+fn binding_canonical(b: &WorkspaceBinding) -> String {
+    canonical_json(&serde_json::json!({
+        "domain": WORKSPACE_BINDING_DOMAIN,
+        "commandId": b.command_id,
+        "taskInstanceId": b.task_instance_id,
+        "attemptId": b.attempt_id,
+        "leaseEpoch": b.lease_epoch,
+        "storeIncarnation": b.store_incarnation,
+        "rootPath": b.root_path,
+        "rootDigest": b.root_digest,
+        "rootDev": b.root_dev,
+        "rootIno": b.root_ino,
+    }))
+}
+
+/// A grant the Kernel has re-verified and marked `started`. Not
+/// constructible outside this crate.
+#[derive(Debug, Clone)]
+pub struct VerifiedToolGrant {
+    grant: SealedToolGrant,
+    _private: (),
+}
+
+impl VerifiedToolGrant {
+    pub fn grant(&self) -> &SealedToolGrant {
+        &self.grant
+    }
+}
+
+pub(crate) fn now_ms() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
+        Err(_) => 0,
+    }
+}
+
+pub(crate) fn random_hex(n: usize) -> KernelResult<String> {
+    use std::io::Read as _;
+    let mut bytes = vec![0u8; n];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .map_err(|e| {
+            KernelError::new(
+                KernelErrorCode::StoreError,
+                ["entropy unavailable: ", &e.to_string()].concat(),
+            )
+        })?;
+    Ok(hex::encode(bytes))
+}
+
+fn grant_canonical(g: &SealedToolGrant) -> String {
+    canonical_json(&serde_json::json!({
+        "domain": TOOL_GRANT_SEAL_DOMAIN,
+        "executionId": g.execution_id,
+        "requestId": g.request_id,
+        "commandId": g.command_id,
+        "taskInstanceId": g.task_instance_id,
+        "attemptId": g.attempt_id,
+        "leaseEpoch": g.lease_epoch,
+        "storeIncarnation": g.store_incarnation,
+        "toolId": g.tool_id,
+        "scope": g.scope,
+        "toolVersion": g.tool_version,
+        "argsDigest": g.args_digest,
+        "workspaceRootDigest": g.workspace_root_digest,
+        "workspaceRootDev": g.workspace_root_dev,
+        "workspaceRootIno": g.workspace_root_ino,
+        "budgetDigest": g.budget_digest,
+        "cancellationId": g.cancellation_id,
+        "issuedAtMs": g.issued_at_ms,
+        "expiresAtMs": g.expires_at_ms,
+        "nonceHex": g.nonce_hex,
+    }))
+}
+
+pub(crate) fn refuse(code: KernelErrorCode, msg: &str) -> KernelError {
+    KernelError::new(code, msg)
+}
+
+impl Kernel {
+    /// Shared authority revalidation: accepted receipt, current lease,
+    /// witness health, intent not fenced. Returns nothing; refuses closed.
+    pub(crate) fn require_tool_authority(
+        store: &nexus_store::Store,
+        witness: Option<&nexus_store::WitnessStore>,
+        command_id: &str,
+        task: &str,
+        attempt: &str,
+        lease_epoch: u64,
+        incarnation: &str,
+    ) -> KernelResult<()> {
+        if let Some(reason) = witness.and_then(|w| w.blocked()) {
+            return Err(refuse(
+                KernelErrorCode::ReconciliationRequired,
+                &[
+                    "journal integrity is not established; privileged authority refused: ",
+                    reason,
+                ]
+                .concat(),
+            ));
+        }
+        let receipt = store.read_receipt(command_id)?.ok_or_else(|| {
+            refuse(
+                KernelErrorCode::DeliveryInvalid,
+                "no accepted receipt for this command; tool authority refused",
+            )
+        })?;
+        if receipt.task_instance_id != task || receipt.attempt_id != attempt {
+            return Err(refuse(
+                KernelErrorCode::BindingMismatch,
+                "tool request task/attempt differs from the accepted command",
+            ));
+        }
+        let current = store.current_generation(task, "native")?;
+        let (epoch_now, incarnation_now, protected_now) = match current {
+            Some(g) => (g.epoch, g.incarnation, g.witness_protected),
+            None => {
+                return Err(refuse(
+                    KernelErrorCode::StaleLease,
+                    "generation is not live; tool authority refused",
+                ))
+            }
+        };
+        if epoch_now != lease_epoch
+            || incarnation_now != incarnation
+            || receipt.lease_epoch != lease_epoch
+            || receipt.store_incarnation != incarnation
+        {
+            return Err(refuse(
+                KernelErrorCode::StaleLease,
+                "stale attempt generation; tool authority refused",
+            ));
+        }
+        match witness {
+            None => {
+                return Err(refuse(
+                    KernelErrorCode::WitnessRequired,
+                    "tool execution needs the independent witness",
+                ))
+            }
+            Some(w) => {
+                let gkey = nexus_contracts::generation_key(task, "native");
+                match w.read(&gkey)? {
+                    Some(rec) if rec.max_epoch > epoch_now => {
+                        return Err(refuse(
+                            KernelErrorCode::RollbackDetected,
+                            "store epoch is behind the witness maximum",
+                        ))
+                    }
+                    None if protected_now => {
+                        return Err(refuse(
+                            KernelErrorCode::ReconciliationRequired,
+                            "witness record lost after protection was established",
+                        ))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if store.tools_revoked(command_id)? {
+            return Err(refuse(
+                KernelErrorCode::IntentFenced,
+                "tool authority was revoked for this command",
+            ));
+        }
+        if let Some((_, _, state)) = store.fetch_intent(command_id)? {
+            if state == "cancelled" {
+                return Err(refuse(
+                    KernelErrorCode::IntentFenced,
+                    "command was cancelled; tool authority refused",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Mint a sealed tool grant and journal `authorized`.
+    pub fn authorize_tool(
+        &mut self,
+        req: &ToolAuthorizationRequest,
+    ) -> KernelResult<SealedToolGrant> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            for (name, v) in [
+                ("requestId", &req.request_id),
+                ("commandId", &req.command_id),
+                ("taskInstanceId", &req.task_instance_id),
+                ("attemptId", &req.attempt_id),
+                ("toolId", &req.tool_id),
+                ("argsDigest", &req.args_digest),
+                ("workspaceRootDigest", &req.workspace_root_digest),
+                ("budgetDigest", &req.budget_digest),
+                ("cancellationId", &req.cancellation_id),
+            ] {
+                if v.is_empty() {
+                    return Err(refuse(
+                        KernelErrorCode::DeliveryInvalid,
+                        &["tool authorization field ", name, " is required"].concat(),
+                    ));
+                }
+            }
+            let scope = tool_scope(&req.tool_id)
+                .ok_or_else(|| refuse(KernelErrorCode::ScopeRefused, "unknown tool id; refused"))?;
+            Self::require_tool_authority(
+                &self.store,
+                self.witness.as_ref(),
+                &req.command_id,
+                &req.task_instance_id,
+                &req.attempt_id,
+                req.lease_epoch,
+                &req.store_incarnation,
+            )?;
+            let key_for_binding = self.store.issuance_key_hex()?;
+            Self::check_binding(&self.store, &key_for_binding, req)?;
+            if let Some(origin) = &req.ai_origin {
+                Self::check_ai_proposal(
+                    &self.store,
+                    &key_for_binding,
+                    (self.repo_inspect_enabled, self.repo_code_enabled),
+                    scope,
+                    origin,
+                    &req.command_id,
+                )?;
+            }
+            let write_scope = if scope == "write" {
+                Some(Self::check_write_scope(&self.store, &key_for_binding, req)?)
+            } else {
+                None
+            };
+            let process_scope = if scope == "process" {
+                Some(Self::check_process_scope(
+                    &self.store,
+                    &key_for_binding,
+                    req,
+                )?)
+            } else {
+                None
+            };
+            Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
+            if self
+                .store
+                .tool_phase_recorded(&req.request_id, PHASE_AUTHORIZED)?
+            {
+                return Err(refuse(
+                    KernelErrorCode::CommandConflict,
+                    "tool request already authorized; duplicate refused",
+                ));
+            }
+            let key_hex = self.store.issuance_key_hex()?;
+            let issued = now_ms();
+            let mut g = SealedToolGrant {
+                execution_id: random_hex(16)?,
+                request_id: req.request_id.clone(),
+                command_id: req.command_id.clone(),
+                task_instance_id: req.task_instance_id.clone(),
+                attempt_id: req.attempt_id.clone(),
+                lease_epoch: req.lease_epoch,
+                store_incarnation: req.store_incarnation.clone(),
+                tool_id: req.tool_id.clone(),
+                scope: scope.to_owned(),
+                tool_version: req.tool_version,
+                args_digest: req.args_digest.clone(),
+                workspace_root_digest: req.workspace_root_digest.clone(),
+                workspace_root_dev: req.workspace_root_dev,
+                workspace_root_ino: req.workspace_root_ino,
+                budget_digest: req.budget_digest.clone(),
+                cancellation_id: req.cancellation_id.clone(),
+                issued_at_ms: issued,
+                expires_at_ms: issued.saturating_add(TOOL_GRANT_TTL_MS),
+                nonce_hex: random_hex(16)?,
+                tag_hex: String::new(),
+            };
+            g.tag_hex = hmac_seal_hex(&key_hex, &grant_canonical(&g))?;
+            self.store.append_tool_entry(&ToolEntryInput {
+                request_id: g.request_id.clone(),
+                execution_id: g.execution_id.clone(),
+                task_instance_id: g.task_instance_id.clone(),
+                attempt_id: g.attempt_id.clone(),
+                command_id: g.command_id.clone(),
+                phase: PHASE_AUTHORIZED.to_owned(),
+                payload: serde_json::json!({
+                    "toolId": g.tool_id,
+                    "scope": g.scope,
+                    "approverIndependent": write_scope
+                        .as_ref()
+                        .map(|b| b.independent)
+                        .or(process_scope.as_ref().map(|b| b.independent)),
+                    "toolVersion": g.tool_version,
+                    "workspaceRootDigest": g.workspace_root_digest,
+                    "budgetDigest": g.budget_digest,
+                    "cancellationId": g.cancellation_id,
+                    "leaseEpoch": g.lease_epoch,
+                    "expiresAtMs": g.expires_at_ms,
+                    "aiInitiated": req.ai_origin.is_some(),
+                    "aiOrigin": req.ai_origin,
+                }),
+            })?;
+            Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
+            Ok(g)
+        })
+    }
+
+    /// Verify a grant, revalidate live authority, and journal `started`.
+    /// This is the single gate before any workspace byte is read.
+    pub fn begin_tool_execution(
+        &mut self,
+        grant: &SealedToolGrant,
+        expected_args_digest: &str,
+        expected_budget_digest: &str,
+    ) -> KernelResult<VerifiedToolGrant> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            let key_hex = self.store.issuance_key_hex()?;
+            let expect = hmac_seal_hex(&key_hex, &grant_canonical(grant))?;
+            if expect != grant.tag_hex {
+                return Err(refuse(
+                    KernelErrorCode::ForgedIssuer,
+                    "tool grant seal mismatch; forged or altered",
+                ));
+            }
+            let now = now_ms();
+            if now > grant.expires_at_ms
+                || grant.issued_at_ms > now.saturating_add(TOOL_GRANT_SKEW_MS)
+            {
+                return Err(refuse(
+                    KernelErrorCode::ReservationExpired,
+                    "tool grant expired or not yet valid",
+                ));
+            }
+            if tool_scope(&grant.tool_id) != Some(grant.scope.as_str()) {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "grant scope does not match its tool id; refused",
+                ));
+            }
+            if grant.scope == "write" {
+                let key = self.store.issuance_key_hex()?;
+                let b = Self::verified_write_scope(&self.store, &key, &grant.command_id)?
+                    .ok_or_else(|| {
+                        refuse(
+                            KernelErrorCode::ScopeRefused,
+                            "no independent write scope for this command; mutation refused",
+                        )
+                    })?;
+                if b.lease_epoch != grant.lease_epoch
+                    || b.store_incarnation != grant.store_incarnation
+                    || b.root_digest != grant.workspace_root_digest
+                {
+                    return Err(refuse(
+                        KernelErrorCode::BindingMismatch,
+                        "write scope does not match this grant",
+                    ));
+                }
+            }
+            if grant.scope == "process" {
+                let key = self.store.issuance_key_hex()?;
+                let b = Self::verified_process_scope(&self.store, &key, &grant.command_id)?
+                    .ok_or_else(|| {
+                        refuse(
+                            KernelErrorCode::ScopeRefused,
+                            "no independent process scope for this command; execution refused",
+                        )
+                    })?;
+                if b.lease_epoch != grant.lease_epoch
+                    || b.store_incarnation != grant.store_incarnation
+                    || b.root_digest != grant.workspace_root_digest
+                {
+                    return Err(refuse(
+                        KernelErrorCode::BindingMismatch,
+                        "process scope does not match this grant",
+                    ));
+                }
+            }
+            if grant.args_digest != expected_args_digest {
+                return Err(refuse(
+                    KernelErrorCode::BindingMismatch,
+                    "tool arguments differ from the authorized arguments",
+                ));
+            }
+            if grant.budget_digest != expected_budget_digest {
+                return Err(refuse(
+                    KernelErrorCode::BindingMismatch,
+                    "tool budgets differ from the authorized budgets",
+                ));
+            }
+            if grant.store_incarnation != self.store.incarnation() {
+                return Err(refuse(
+                    KernelErrorCode::StaleLease,
+                    "tool grant belongs to a different store incarnation",
+                ));
+            }
+            Self::require_tool_authority(
+                &self.store,
+                self.witness.as_ref(),
+                &grant.command_id,
+                &grant.task_instance_id,
+                &grant.attempt_id,
+                grant.lease_epoch,
+                &grant.store_incarnation,
+            )?;
+            Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
+            for terminal in [PHASE_EXPIRED, PHASE_INTERRUPTED] {
+                if self
+                    .store
+                    .tool_phase_recorded(&grant.request_id, terminal)?
+                {
+                    return Err(refuse(
+                        KernelErrorCode::IntentFenced,
+                        "tool request was already closed by reconciliation; not re-executable",
+                    ));
+                }
+            }
+            if !self
+                .store
+                .tool_phase_recorded(&grant.request_id, PHASE_AUTHORIZED)?
+            {
+                return Err(refuse(
+                    KernelErrorCode::IntentUnknown,
+                    "tool grant has no authorized journal record",
+                ));
+            }
+            // Exactly-once start: a replayed grant hits the unique
+            // (request, phase) constraint and is refused here.
+            self.store.append_tool_entry(&ToolEntryInput {
+                request_id: grant.request_id.clone(),
+                execution_id: grant.execution_id.clone(),
+                task_instance_id: grant.task_instance_id.clone(),
+                attempt_id: grant.attempt_id.clone(),
+                command_id: grant.command_id.clone(),
+                phase: PHASE_STARTED.to_owned(),
+                payload: serde_json::json!({ "toolId": grant.tool_id }),
+            })?;
+            Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
+            Ok(VerifiedToolGrant {
+                grant: grant.clone(),
+                _private: (),
+            })
+        })
+    }
+
+    /// Journal `completed` with the already-redacted result record.
+    pub fn complete_tool_execution(
+        &mut self,
+        verified: &VerifiedToolGrant,
+        record: serde_json::Value,
+    ) -> KernelResult<ToolJournalEntry> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            let g = &verified.grant;
+            if !self
+                .store
+                .tool_phase_recorded(&g.request_id, PHASE_STARTED)?
+            {
+                return Err(refuse(
+                    KernelErrorCode::IntentUnknown,
+                    "tool execution was never started",
+                ));
+            }
+            let entry = self.store.append_tool_entry(&ToolEntryInput {
+                request_id: g.request_id.clone(),
+                execution_id: g.execution_id.clone(),
+                task_instance_id: g.task_instance_id.clone(),
+                attempt_id: g.attempt_id.clone(),
+                command_id: g.command_id.clone(),
+                phase: PHASE_COMPLETED.to_owned(),
+                payload: record,
+            })?;
+            Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
+            Ok(entry)
+        })
+    }
+
+    /// The narrow authority for MODEL-PROPOSED tool calls (A5.5 reads, A5.6
+    /// code). The call is untrusted model output; this is the Kernel-side
+    /// gate, independent of any Controller-side validation. All must hold:
+    /// * the matching pilot is enabled on this Kernel handle;
+    /// * provenance is well-formed;
+    /// * the command's *sealed* published intent has a user-explicit
+    ///   initiator and scope `repo-inspect` (READ tools only) or `repo-code`
+    ///   (read, write and process tools);
+    /// * that intent's single model dispatch already happened (state
+    ///   `executed`/`redeemed`): a tool proposal presupposes a provider turn.
+    ///
+    /// A write or process call additionally passes the unchanged scope-binding
+    /// and consumed-approval gates in `authorize_tool`; nothing here grants
+    /// them.
+    fn check_ai_proposal(
+        store: &nexus_store::Store,
+        key_hex: &str,
+        pilots: (bool, bool),
+        tool_scope_name: &str,
+        origin: &str,
+        command_id: &str,
+    ) -> KernelResult<()> {
+        let (inspect_enabled, code_enabled) = pilots;
+        if !inspect_enabled && !code_enabled {
+            return Err(refuse(
+                KernelErrorCode::ScopeRefused,
+                "no agentic pilot is enabled; AI-initiated tool calls refused",
+            ));
+        }
+        if !matches!(tool_scope_name, "read" | "write" | "process") {
+            return Err(refuse(KernelErrorCode::ScopeRefused, "unknown tool scope"));
+        }
+        if origin.is_empty()
+            || origin.len() > 160
+            || !origin
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':' | b'/'))
+        {
+            return Err(refuse(
+                KernelErrorCode::DeliveryInvalid,
+                "AI proposal provenance is malformed",
+            ));
+        }
+        let (json, seal, state) = store.fetch_intent(command_id)?.ok_or_else(|| {
+            refuse(
+                KernelErrorCode::IntentUnknown,
+                "no published intent for this command; AI tool call refused",
+            )
+        })?;
+        if hmac_seal_hex(key_hex, &json)? != seal {
+            return Err(KernelError::new(
+                KernelErrorCode::ForgedIssuer,
+                "published intent seal mismatch; store tampered",
+            ));
+        }
+        let bundle: serde_json::Value = serde_json::from_str(&json).map_err(|_| {
+            KernelError::new(
+                KernelErrorCode::StoreCorrupt,
+                "published intent is not JSON",
+            )
+        })?;
+        if bundle.get("initiator").and_then(|v| v.as_str()) != Some(crate::INITIATOR_USER_EXPLICIT)
+        {
+            return Err(refuse(
+                KernelErrorCode::ScopeRefused,
+                "AI-initiated tool calls require a user-initiated command",
+            ));
+        }
+        match bundle.get("scope").and_then(|v| v.as_str()) {
+            Some(s) if s == crate::SCOPE_REPO_INSPECT => {
+                if !inspect_enabled {
+                    return Err(refuse(
+                        KernelErrorCode::ScopeRefused,
+                        "repo-inspect pilot is disabled; AI-initiated tool calls refused",
+                    ));
+                }
+                if tool_scope_name != "read" {
+                    return Err(refuse(
+                        KernelErrorCode::ScopeRefused,
+                        "repo-inspect commands may only run read-only tools",
+                    ));
+                }
+            }
+            Some(s) if s == crate::SCOPE_REPO_CODE => {
+                if !code_enabled {
+                    return Err(refuse(
+                        KernelErrorCode::ScopeRefused,
+                        "repo-code pilot is disabled; AI-initiated tool calls refused",
+                    ));
+                }
+            }
+            _ => {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "AI-initiated tool calls require a repo-inspect or repo-code command",
+                ))
+            }
+        }
+        if state != "executed" && state != "redeemed" {
+            return Err(refuse(
+                KernelErrorCode::IntentFenced,
+                "the command's model turn has not been dispatched; AI tool call refused",
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_binding(
+        store: &nexus_store::Store,
+        key_hex: &str,
+        req: &ToolAuthorizationRequest,
+    ) -> KernelResult<()> {
+        let b = Self::verified_binding(store, key_hex, &req.command_id)?.ok_or_else(|| {
+            refuse(
+                KernelErrorCode::DeliveryInvalid,
+                "no Controller workspace binding for this command; tool authority refused",
+            )
+        })?;
+        if b.task_instance_id != req.task_instance_id
+            || b.attempt_id != req.attempt_id
+            || b.lease_epoch != req.lease_epoch
+            || b.store_incarnation != req.store_incarnation
+        {
+            return Err(refuse(
+                KernelErrorCode::BindingMismatch,
+                "workspace binding does not belong to this task/attempt/generation",
+            ));
+        }
+        if b.root_digest != req.workspace_root_digest
+            || b.root_dev != req.workspace_root_dev
+            || b.root_ino != req.workspace_root_ino
+        {
+            return Err(refuse(
+                KernelErrorCode::BindingMismatch,
+                "workspace identity differs from the Controller-authorized binding",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verified_binding(
+        store: &nexus_store::Store,
+        key_hex: &str,
+        command_id: &str,
+    ) -> KernelResult<Option<WorkspaceBinding>> {
+        match store.fetch_workspace_binding(command_id)? {
+            None => Ok(None),
+            Some((json, seal)) => {
+                let b: WorkspaceBinding = serde_json::from_str(&json).map_err(|_| {
+                    KernelError::new(
+                        KernelErrorCode::StoreCorrupt,
+                        "workspace binding unreadable",
+                    )
+                })?;
+                if hmac_seal_hex(key_hex, &binding_canonical(&b))? != seal
+                    || canonical_json(&serde_json::to_value(&b).unwrap_or_default()) != json
+                {
+                    return Err(KernelError::new(
+                        KernelErrorCode::ForgedIssuer,
+                        "workspace binding seal mismatch; store tampered",
+                    ));
+                }
+                Ok(Some(b))
+            }
+        }
+    }
+
+    /// Verified read of the Controller workspace binding (seal checked).
+    pub fn workspace_binding(
+        &mut self,
+        command_id: &str,
+    ) -> KernelResult<Option<WorkspaceBinding>> {
+        let key_hex = self.store.issuance_key_hex()?;
+        Self::verified_binding(&self.store, &key_hex, command_id)
+    }
+
+    /// Controller workspace authorization. Called only through the
+    /// issuer-authenticated daemon channel (or an in-process trusted
+    /// harness). The root must (a) belong to an accepted command in its
+    /// current lease generation, (b) be a real directory, and (c) lie
+    /// beneath an operator-configured allowed base. Its `(dev, ino)` is
+    /// captured by the Kernel itself, never taken from the caller.
+    pub fn bind_workspace(
+        &mut self,
+        command_id: &str,
+        root: &str,
+        allowed_bases: &[std::path::PathBuf],
+    ) -> KernelResult<WorkspaceBinding> {
+        use std::os::unix::fs::MetadataExt;
+        Self::critical(&self.lock_file, &self.in_process, || {
+            let receipt = self.store.read_receipt(command_id)?.ok_or_else(|| {
+                refuse(
+                    KernelErrorCode::DeliveryInvalid,
+                    "no accepted receipt for this command; workspace binding refused",
+                )
+            })?;
+            Self::require_tool_authority(
+                &self.store,
+                self.witness.as_ref(),
+                command_id,
+                &receipt.task_instance_id,
+                &receipt.attempt_id,
+                receipt.lease_epoch,
+                &receipt.store_incarnation,
+            )?;
+            if !root.starts_with('/') || root.contains('\0') {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "workspace root must be an absolute path",
+                ));
+            }
+            let canon = std::fs::canonicalize(root).map_err(|_| {
+                refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "workspace root does not exist or is unreadable",
+                )
+            })?;
+            let beneath = allowed_bases.iter().any(|b| {
+                std::fs::canonicalize(b)
+                    .map(|cb| cb != std::path::Path::new("/") && canon.starts_with(&cb))
+                    .unwrap_or(false)
+            });
+            if !beneath {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "workspace root is not beneath an operator-allowed workspace base",
+                ));
+            }
+            let md = std::fs::symlink_metadata(&canon)
+                .map_err(|_| refuse(KernelErrorCode::ScopeRefused, "workspace root unreadable"))?;
+            if !md.is_dir() {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "workspace root is not a directory",
+                ));
+            }
+            let root_path = canon.to_str().ok_or_else(|| {
+                refuse(KernelErrorCode::ScopeRefused, "workspace root is not UTF-8")
+            })?;
+            // The issuer does not get to pick the workspace at bind time:
+            // the Controller-authored intent payload that was digest-
+            // verified and sealed at ACCEPTANCE must commit to exactly this
+            // root (`workspaceRootDigest = sha256(canonical root)`). Being
+            // beneath an allowed base is necessary, never sufficient.
+            let payload = self.store.command_payload(command_id)?.ok_or_else(|| {
+                refuse(
+                    KernelErrorCode::StoreCorrupt,
+                    "accepted command has no payload",
+                )
+            })?;
+            let payload: serde_json::Value = serde_json::from_str(&payload).map_err(|_| {
+                KernelError::new(KernelErrorCode::StoreCorrupt, "command payload unreadable")
+            })?;
+            let committed = payload
+                .get("workspaceRootDigest")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    refuse(
+                        KernelErrorCode::ScopeRefused,
+                        "accepted intent does not commit to a workspace (workspaceRootDigest); binding refused",
+                    )
+                })?;
+            if committed != nexus_contracts::sha256_hex(root_path) {
+                return Err(refuse(
+                    KernelErrorCode::BindingMismatch,
+                    "workspace differs from the root committed in the accepted Controller intent",
+                ));
+            }
+            let b = WorkspaceBinding {
+                command_id: command_id.to_owned(),
+                task_instance_id: receipt.task_instance_id.clone(),
+                attempt_id: receipt.attempt_id.clone(),
+                lease_epoch: receipt.lease_epoch,
+                store_incarnation: receipt.store_incarnation.clone(),
+                root_path: root_path.to_owned(),
+                root_digest: nexus_contracts::sha256_hex(root_path),
+                root_dev: md.dev(),
+                root_ino: md.ino(),
+            };
+            let key_hex = self.store.issuance_key_hex()?;
+            let seal = hmac_seal_hex(&key_hex, &binding_canonical(&b))?;
+            let json = canonical_json(&serde_json::to_value(&b).map_err(|_| {
+                KernelError::new(KernelErrorCode::StoreError, "binding not serializable")
+            })?);
+            self.store
+                .insert_workspace_binding(command_id, &json, &seal)?;
+            Ok(b)
+        })
+    }
+
+    /// Controller-side revocation of tool authority for one command.
+    /// Observed by `begin_tool_execution` and by mid-execution probes.
+    pub fn revoke_tools(&mut self, command_id: &str, reason: &str) -> KernelResult<()> {
+        let r = self.revoke_tools_inner(command_id, reason);
+        self.anchored(r)
+    }
+
+    fn revoke_tools_inner(&mut self, command_id: &str, reason: &str) -> KernelResult<()> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            if self.store.read_receipt(command_id)?.is_none() {
+                return Err(refuse(
+                    KernelErrorCode::IntentUnknown,
+                    "no accepted command to revoke",
+                ));
+            }
+            self.store
+                .revoke_tools(command_id, &reason.chars().take(120).collect::<String>())?;
+            // A4.2: revocation also withdraws every open human approval.
+            Self::revoke_open_approvals(&mut self.store, command_id, "tools-revoked")?;
+            Ok(())
+        })
+    }
+
+    /// Authoritative, read-only fence probe for an in-flight execution:
+    /// lease generation, witness, revocation and intent fence. Never
+    /// depends on the caller's cancellation token.
+    pub fn check_tool_fence(&self, verified: &VerifiedToolGrant) -> KernelResult<()> {
+        let g = &verified.grant;
+        Self::require_tool_authority(
+            &self.store,
+            self.witness.as_ref(),
+            &g.command_id,
+            &g.task_instance_id,
+            &g.attempt_id,
+            g.lease_epoch,
+            &g.store_incarnation,
+        )
+    }
+
+    /// Same probe for a grant that this process already verified and
+    /// started (the daemon keeps the sealed grant, not the verified token).
+    pub fn check_tool_fence_for(&self, g: &SealedToolGrant) -> KernelResult<()> {
+        Self::require_tool_authority(
+            &self.store,
+            self.witness.as_ref(),
+            &g.command_id,
+            &g.task_instance_id,
+            &g.attempt_id,
+            g.lease_epoch,
+            &g.store_incarnation,
+        )
+    }
+
+    /// Journal/witness consistency gate run before every append.
+    ///
+    /// Recoverable states (checkpoint count `c`, store count `n`):
+    /// * `n == c`, tail hash == checkpoint tail  -> consistent;
+    /// * `n == c + 1`, entry `c` hash == checkpoint tail -> crash between
+    ///   append and checkpoint (documented one-entry window), recoverable;
+    /// * anything else (store behind, diverged, further ahead, missing or
+    ///   unsealed checkpoint with a non-trivial journal) -> fail closed.
+    fn ensure_journal_consistent(
+        store: &mut nexus_store::Store,
+        witness: Option<&nexus_store::WitnessStore>,
+    ) -> KernelResult<()> {
+        let Some(w) = witness else { return Ok(()) };
+        // A4.3: catch up / verify against the independent witness first.
+        Self::anchor_all(store, Some(w))?;
+        let corrupt = |m: &str| KernelError::new(KernelErrorCode::StoreCorrupt, m);
+        let (n, tail) = store.tool_journal_tail()?;
+        let Some(raw) = w.get_meta(TOOL_CHECKPOINT_KEY)? else {
+            return if n <= 1 {
+                Ok(())
+            } else {
+                Err(corrupt(
+                    "tool journal has no witness checkpoint (inconsistent evidence)",
+                ))
+            };
+        };
+        let v: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|_| corrupt("tool journal checkpoint unreadable"))?;
+        let c = v
+            .get("count")
+            .and_then(|x| x.as_u64())
+            .ok_or_else(|| corrupt("checkpoint count"))?;
+        let ctail = v
+            .get("tail")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| corrupt("checkpoint tail"))?;
+        let cseal = v
+            .get("seal")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| corrupt("checkpoint seal"))?;
+        if store.tool_checkpoint_seal(c, ctail)? != cseal {
+            return Err(corrupt("tool journal checkpoint seal mismatch"));
+        }
+        if n == c {
+            if tail != ctail {
+                return Err(corrupt(
+                    "tool journal tail diverges from the witness checkpoint",
+                ));
+            }
+            return Ok(());
+        }
+        if n == c + 1 {
+            return match store.tool_entry_hash_at(c)? {
+                Some(h) if h == ctail => Ok(()),
+                _ => Err(corrupt("tool journal diverges from the witness checkpoint")),
+            };
+        }
+        if n < c {
+            return Err(corrupt(
+                "tool journal is shorter than the witness checkpoint (tail truncation)",
+            ));
+        }
+        Err(corrupt(
+            "tool journal is more than one entry ahead of the witness checkpoint",
+        ))
+    }
+
+    /// Deterministic lifecycle reconciliation. Never invents completion:
+    /// * `authorized` older than the grant lifetime, never started ->
+    ///   terminal `expired`;
+    /// * (`include_started`) `started` with no completion -> terminal
+    ///   `interrupted` (uncertain; reads may have happened; not retried).
+    ///
+    /// `include_started` must only be true when no execution can be in
+    /// flight (daemon startup, single owner of the store).
+    pub fn reconcile_tool_journal(
+        &mut self,
+        include_started: bool,
+    ) -> KernelResult<ReconcileReport> {
+        self.reconcile_tool_journal_at(now_ms(), include_started)
+    }
+
+    /// `reconcile_tool_journal` with an explicit clock (tests, replay).
+    pub fn reconcile_tool_journal_at(
+        &mut self,
+        now: i64,
+        include_started: bool,
+    ) -> KernelResult<ReconcileReport> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
+            let mut rep = ReconcileReport::default();
+            let now_s = (now / 1000).max(0) as u64;
+            let ttl_s = (TOOL_GRANT_TTL_MS / 1000 + TOOL_GRANT_SKEW_MS / 1000) as u64;
+            let unstarted = self
+                .store
+                .tool_requests_in_state(PHASE_AUTHORIZED, &[PHASE_STARTED, PHASE_EXPIRED])?;
+            let unstarted: Vec<_> = unstarted;
+            for (rid, eid, task, attempt, cmd, at) in unstarted {
+                let at_s: u64 = at
+                    .split('.')
+                    .next()
+                    .and_then(|x| x.parse().ok())
+                    .unwrap_or(0);
+                if now_s.saturating_sub(at_s) >= ttl_s {
+                    self.store.append_tool_entry(&ToolEntryInput {
+                        request_id: rid,
+                        execution_id: eid,
+                        task_instance_id: task,
+                        attempt_id: attempt,
+                        command_id: cmd,
+                        phase: PHASE_EXPIRED.to_owned(),
+                        payload: serde_json::json!({"reason": "grant lapsed before execution started"}),
+                    })?;
+                    Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
+                    rep.expired += 1;
+                }
+            }
+            if include_started {
+                let open = self.store.tool_requests_in_state(
+                    PHASE_STARTED,
+                    &[
+                        PHASE_COMPLETED,
+                        PHASE_INTERRUPTED,
+                        PHASE_PLANNED,
+                        PHASE_VERIFIED,
+                        PHASE_FAILED,
+                        PHASE_CONFLICT,
+                        // Process lifecycle phases are reconciled by the
+                        // process layer (it must kill leftovers first).
+                        PHASE_PREPARED,
+                        PHASE_RUNNING,
+                        PHASE_EXITED,
+                        PHASE_CANCELLED,
+                    ],
+                )?;
+                for (rid, eid, task, attempt, cmd, _) in open {
+                    self.store.append_tool_entry(&ToolEntryInput {
+                        request_id: rid,
+                        execution_id: eid,
+                        task_instance_id: task,
+                        attempt_id: attempt,
+                        command_id: cmd,
+                        phase: PHASE_INTERRUPTED.to_owned(),
+                        payload: serde_json::json!({
+                            "reason": "no completion recorded (crash or restart); outcome uncertain; never re-executed",
+                        }),
+                    })?;
+                    Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
+                    rep.interrupted += 1;
+                }
+            }
+            Ok(rep)
+        })
+    }
+
+    /// Paged records for one (task, attempt). The attempt must exist as an
+    /// accepted command, otherwise the scope is refused (no cross-task
+    /// probing). Cursor = last returned `seq`.
+    pub fn tool_records_page(
+        &self,
+        task: &str,
+        attempt: &str,
+        after_seq: i64,
+        limit: usize,
+    ) -> KernelResult<Vec<ToolJournalEntry>> {
+        if !self.store.attempt_exists(task, attempt)? {
+            return Err(refuse(
+                KernelErrorCode::IntentUnknown,
+                "no such task attempt in this store",
+            ));
+        }
+        self.store
+            .list_tool_entries_page(task, attempt, after_seq.max(0), limit.clamp(1, 500))
+    }
+
+    fn verified_process_scope(
+        store: &nexus_store::Store,
+        key_hex: &str,
+        command_id: &str,
+    ) -> KernelResult<Option<ProcessScopeBinding>> {
+        match store.fetch_process_scope(command_id)? {
+            None => Ok(None),
+            Some((json, seal)) => {
+                let b: ProcessScopeBinding = serde_json::from_str(&json).map_err(|_| {
+                    KernelError::new(KernelErrorCode::StoreCorrupt, "process scope unreadable")
+                })?;
+                if hmac_seal_hex(key_hex, &process_scope_canonical(&b))? != seal
+                    || canonical_json(&serde_json::to_value(&b).unwrap_or_default()) != json
+                {
+                    return Err(KernelError::new(
+                        KernelErrorCode::ForgedIssuer,
+                        "process scope seal mismatch; store tampered",
+                    ));
+                }
+                Ok(Some(b))
+            }
+        }
+    }
+
+    fn check_process_scope(
+        store: &nexus_store::Store,
+        key_hex: &str,
+        req: &ToolAuthorizationRequest,
+    ) -> KernelResult<ProcessScopeBinding> {
+        let b =
+            Self::verified_process_scope(store, key_hex, &req.command_id)?.ok_or_else(|| {
+                refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "no independent process scope for this command; execution refused",
+                )
+            })?;
+        if b.task_instance_id != req.task_instance_id
+            || b.attempt_id != req.attempt_id
+            || b.lease_epoch != req.lease_epoch
+            || b.store_incarnation != req.store_incarnation
+            || b.root_digest != req.workspace_root_digest
+        {
+            return Err(refuse(
+                KernelErrorCode::BindingMismatch,
+                "process scope does not belong to this task/attempt/generation/workspace",
+            ));
+        }
+        Ok(b)
+    }
+
+    /// Verified read of a command's process scope (seal checked).
+    pub fn process_scope_binding(
+        &mut self,
+        command_id: &str,
+    ) -> KernelResult<Option<ProcessScopeBinding>> {
+        let key = self.store.issuance_key_hex()?;
+        Self::verified_process_scope(&self.store, &key, command_id)
+    }
+
+    /// Publish the independent process scope (approver channel only; the
+    /// daemon verified the approver credential beforehand).
+    pub fn bind_process_scope(
+        &mut self,
+        command_id: &str,
+        approver_id: &str,
+        independent: bool,
+        approved_root_digest: &str,
+        max_wall_ms: u64,
+    ) -> KernelResult<ProcessScopeBinding> {
+        self.bind_process_scope_with_fs(
+            command_id,
+            approver_id,
+            independent,
+            approved_root_digest,
+            max_wall_ms,
+            FS_SCOPE_SCRATCH,
+        )
+    }
+
+    /// As [`Self::bind_process_scope`], sealing the filesystem scope the approver authorized.
+    pub fn bind_process_scope_with_fs(
+        &mut self,
+        command_id: &str,
+        approver_id: &str,
+        independent: bool,
+        approved_root_digest: &str,
+        max_wall_ms: u64,
+        fs_scope: &str,
+    ) -> KernelResult<ProcessScopeBinding> {
+        self.bind_process_scope_declared(
+            command_id,
+            approver_id,
+            independent,
+            approved_root_digest,
+            max_wall_ms,
+            &DeclaredScope {
+                fs_scope: fs_scope.to_owned(),
+                grant: None,
+            },
+        )
+    }
+
+    /// As [`Self::bind_process_scope`], sealing the declared filesystem scope and standing grant.
+    pub fn bind_process_scope_declared(
+        &mut self,
+        command_id: &str,
+        approver_id: &str,
+        independent: bool,
+        approved_root_digest: &str,
+        max_wall_ms: u64,
+        declared: &DeclaredScope,
+    ) -> KernelResult<ProcessScopeBinding> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            Self::bind_process_scope_inner(
+                &mut self.store,
+                self.witness.as_ref(),
+                command_id,
+                approver_id,
+                independent,
+                approved_root_digest,
+                max_wall_ms,
+                declared,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bind_process_scope_inner(
+        store: &mut nexus_store::Store,
+        witness: Option<&nexus_store::WitnessStore>,
+        command_id: &str,
+        approver_id: &str,
+        independent: bool,
+        approved_root_digest: &str,
+        max_wall_ms: u64,
+        declared: &DeclaredScope,
+    ) -> KernelResult<ProcessScopeBinding> {
+        {
+            let fs_scope = declared.fs_scope.as_str();
+            // M8: `full` seals only under a grant declaring network `full`
+            // (the approval-decision path). A caller-chosen scope without that
+            // grant seal is refused, exactly like an unknown scope name.
+            if fs_scope == FS_SCOPE_FULL
+                && !matches!(&declared.grant, Some(g) if g.net == NET_SCOPE_FULL)
+            {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "Full Access must be sealed under a grant with network scope `full`",
+                ));
+            }
+            if fs_scope != FS_SCOPE_SCRATCH
+                && fs_scope != FS_SCOPE_WORKSPACE
+                && fs_scope != FS_SCOPE_FULL
+            {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "unsupported filesystem scope for a process scope",
+                ));
+            }
+            let receipt = store.read_receipt(command_id)?.ok_or_else(|| {
+                refuse(
+                    KernelErrorCode::DeliveryInvalid,
+                    "no accepted receipt for this command; process scope refused",
+                )
+            })?;
+            Self::require_tool_authority(
+                store,
+                witness,
+                command_id,
+                &receipt.task_instance_id,
+                &receipt.attempt_id,
+                receipt.lease_epoch,
+                &receipt.store_incarnation,
+            )?;
+            let key_hex = store.issuance_key_hex()?;
+            let read_binding =
+                Self::verified_binding(store, &key_hex, command_id)?.ok_or_else(|| {
+                    refuse(
+                        KernelErrorCode::DeliveryInvalid,
+                        "no workspace binding; bind the read workspace first",
+                    )
+                })?;
+            if read_binding.root_digest != approved_root_digest {
+                return Err(refuse(
+                    KernelErrorCode::BindingMismatch,
+                    "the approver authorized a different workspace than the bound one",
+                ));
+            }
+            if max_wall_ms == 0 {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "maxWallMs must be positive",
+                ));
+            }
+            let b = ProcessScopeBinding {
+                command_id: command_id.to_owned(),
+                task_instance_id: receipt.task_instance_id.clone(),
+                attempt_id: receipt.attempt_id.clone(),
+                lease_epoch: receipt.lease_epoch,
+                store_incarnation: receipt.store_incarnation.clone(),
+                root_digest: read_binding.root_digest.clone(),
+                max_wall_ms,
+                approver_id: approver_id.chars().take(64).collect(),
+                independent,
+                fs_scope: fs_scope.to_owned(),
+                grant_id: declared
+                    .grant
+                    .as_ref()
+                    .map(|g| g.grant_id.clone())
+                    .unwrap_or_default(),
+                grant_version: declared.grant.as_ref().map(|g| g.version).unwrap_or(0),
+                grant_digest: declared
+                    .grant
+                    .as_ref()
+                    .map(|g| g.digest.clone())
+                    .unwrap_or_default(),
+                net_scope: declared
+                    .grant
+                    .as_ref()
+                    .map(|g| g.net.clone())
+                    .unwrap_or_default(),
+                approval: declared
+                    .grant
+                    .as_ref()
+                    .map(|g| g.approval.clone())
+                    .unwrap_or_default(),
+            };
+            let seal = hmac_seal_hex(&key_hex, &process_scope_canonical(&b))?;
+            let json = canonical_json(&serde_json::to_value(&b).map_err(|_| {
+                KernelError::new(KernelErrorCode::StoreError, "scope not serializable")
+            })?);
+            store.insert_process_scope(command_id, &json, &seal)?;
+            Ok(b)
+        }
+    }
+
+    /// Append one process-lifecycle phase for a verified process grant,
+    /// enforcing the state machine, then checkpoint.
+    pub fn record_process_phase(
+        &mut self,
+        verified: &VerifiedToolGrant,
+        phase: &str,
+        payload: serde_json::Value,
+    ) -> KernelResult<ToolJournalEntry> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            let g = &verified.grant;
+            if g.scope != "process" {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "only process grants can record process phases",
+                ));
+            }
+            let has = |st: &nexus_store::Store, p: &str| st.tool_phase_recorded(&g.request_id, p);
+            for t in PROCESS_TERMINALS {
+                if has(&self.store, t)? {
+                    return Err(refuse(
+                        KernelErrorCode::CommandConflict,
+                        "process request is already terminal",
+                    ));
+                }
+            }
+            let ok = match phase {
+                PHASE_PREPARED => has(&self.store, PHASE_STARTED)?,
+                PHASE_RUNNING => has(&self.store, PHASE_PREPARED)?,
+                PHASE_EXITED => has(&self.store, PHASE_RUNNING)?,
+                PHASE_FAILED | PHASE_CANCELLED => has(&self.store, PHASE_STARTED)?,
+                _ => false,
+            };
+            if !ok {
+                return Err(refuse(
+                    KernelErrorCode::CommandConflict,
+                    "process phase is not valid in the request's current state",
+                ));
+            }
+            Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
+            let entry = self.store.append_tool_entry(&ToolEntryInput {
+                request_id: g.request_id.clone(),
+                execution_id: g.execution_id.clone(),
+                task_instance_id: g.task_instance_id.clone(),
+                attempt_id: g.attempt_id.clone(),
+                command_id: g.command_id.clone(),
+                phase: phase.to_owned(),
+                payload,
+            })?;
+            Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
+            Ok(entry)
+        })
+    }
+
+    fn collect_open_processes(store: &nexus_store::Store) -> KernelResult<Vec<OpenProcess>> {
+        let open = store.tool_requests_in_state(
+            PHASE_PREPARED,
+            &[
+                PHASE_EXITED,
+                PHASE_FAILED,
+                PHASE_CANCELLED,
+                PHASE_INTERRUPTED,
+                PHASE_PLANNED,
+                PHASE_VERIFIED,
+                PHASE_CONFLICT,
+                PHASE_COMPLETED,
+            ],
+        )?;
+        let mut out = Vec::new();
+        for (rid, eid, task, attempt, cmd, _) in open {
+            let entries = store.tool_entries_for_request(&rid)?;
+            let find = |p: &str| entries.iter().find(|e| e.phase == p);
+            out.push(OpenProcess {
+                request_id: rid.clone(),
+                execution_id: eid,
+                task_instance_id: task,
+                attempt_id: attempt,
+                command_id: cmd,
+                prepared: find(PHASE_PREPARED)
+                    .map(|e| e.payload.clone())
+                    .unwrap_or_default(),
+                running: find(PHASE_RUNNING).map(|e| e.payload.clone()),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Read-only view of process requests awaiting reconciliation.
+    pub fn open_processes(&self) -> KernelResult<Vec<OpenProcess>> {
+        Self::collect_open_processes(&self.store)
+    }
+
+    /// Close every open process request as `interrupted`. `inspect` (the
+    /// process layer) kills leftover cgroups and cleans staging, and
+    /// returns the payload describing what it found. Never restarts.
+    pub fn reconcile_open_processes(
+        &mut self,
+        inspect: &mut dyn FnMut(&OpenProcess) -> serde_json::Value,
+    ) -> KernelResult<u64> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
+            let mut n = 0;
+            for op in Self::collect_open_processes(&self.store)? {
+                let payload = inspect(&op);
+                self.store.append_tool_entry(&ToolEntryInput {
+                    request_id: op.request_id,
+                    execution_id: op.execution_id,
+                    task_instance_id: op.task_instance_id,
+                    attempt_id: op.attempt_id,
+                    command_id: op.command_id,
+                    phase: PHASE_INTERRUPTED.to_owned(),
+                    payload,
+                })?;
+                Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
+                n += 1;
+            }
+            Ok(n)
+        })
+    }
+
+    fn verified_write_scope(
+        store: &nexus_store::Store,
+        key_hex: &str,
+        command_id: &str,
+    ) -> KernelResult<Option<WriteScopeBinding>> {
+        match store.fetch_write_scope(command_id)? {
+            None => Ok(None),
+            Some((json, seal)) => {
+                let b: WriteScopeBinding = serde_json::from_str(&json).map_err(|_| {
+                    KernelError::new(KernelErrorCode::StoreCorrupt, "write scope unreadable")
+                })?;
+                if hmac_seal_hex(key_hex, &write_scope_canonical(&b))? != seal
+                    || canonical_json(&serde_json::to_value(&b).unwrap_or_default()) != json
+                {
+                    return Err(KernelError::new(
+                        KernelErrorCode::ForgedIssuer,
+                        "write scope seal mismatch; store tampered",
+                    ));
+                }
+                Ok(Some(b))
+            }
+        }
+    }
+
+    fn check_write_scope(
+        store: &nexus_store::Store,
+        key_hex: &str,
+        req: &ToolAuthorizationRequest,
+    ) -> KernelResult<WriteScopeBinding> {
+        let b = Self::verified_write_scope(store, key_hex, &req.command_id)?.ok_or_else(|| {
+            refuse(
+                KernelErrorCode::ScopeRefused,
+                "no independent write scope for this command; mutation refused",
+            )
+        })?;
+        if b.task_instance_id != req.task_instance_id
+            || b.attempt_id != req.attempt_id
+            || b.lease_epoch != req.lease_epoch
+            || b.store_incarnation != req.store_incarnation
+            || b.root_digest != req.workspace_root_digest
+        {
+            return Err(refuse(
+                KernelErrorCode::BindingMismatch,
+                "write scope does not belong to this task/attempt/generation/workspace",
+            ));
+        }
+        Ok(b)
+    }
+
+    /// Verified read of a command's write scope (seal checked).
+    pub fn write_scope_binding(
+        &mut self,
+        command_id: &str,
+    ) -> KernelResult<Option<WriteScopeBinding>> {
+        let key = self.store.issuance_key_hex()?;
+        Self::verified_write_scope(&self.store, &key, command_id)
+    }
+
+    /// Publish the independent write scope. The caller (the daemon) must
+    /// already have verified an approver credential that is distinct from
+    /// the issuer capability; `independent` records whether the daemon
+    /// could additionally prove the two credentials are held by disjoint
+    /// OS identities. Requires: accepted command in its current lease, an
+    /// existing read workspace binding for the same root, and an approver
+    /// that explicitly named that root digest.
+    pub fn bind_write_scope(
+        &mut self,
+        command_id: &str,
+        approver_id: &str,
+        independent: bool,
+        approved_root_digest: &str,
+        max_write_bytes: u64,
+    ) -> KernelResult<WriteScopeBinding> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            Self::bind_write_scope_inner(
+                &mut self.store,
+                self.witness.as_ref(),
+                command_id,
+                approver_id,
+                independent,
+                approved_root_digest,
+                max_write_bytes,
+            )
+        })
+    }
+
+    pub(crate) fn bind_write_scope_inner(
+        store: &mut nexus_store::Store,
+        witness: Option<&nexus_store::WitnessStore>,
+        command_id: &str,
+        approver_id: &str,
+        independent: bool,
+        approved_root_digest: &str,
+        max_write_bytes: u64,
+    ) -> KernelResult<WriteScopeBinding> {
+        {
+            let receipt = store.read_receipt(command_id)?.ok_or_else(|| {
+                refuse(
+                    KernelErrorCode::DeliveryInvalid,
+                    "no accepted receipt for this command; write scope refused",
+                )
+            })?;
+            Self::require_tool_authority(
+                store,
+                witness,
+                command_id,
+                &receipt.task_instance_id,
+                &receipt.attempt_id,
+                receipt.lease_epoch,
+                &receipt.store_incarnation,
+            )?;
+            let key_hex = store.issuance_key_hex()?;
+            let read_binding =
+                Self::verified_binding(store, &key_hex, command_id)?.ok_or_else(|| {
+                    refuse(
+                        KernelErrorCode::DeliveryInvalid,
+                        "no workspace binding; bind the read workspace first",
+                    )
+                })?;
+            if read_binding.root_digest != approved_root_digest {
+                return Err(refuse(
+                    KernelErrorCode::BindingMismatch,
+                    "the approver authorized a different workspace than the bound one",
+                ));
+            }
+            if max_write_bytes == 0 {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "maxWriteBytes must be positive",
+                ));
+            }
+            let b = WriteScopeBinding {
+                command_id: command_id.to_owned(),
+                task_instance_id: receipt.task_instance_id.clone(),
+                attempt_id: receipt.attempt_id.clone(),
+                lease_epoch: receipt.lease_epoch,
+                store_incarnation: receipt.store_incarnation.clone(),
+                root_digest: read_binding.root_digest.clone(),
+                max_write_bytes,
+                approver_id: approver_id.chars().take(64).collect(),
+                independent,
+            };
+            let seal = hmac_seal_hex(&key_hex, &write_scope_canonical(&b))?;
+            let json = canonical_json(&serde_json::to_value(&b).map_err(|_| {
+                KernelError::new(KernelErrorCode::StoreError, "scope not serializable")
+            })?);
+            store.insert_write_scope(command_id, &json, &seal)?;
+            Ok(b)
+        }
+    }
+
+    /// Append one write-lifecycle phase for a verified write grant,
+    /// enforcing the state machine, then checkpoint. Each phase is
+    /// journaled exactly once; the record is durable (SQLite
+    /// `synchronous=FULL`) before this returns.
+    pub fn record_write_phase(
+        &mut self,
+        verified: &VerifiedToolGrant,
+        phase: &str,
+        payload: serde_json::Value,
+    ) -> KernelResult<ToolJournalEntry> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            let g = &verified.grant;
+            if g.scope != "write" {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "read grants cannot record write phases",
+                ));
+            }
+            let has = |st: &nexus_store::Store, p: &str| st.tool_phase_recorded(&g.request_id, p);
+            for t in WRITE_TERMINALS {
+                if has(&self.store, t)? {
+                    return Err(refuse(
+                        KernelErrorCode::CommandConflict,
+                        "write request is already terminal",
+                    ));
+                }
+            }
+            let ok = match phase {
+                PHASE_PLANNED => has(&self.store, PHASE_STARTED)?,
+                PHASE_PREPARED => has(&self.store, PHASE_PLANNED)?,
+                PHASE_APPLIED => has(&self.store, PHASE_PREPARED)?,
+                PHASE_VERIFIED => has(&self.store, PHASE_APPLIED)?,
+                PHASE_FAILED | PHASE_CONFLICT => has(&self.store, PHASE_STARTED)?,
+                _ => false,
+            };
+            if !ok {
+                return Err(refuse(
+                    KernelErrorCode::CommandConflict,
+                    "write phase is not valid in the request's current state",
+                ));
+            }
+            Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
+            let entry = self.store.append_tool_entry(&ToolEntryInput {
+                request_id: g.request_id.clone(),
+                execution_id: g.execution_id.clone(),
+                task_instance_id: g.task_instance_id.clone(),
+                attempt_id: g.attempt_id.clone(),
+                command_id: g.command_id.clone(),
+                phase: phase.to_owned(),
+                payload,
+            })?;
+            Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
+            Ok(entry)
+        })
+    }
+
+    /// Reconcile write requests that have `planned` but no terminal
+    /// record. `inspect` (supplied by the filesystem layer) observes the
+    /// target and returns the `interrupted` payload. Never replays a write
+    /// and never invents `applied`/`verified`.
+    pub fn reconcile_open_writes(
+        &mut self,
+        inspect: &mut dyn FnMut(&OpenWrite) -> serde_json::Value,
+    ) -> KernelResult<u64> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
+            let mut n = 0;
+            for ow in Self::collect_open_writes(&self.store)? {
+                let payload = inspect(&ow);
+                self.store.append_tool_entry(&ToolEntryInput {
+                    request_id: ow.request_id,
+                    execution_id: ow.execution_id,
+                    task_instance_id: ow.task_instance_id,
+                    attempt_id: ow.attempt_id,
+                    command_id: ow.command_id,
+                    phase: PHASE_INTERRUPTED.to_owned(),
+                    payload,
+                })?;
+                Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
+                n += 1;
+            }
+            Ok(n)
+        })
+    }
+
+    fn collect_open_writes(store: &nexus_store::Store) -> KernelResult<Vec<OpenWrite>> {
+        let open = store.tool_requests_in_state(
+            PHASE_PLANNED,
+            &[
+                PHASE_VERIFIED,
+                PHASE_FAILED,
+                PHASE_CONFLICT,
+                PHASE_INTERRUPTED,
+                PHASE_COMPLETED,
+            ],
+        )?;
+        let mut out = Vec::new();
+        for (rid, eid, task, attempt, cmd, _) in open {
+            let entries = store.tool_entries_for_request(&rid)?;
+            let find = |p: &str| entries.iter().find(|e| e.phase == p);
+            out.push(OpenWrite {
+                request_id: rid.clone(),
+                execution_id: eid,
+                task_instance_id: task,
+                attempt_id: attempt,
+                command_id: cmd,
+                planned: find(PHASE_PLANNED)
+                    .map(|e| e.payload.clone())
+                    .unwrap_or_default(),
+                prepared: find(PHASE_PREPARED).map(|e| e.payload.clone()),
+                applied: find(PHASE_APPLIED).is_some(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Read-only view of write requests awaiting reconciliation.
+    pub fn open_writes(&self) -> KernelResult<Vec<OpenWrite>> {
+        Self::collect_open_writes(&self.store)
+    }
+
+    /// Record the journal tail in the independent witness store (a separate
+    /// SQLite file). Called after every append. A crash between the append
+    /// and this call leaves the store at most one entry *ahead* of the
+    /// checkpoint, which verification tolerates; the store being *behind*
+    /// the checkpoint is truncation and is refused.
+    fn checkpoint_tool_journal(
+        store: &mut nexus_store::Store,
+        witness: Option<&mut nexus_store::WitnessStore>,
+    ) -> KernelResult<()> {
+        let (count, tail) = store.tool_journal_tail()?;
+        let seal = store.tool_checkpoint_seal(count, &tail)?;
+        if let Some(w) = witness {
+            let v = serde_json::json!({"count": count, "tail": tail, "seal": seal});
+            w.set_meta(TOOL_CHECKPOINT_KEY, &canonical_json(&v))?;
+            // A4.3: the independent witness must acknowledge before the
+            // caller may treat this transition as authorized/visible.
+            Self::anchor_all(store, Some(&*w))?;
+        }
+        Ok(())
+    }
+
+    pub fn list_tool_journal(&self, task: Option<&str>) -> KernelResult<Vec<ToolJournalEntry>> {
+        self.store.list_tool_entries(task)
+    }
+
+    /// Verify chain + seals, then (when a witness is configured) compare
+    /// against the witness checkpoint. Detects truncation back past the
+    /// last checkpoint. Without a witness only the chain is checked and
+    /// tail truncation is NOT detectable.
+    pub fn verify_tool_journal(&mut self) -> KernelResult<u64> {
+        let n = self.store.verify_tool_journal()?;
+        Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
+        Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod process_scope_compat_tests {
+    use super::*;
+
+    fn scope(fs: &str) -> ProcessScopeBinding {
+        ProcessScopeBinding {
+            command_id: "c".into(),
+            task_instance_id: "t".into(),
+            attempt_id: "at".into(),
+            lease_epoch: 3,
+            store_incarnation: "si".into(),
+            root_digest: "r".into(),
+            max_wall_ms: 1000,
+            approver_id: "a".into(),
+            independent: false,
+            fs_scope: fs.into(),
+            grant_id: String::new(),
+            grant_version: 0,
+            grant_digest: String::new(),
+            net_scope: String::new(),
+            approval: String::new(),
+        }
+    }
+
+    /// The exact bytes a pre-milestone Kernel sealed. If this string ever changes, every stored
+    /// process scope stops verifying.
+    const V1_CANONICAL: &str = r#"{"approverId":"a","attemptId":"at","commandId":"c","domain":"nexus-process-scope/v1","independent":false,"leaseEpoch":3,"maxWallMs":1000,"rootDigest":"r","storeIncarnation":"si","taskInstanceId":"t"}"#;
+
+    #[test]
+    fn a_scratch_scope_seals_exactly_the_bytes_the_previous_kernel_sealed() {
+        assert_eq!(process_scope_canonical(&scope("scratch")), V1_CANONICAL);
+    }
+
+    #[test]
+    fn a_workspace_scope_has_its_own_domain_and_field_so_scratch_and_workspace_never_share_a_seal()
+    {
+        let w = process_scope_canonical(&scope("workspace"));
+        assert!(
+            w.contains(PROCESS_SCOPE_DOMAIN_V2) && w.contains(r#""fsScope":"workspace""#),
+            "{w}"
+        );
+        assert_ne!(w, process_scope_canonical(&scope("scratch")));
+        // dropping the field from a workspace row cannot reproduce a valid scratch seal input
+        assert!(!w.contains(PROCESS_SCOPE_DOMAIN));
+    }
+
+    #[test]
+    fn rows_stored_before_the_field_existed_read_as_scratch() {
+        let old = r#"{"command_id":"c","task_instance_id":"t","attempt_id":"at","lease_epoch":3,"store_incarnation":"si","root_digest":"r","max_wall_ms":1000,"approver_id":"a","independent":false}"#;
+        let b: ProcessScopeBinding = serde_json::from_str(old).unwrap();
+        assert_eq!(b.fs_scope, FS_SCOPE_SCRATCH);
+        assert_eq!(process_scope_canonical(&b), V1_CANONICAL);
+    }
+
+    fn granted(fs: &str, net: &str, ap: &str) -> ProcessScopeBinding {
+        let mut b = scope(fs);
+        b.grant_id = "grt_0123456789abcdef".into();
+        b.grant_version = 4;
+        b.grant_digest = "d".repeat(64);
+        b.net_scope = net.into();
+        b.approval = ap.into();
+        b
+    }
+
+    #[test]
+    fn a_granted_scope_seals_the_grant_identity_and_every_axis_under_its_own_domain() {
+        let base = process_scope_canonical(&granted("workspace", "offline", "auto"));
+        assert!(base.contains(PROCESS_SCOPE_DOMAIN_V3), "{base}");
+        for needle in [
+            r#""fsScope":"workspace""#,
+            r#""netScope":"offline""#,
+            r#""approval":"auto""#,
+            r#""grantId":"grt_0123456789abcdef""#,
+            r#""grantVersion":4"#,
+        ] {
+            assert!(base.contains(needle), "{needle} missing in {base}");
+        }
+        // changing ANY sealed axis or identity field changes the sealed bytes
+        let variants: Vec<ProcessScopeBinding> = vec![
+            granted("scratch", "offline", "auto"),
+            granted("workspace", "install", "auto"),
+            granted("workspace", "offline", "ask"),
+            {
+                let mut b = granted("workspace", "offline", "auto");
+                b.grant_version = 5;
+                b
+            },
+            {
+                let mut b = granted("workspace", "offline", "auto");
+                b.grant_digest = "e".repeat(64);
+                b
+            },
+            {
+                let mut b = granted("workspace", "offline", "auto");
+                b.grant_id = "grt_other".into();
+                b
+            },
+        ];
+        for v in variants {
+            assert_ne!(process_scope_canonical(&v), base);
+        }
+        // a granted scratch scope is NOT the legacy scratch scope
+        assert_ne!(
+            process_scope_canonical(&granted("scratch", "offline", "auto")),
+            V1_CANONICAL
+        );
+        // legacy and M1 forms are untouched
+        assert_eq!(process_scope_canonical(&scope("scratch")), V1_CANONICAL);
+        assert!(process_scope_canonical(&scope("workspace")).contains(PROCESS_SCOPE_DOMAIN_V2));
+    }
+
+    #[test]
+    fn the_declared_scope_is_read_strictly_from_the_reviewed_operation() {
+        use serde_json::json;
+        let ok = json!({"execFsScope": "workspace", "grant": {
+            "grantId": "grt_a", "version": 2, "digest": "d".repeat(64),
+            "fsScope": "workspace", "netScope": "install", "approval": "ask"}});
+        let d = DeclaredScope::from_operation(&ok).unwrap();
+        assert_eq!(d.fs_scope, "workspace");
+        assert_eq!(d.grant.unwrap().approval, "ask");
+        // absent = scratch, no grant (every operation that predates grants)
+        assert_eq!(
+            DeclaredScope::from_operation(&json!({"kind": "proc.run"})).unwrap(),
+            DeclaredScope::scratch()
+        );
+        // inconsistent or malformed declarations are errors, never defaults
+        let bad = |g: serde_json::Value, fs: Option<&str>| {
+            let mut op = json!({ "grant": g });
+            if let Some(f) = fs {
+                op["execFsScope"] = f.into();
+            }
+            DeclaredScope::from_operation(&op).is_err()
+        };
+        let base = |f: &str, n: &str, a: &str| json!({"grantId": "grt_a", "version": 1, "digest": "d".repeat(64), "fsScope": f, "netScope": n, "approval": a});
+        assert!(
+            bad(base("workspace", "offline", "auto"), None),
+            "fs differs from the operation's"
+        );
+        assert!(
+            !bad(base("scratch", "controlled", "auto"), None),
+            "Controlled Internet is implemented"
+        );
+        assert!(bad(base("scratch", "full", "auto"), None));
+        assert!(bad(base("scratch", "offline", "maybe"), None));
+        assert!(bad(json!({"grantId": "grt_a"}), None), "incomplete");
+        assert!(bad(
+            json!({"grantId": "", "version": 1, "digest": "d".repeat(64), "fsScope": "scratch", "netScope": "offline", "approval": "auto"}),
+            None
+        ));
+        assert!(bad(
+            json!({"grantId": "grt_a", "version": 0, "digest": "d".repeat(64), "fsScope": "scratch", "netScope": "offline", "approval": "auto"}),
+            None
+        ));
+        // M8: `full` without a grant seal of net=full is refused; with it, it seals.
+        assert!(DeclaredScope::from_operation(&json!({"execFsScope": "full"})).is_err());
+        let mut full_op = json!({"execFsScope": "full"});
+        full_op["grant"] = json!({
+            "grantId": "grt_1", "digest": "a".repeat(64), "fsScope": "full",
+            "netScope": "full", "approval": "auto", "version": 1,
+        });
+        assert!(DeclaredScope::from_operation(&full_op).is_ok());
+        assert!(DeclaredScope::from_operation(&json!({"execFsScope": 3})).is_err());
+        assert!(!bad(base("scratch", "offline", "auto"), None));
+    }
+}

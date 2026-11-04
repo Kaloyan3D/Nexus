@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-intent-copy"
+description = "Enables the intent_copy command without any pre-configured scope."
+commands.allow = ["intent_copy"]
+
+[[permission]]
+identifier = "deny-intent-copy"
+description = "Denies the intent_copy command without any pre-configured scope."
+commands.deny = ["intent_copy"]

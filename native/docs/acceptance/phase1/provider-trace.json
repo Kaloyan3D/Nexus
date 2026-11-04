@@ -1,0 +1,873 @@
+{
+ "note": "structural provider trace (NEXUS_PROVIDER_TRACE) of the executions after tracing was enabled: no message text, arguments or credentials",
+ "exchanges": [
+  {
+   "attempt": "INTENT-00074-A1",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 0,
+   "items": 1,
+   "requestBytes": 11379,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "reasoning",
+    "message",
+    "function_call"
+   ],
+   "usage": {
+    "cached": 113,
+    "input": 3096,
+    "output": 96,
+    "reasoning": 14
+   },
+   "totalMs": 1728,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A2",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 1,
+   "items": 5,
+   "requestBytes": 13638,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "reasoning",
+    "function_call"
+   ],
+   "usage": {
+    "cached": 3057,
+    "input": 3292,
+    "output": 56,
+    "reasoning": 7
+   },
+   "totalMs": 1678,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A3",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 8,
+   "requestBytes": 15757,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 3185,
+    "input": 3449,
+    "output": 44,
+    "reasoning": 0
+   },
+   "totalMs": 1319,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A4",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 10,
+   "requestBytes": 16306,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 3441,
+    "input": 3591,
+    "output": 46,
+    "reasoning": 0
+   },
+   "totalMs": 1252,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A5",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 12,
+   "requestBytes": 17325,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 3569,
+    "input": 3917,
+    "output": 47,
+    "reasoning": 0
+   },
+   "totalMs": 1052,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A6",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 14,
+   "requestBytes": 18620,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 3825,
+    "input": 4335,
+    "output": 48,
+    "reasoning": 0
+   },
+   "totalMs": 1671,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A7",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 16,
+   "requestBytes": 19902,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 4209,
+    "input": 4758,
+    "output": 44,
+    "reasoning": 0
+   },
+   "totalMs": 1558,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A8",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 18,
+   "requestBytes": 20344,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 4721,
+    "input": 4874,
+    "output": 47,
+    "reasoning": 0
+   },
+   "totalMs": 1193,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A9",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 20,
+   "requestBytes": 21734,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "reasoning",
+    "message",
+    "function_call"
+   ],
+   "usage": {
+    "cached": 4849,
+    "input": 5433,
+    "output": 96,
+    "reasoning": 14
+   },
+   "totalMs": 1662,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A10",
+   "effort": "high",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 3,
+   "items": 24,
+   "requestBytes": 23993,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 113,
+    "input": 5629,
+    "output": 76,
+    "reasoning": 0
+   },
+   "totalMs": 1506,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A11",
+   "effort": "high",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 3,
+   "items": 26,
+   "requestBytes": 25943,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "reasoning",
+    "function_call"
+   ],
+   "usage": {
+    "cached": 5617,
+    "input": 6219,
+    "output": 441,
+    "reasoning": 365
+   },
+   "totalMs": 3612,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A12",
+   "effort": "high",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 4,
+   "items": 29,
+   "requestBytes": 29443,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 6129,
+    "input": 6766,
+    "output": 69,
+    "reasoning": 0
+   },
+   "totalMs": 1341,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A13",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 4,
+   "items": 31,
+   "requestBytes": 30029,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "reasoning",
+    "function_call"
+   ],
+   "usage": {
+    "cached": 5361,
+    "input": 6940,
+    "output": 182,
+    "reasoning": 5
+   },
+   "totalMs": 1899,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A14",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 5,
+   "items": 34,
+   "requestBytes": 32524,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 6897,
+    "input": 7277,
+    "output": 151,
+    "reasoning": 0
+   },
+   "totalMs": 1718,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A15",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 5,
+   "items": 36,
+   "requestBytes": 33414,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "reasoning",
+    "message",
+    "function_call"
+   ],
+   "usage": {
+    "cached": 7153,
+    "input": 7587,
+    "output": 86,
+    "reasoning": 7
+   },
+   "totalMs": 2174,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A16",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 6,
+   "items": 40,
+   "requestBytes": 35658,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 7537,
+    "input": 7773,
+    "output": 76,
+    "reasoning": 0
+   },
+   "totalMs": 1235,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00074-A17",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 6,
+   "items": 42,
+   "requestBytes": 37063,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "reasoning",
+    "message"
+   ],
+   "usage": {
+    "cached": 7665,
+    "input": 8205,
+    "output": 353,
+    "reasoning": 40
+   },
+   "totalMs": 2874,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00075-A1",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 0,
+   "items": 1,
+   "requestBytes": 11379,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "reasoning",
+    "message",
+    "function_call"
+   ],
+   "usage": {
+    "cached": 0,
+    "input": 3096,
+    "output": 89,
+    "reasoning": 17
+   },
+   "totalMs": 1838,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00075-A2",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 1,
+   "items": 5,
+   "requestBytes": 13675,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "reasoning",
+    "function_call"
+   ],
+   "usage": {
+    "cached": 3057,
+    "input": 3286,
+    "output": 54,
+    "reasoning": 4
+   },
+   "totalMs": 1102,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00075-A3",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 8,
+   "requestBytes": 15778,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 3185,
+    "input": 3438,
+    "output": 44,
+    "reasoning": 0
+   },
+   "totalMs": 1218,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00075-A4",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 10,
+   "requestBytes": 16220,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": null,
+   "responseStatus": null,
+   "outputKinds": [],
+   "usage": null,
+   "totalMs": 472,
+   "error": {
+    "bytesSent": true,
+    "code": "cancelled",
+    "message": "cancelled while reading the provider stream (partial output retained, not terminal)"
+   }
+  },
+  {
+   "attempt": "INTENT-00076-A1",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 0,
+   "items": 1,
+   "requestBytes": 11788,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "reasoning",
+    "message",
+    "function_call"
+   ],
+   "usage": {
+    "cached": 3057,
+    "input": 3183,
+    "output": 81,
+    "reasoning": 12
+   },
+   "totalMs": 1182,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A2",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 1,
+   "items": 5,
+   "requestBytes": 14071,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "reasoning",
+    "function_call"
+   ],
+   "usage": {
+    "cached": 3057,
+    "input": 3365,
+    "output": 59,
+    "reasoning": 9
+   },
+   "totalMs": 1165,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A3",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 8,
+   "requestBytes": 16174,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 3313,
+    "input": 3522,
+    "output": 44,
+    "reasoning": 0
+   },
+   "totalMs": 1106,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A4",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 10,
+   "requestBytes": 16616,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 3441,
+    "input": 3638,
+    "output": 47,
+    "reasoning": 0
+   },
+   "totalMs": 878,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A5",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 12,
+   "requestBytes": 17911,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 3569,
+    "input": 4056,
+    "output": 48,
+    "reasoning": 0
+   },
+   "totalMs": 1067,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A6",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 14,
+   "requestBytes": 19193,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 3953,
+    "input": 4479,
+    "output": 47,
+    "reasoning": 0
+   },
+   "totalMs": 1568,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A7",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 16,
+   "requestBytes": 20583,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 4465,
+    "input": 5038,
+    "output": 46,
+    "reasoning": 0
+   },
+   "totalMs": 905,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A8",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 2,
+   "items": 18,
+   "requestBytes": 21602,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "reasoning",
+    "message",
+    "function_call"
+   ],
+   "usage": {
+    "cached": 4977,
+    "input": 5364,
+    "output": 245,
+    "reasoning": 164
+   },
+   "totalMs": 3041,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A9",
+   "effort": "high",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 3,
+   "items": 22,
+   "requestBytes": 23858,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 113,
+    "input": 5709,
+    "output": 76,
+    "reasoning": 0
+   },
+   "totalMs": 1180,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A10",
+   "effort": "high",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 3,
+   "items": 24,
+   "requestBytes": 25808,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "reasoning",
+    "function_call"
+   ],
+   "usage": {
+    "cached": 5617,
+    "input": 6299,
+    "output": 102,
+    "reasoning": 26
+   },
+   "totalMs": 1442,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A11",
+   "effort": "high",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 4,
+   "items": 27,
+   "requestBytes": 27943,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 6257,
+    "input": 6507,
+    "output": 69,
+    "reasoning": 0
+   },
+   "totalMs": 1717,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A12",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 4,
+   "items": 29,
+   "requestBytes": 28529,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 5361,
+    "input": 6681,
+    "output": 171,
+    "reasoning": 0
+   },
+   "totalMs": 1510,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A13",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 4,
+   "items": 31,
+   "requestBytes": 29470,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 6641,
+    "input": 7007,
+    "output": 151,
+    "reasoning": 0
+   },
+   "totalMs": 1448,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A14",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 4,
+   "items": 33,
+   "requestBytes": 30360,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 6897,
+    "input": 7317,
+    "output": 52,
+    "reasoning": 0
+   },
+   "totalMs": 960,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A15",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 4,
+   "items": 35,
+   "requestBytes": 30880,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "function_call"
+   ],
+   "usage": {
+    "cached": 7281,
+    "input": 7469,
+    "output": 76,
+    "reasoning": 0
+   },
+   "totalMs": 975,
+   "error": null
+  },
+  {
+   "attempt": "INTENT-00076-A16",
+   "effort": "medium",
+   "model": "muse-spark-1.3-contributor",
+   "path": "/inference/go/openai/v1/responses",
+   "reasoningItemsReplayed": 4,
+   "items": 37,
+   "requestBytes": 32285,
+   "toolsDigest": "5f7d19e2e0cce856",
+   "httpStatus": 200,
+   "responseStatus": "completed",
+   "outputKinds": [
+    "reasoning",
+    "message"
+   ],
+   "usage": {
+    "cached": 7409,
+    "input": 7901,
+    "output": 253,
+    "reasoning": 5
+   },
+   "totalMs": 2734,
+   "error": null
+  }
+ ]
+}

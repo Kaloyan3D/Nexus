@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-intent-browser-artifact"
+description = "Enables the intent_browser_artifact command without any pre-configured scope."
+commands.allow = ["intent_browser_artifact"]
+
+[[permission]]
+identifier = "deny-intent-browser-artifact"
+description = "Denies the intent_browser_artifact command without any pre-configured scope."
+commands.deny = ["intent_browser_artifact"]

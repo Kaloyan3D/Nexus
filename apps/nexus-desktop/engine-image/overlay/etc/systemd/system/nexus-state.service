@@ -1,0 +1,14 @@
+[Unit]
+Description=Nexus engine state disk (formatted on first use, mounted as the engine's home)
+DefaultDependencies=no
+After=systemd-udevd.service
+Before=local-fs.target nexus-bridge.service
+ConditionPathExists=/dev/vdb
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nexus-state-mount
+
+[Install]
+WantedBy=local-fs.target

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-adopt"
+description = "Enables the project_adopt command without any pre-configured scope."
+commands.allow = ["project_adopt"]
+
+[[permission]]
+identifier = "deny-project-adopt"
+description = "Denies the project_adopt command without any pre-configured scope."
+commands.deny = ["project_adopt"]

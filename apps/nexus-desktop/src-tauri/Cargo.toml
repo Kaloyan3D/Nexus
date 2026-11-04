@@ -1,0 +1,73 @@
+[package]
+name = "nexus-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Nexus - native desktop GUI over nexus-client v1 (A2.5)"
+license = "MIT"
+default-run = "nexus-desktop"
+
+# Standalone workspace: the Tauri dependency tree must not enter the native
+# core workspace (native/Cargo.lock stays untouched).
+[workspace]
+
+[lib]
+name = "nexus_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# default features are listed under `window` so the engine bridge (no window, no GTK/WebKit) can build without them
+tauri = { version = "2", default-features = false , features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+unicode-normalization = "0.1"
+
+# Linux hosts run the Nexus engine on the same machine, so only they link the
+# engine crates (nexus-tools carries Landlock/seccomp/prctl code that does not
+# exist on Darwin). The macOS shell is a pure desktop host: see `engine.rs`.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+nexus-client = { path = "../../../native/nexus-client" }
+nexus-runtime = { path = "../../../native/nexus-runtime" }
+libc = "0.2"
+
+# Native NSOpenPanel / NSAlert, driven only from the trusted Rust process.
+[target.'cfg(target_os = "macos")'.dependencies]
+rfd = { version = "0.15", default-features = false }
+zstd = "0.13"
+
+[features]
+default = ["window"]
+# the real desktop window (WebKit/GTK on Linux, WKWebView on macOS)
+window = ["tauri/wry", "tauri/compression", "tauri/common-controls-v6", "tauri/dynamic-acl", "tauri/x11", "tauri/dbus"]
+# Linux only: builds `nexus-bridge`, the guest end of the macOS engine bridge (needs tauri's
+# mock runtime). Off by default so the shipped desktop is unchanged.
+engine-bridge = ["tauri/test"]
+
+[[bin]]
+name = "nexus-desktop"
+path = "src/main.rs"
+required-features = ["window"]
+
+[[bin]]
+name = "nexus-bridge"
+path = "src/bin/nexus-bridge.rs"
+required-features = ["engine-bridge"]
+
+[dev-dependencies]
+tempfile = "3"
+
+# Untrusted-log decoding (zstd) is CPU heavy; keep dependencies optimized in dev.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

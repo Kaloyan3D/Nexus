@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-provider-revoke"
+description = "Enables the provider_revoke command without any pre-configured scope."
+commands.allow = ["provider_revoke"]
+
+[[permission]]
+identifier = "deny-provider-revoke"
+description = "Denies the provider_revoke command without any pre-configured scope."
+commands.deny = ["provider_revoke"]

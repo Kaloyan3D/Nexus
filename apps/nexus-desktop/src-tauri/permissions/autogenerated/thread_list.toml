@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-thread-list"
+description = "Enables the thread_list command without any pre-configured scope."
+commands.allow = ["thread_list"]
+
+[[permission]]
+identifier = "deny-thread-list"
+description = "Denies the thread_list command without any pre-configured scope."
+commands.deny = ["thread_list"]

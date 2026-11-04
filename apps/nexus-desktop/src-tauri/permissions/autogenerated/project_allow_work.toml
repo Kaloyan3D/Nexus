@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-allow-work"
+description = "Enables the project_allow_work command without any pre-configured scope."
+commands.allow = ["project_allow_work"]
+
+[[permission]]
+identifier = "deny-project-allow-work"
+description = "Denies the project_allow_work command without any pre-configured scope."
+commands.deny = ["project_allow_work"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-permission-set-mode"
+description = "Enables the permission_set_mode command without any pre-configured scope."
+commands.allow = ["permission_set_mode"]
+
+[[permission]]
+identifier = "deny-permission-set-mode"
+description = "Denies the permission_set_mode command without any pre-configured scope."
+commands.deny = ["permission_set_mode"]

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "engineering-v2-adaptive",
+  "displayName": "Engineering Mode v2 (Adaptive reasoning)",
+  "status": "active",
+  "orchestrationEngineId": "nexus-adaptive-v1",
+  "selectable": true,
+  "runnable": true,
+  "slots": [
+    {
+      "id": "main",
+      "label": "Main Engineer",
+      "required": true,
+      "internalRoles": [
+        "muse_main"
+      ],
+      "requirements": {
+        "toolCalling": true,
+        "adaptiveReasoningContract": "nexus-adaptive-v1",
+        "singleAgent": true
+      }
+    }
+  ],
+  "internalRoles": [
+    "muse_main"
+  ],
+  "optionalCapabilities": [],
+  "requestBudgetBytes": 440000
+}

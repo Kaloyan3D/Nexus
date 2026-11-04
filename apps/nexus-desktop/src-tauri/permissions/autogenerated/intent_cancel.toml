@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-intent-cancel"
+description = "Enables the intent_cancel command without any pre-configured scope."
+commands.allow = ["intent_cancel"]
+
+[[permission]]
+identifier = "deny-intent-cancel"
+description = "Denies the intent_cancel command without any pre-configured scope."
+commands.deny = ["intent_cancel"]

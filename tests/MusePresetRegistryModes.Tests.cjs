@@ -20,9 +20,10 @@ const closureTool = require('../scripts/MusePresetDependencyClosure.cjs');
 const MODES = Object.freeze([
   'registry/modes/engineering-v1.json',
   'registry/modes/engineering-v2.json',
+  'registry/modes/engineering-v2-adaptive.json', // S10-A: the opt-in adaptive mode is part of the supported closure
   'registry/modes/engineering-v3.json',
 ]);
-const MODE_IDS = Object.freeze(['engineering-v1', 'engineering-v2', 'engineering-v3']);
+const MODE_IDS = Object.freeze(['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v3']);
 const PROFILES = Object.freeze(['muse', 'engineering', 'deepseek', 'controller']);
 const LEGACY_JSONS = Object.freeze(['model-registry.json', 'engineering-profiles.json', 'muse-profiles.json']);
 let passed = 0; let failed = 0; const failures = [];
@@ -53,7 +54,7 @@ function fakeInstallRoot(tag) {
 }
 try {
   for (const profile of PROFILES) {
-    check('closure profile ' + profile + ' pins all three Registry mode assets', () => {
+    check('closure profile ' + profile + ' pins all four Registry mode assets', () => {
       const { preset, rows } = installFixture(profile, 'pin');
       const names = rows.map((r) => r.name);
       for (const mode of MODES) assert.ok(names.indexOf(mode) !== -1, profile + ' closure missing ' + mode);
@@ -68,13 +69,13 @@ try {
       assert.ok(typeof validate === 'function');
     });
   }
-  check('preset-local Muse Registry lists all three mode definitions', () => {
+  check('preset-local Muse Registry lists all four mode definitions', () => {
     const { preset } = installFixture('muse', 'svc');
     const svc = require(path.join(preset, 'registry', 'service.cjs')).createService({
       installRoot: fakeInstallRoot('svc'), dataRoot: path.join(scratch, 'svc-data'),
     });
     const listed = svc.listModes();
-    assert.equal(listed.modes.length, 3);
+    assert.equal(listed.modes.length, 4);
     assert.deepEqual(listed.modes.map((m) => m.id).sort(), MODE_IDS.slice().sort());
     for (const m of listed.modes) assert.equal(m.present, true, m.id + ' not present preset-locally');
   });

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-intent-result"
+description = "Enables the intent_result command without any pre-configured scope."
+commands.allow = ["intent_result"]
+
+[[permission]]
+identifier = "deny-intent-result"
+description = "Denies the intent_result command without any pre-configured scope."
+commands.deny = ["intent_result"]

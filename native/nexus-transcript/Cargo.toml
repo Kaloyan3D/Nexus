@@ -1,0 +1,19 @@
+[package]
+name = "nexus-transcript"
+version = "0.1.0"
+edition = "2021"
+description = "Nexus per-task conversation contract v1: durable native transcript store and read-only historical DSH session adapter (A2.5)"
+license = "MIT"
+
+[dependencies]
+nexus-model = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+fs2 = { workspace = true }
+ruzstd = "0.9"
+
+[dev-dependencies]
+tempfile = { workspace = true }

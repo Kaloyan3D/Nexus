@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cancel-model-run"
+description = "Enables the cancel_model_run command without any pre-configured scope."
+commands.allow = ["cancel_model_run"]
+
+[[permission]]
+identifier = "deny-cancel-model-run"
+description = "Denies the cancel_model_run command without any pre-configured scope."
+commands.deny = ["cancel_model_run"]

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Format the persistent state disk on first use, then mount it as /home/nexus (engine data, staged
+# projects, provider credentials). The system image itself holds no user data.
+set -eu
+dev=/dev/vdb
+if ! blkid "$dev" >/dev/null 2>&1; then
+  mkfs.ext4 -q -L nexus-state -m 1 "$dev"
+fi
+mount -o noatime "$dev" /home/nexus
+chown nexus:nexus /home/nexus
+chmod 700 /home/nexus

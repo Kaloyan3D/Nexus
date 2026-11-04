@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-engine-prefer"
+description = "Enables the engine_prefer command without any pre-configured scope."
+commands.allow = ["engine_prefer"]
+
+[[permission]]
+identifier = "deny-engine-prefer"
+description = "Denies the engine_prefer command without any pre-configured scope."
+commands.deny = ["engine_prefer"]

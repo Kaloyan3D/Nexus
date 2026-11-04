@@ -1,0 +1,222 @@
+{
+  "A1-sentry-review-cli": {
+    "run": "run_9bd6d0a32a8473c61d1ce0a54ee6c01f",
+    "state": "completed",
+    "turns": 48,
+    "tools": 47,
+    "recoveries": 6,
+    "seconds": 377,
+    "outcome": {
+      "blockedByApproval": 0,
+      "change": "none-proposed",
+      "editsApplied": 0,
+      "editsNotApplied": 0,
+      "lastExitCode": 0,
+      "staleAfterEdit": false,
+      "testsExecuted": 2,
+      "testsNotExecuted": 0,
+      "uncertainOperations": 0,
+      "verification": "verified-passed"
+    }
+  },
+  "A2-sentry-review-gui": {
+    "run": "run_b72c136f59bab8ab92300bcef60b0794",
+    "state": "completed",
+    "turns": 69,
+    "tools": 64,
+    "recoveries": 4,
+    "seconds": 274,
+    "outcome": {
+      "blockedByApproval": 0,
+      "change": "none-proposed",
+      "editsApplied": 0,
+      "editsNotApplied": 0,
+      "lastExitCode": null,
+      "staleAfterEdit": false,
+      "testsExecuted": 0,
+      "testsNotExecuted": 0,
+      "uncertainOperations": 0,
+      "verification": "no-test-executed"
+    }
+  },
+  "B1-ts-bugfix-cli": {
+    "run": "run_f48776093ef4320b329e2b7b2f040bea",
+    "state": "completed",
+    "turns": 34,
+    "tools": 32,
+    "recoveries": 1,
+    "seconds": 174,
+    "outcome": {
+      "blockedByApproval": 1,
+      "change": "applied",
+      "editsApplied": 1,
+      "editsNotApplied": 0,
+      "lastExitCode": 0,
+      "staleAfterEdit": false,
+      "testsExecuted": 6,
+      "testsNotExecuted": 1,
+      "uncertainOperations": 0,
+      "verification": "verified-passed"
+    }
+  },
+  "B2-ts-bugfix-gui": {
+    "run": "run_e3f9439621516bc34213945976d3dbce",
+    "state": "completed",
+    "turns": 22,
+    "tools": 21,
+    "recoveries": null,
+    "seconds": 177,
+    "outcome": {
+      "blockedByApproval": 1,
+      "change": "applied",
+      "editsApplied": 1,
+      "editsNotApplied": 0,
+      "lastExitCode": 0,
+      "staleAfterEdit": false,
+      "testsExecuted": 2,
+      "testsNotExecuted": 1,
+      "uncertainOperations": 0,
+      "verification": "verified-passed"
+    }
+  },
+  "C1-ts-feature-cli-interrupted": {
+    "run": "run_1329bd4fd7d3ca46f9992272ed57e452",
+    "state": "failed",
+    "turns": 51,
+    "tools": 50,
+    "recoveries": 4,
+    "seconds": 318,
+    "outcome": {
+      "blockedByApproval": 1,
+      "change": "applied",
+      "editsApplied": 7,
+      "editsNotApplied": 0,
+      "lastExitCode": 1,
+      "staleAfterEdit": false,
+      "testsExecuted": 9,
+      "testsNotExecuted": 1,
+      "uncertainOperations": 0,
+      "verification": "verified-failed"
+    }
+  },
+  "C2-ts-feature-cli-continued": {
+    "run": "run_fc10add8ac51138e601be94fd580d737",
+    "state": "failed",
+    "turns": 20,
+    "tools": 19,
+    "recoveries": null,
+    "seconds": 92,
+    "outcome": {
+      "blockedByApproval": 1,
+      "change": "applied",
+      "editsApplied": 1,
+      "editsNotApplied": 0,
+      "lastExitCode": 1,
+      "staleAfterEdit": true,
+      "testsExecuted": 3,
+      "testsNotExecuted": 1,
+      "uncertainOperations": 0,
+      "verification": "not-yet-verified"
+    }
+  },
+  "C3-ts-feature-cli-continued-completed": {
+    "run": "run_39edecb3003c0fe52af1408af80a6e6c",
+    "state": "completed",
+    "turns": 26,
+    "tools": 25,
+    "recoveries": null,
+    "seconds": 122,
+    "outcome": {
+      "blockedByApproval": 1,
+      "change": "applied",
+      "editsApplied": 0,
+      "editsNotApplied": 0,
+      "lastExitCode": 0,
+      "staleAfterEdit": false,
+      "testsExecuted": 4,
+      "testsNotExecuted": 1,
+      "uncertainOperations": 0,
+      "verification": "verified-passed"
+    }
+  },
+  "C4-rust-feature-daemon-killed": {
+    "run": "run_0a65567cede542916159c7f0e3cceedf",
+    "state": "completed",
+    "turns": 44,
+    "tools": 43,
+    "recoveries": null,
+    "seconds": 284,
+    "outcome": {
+      "blockedByApproval": 1,
+      "change": "partially-applied",
+      "editsApplied": 11,
+      "editsNotApplied": 1,
+      "lastExitCode": 0,
+      "staleAfterEdit": false,
+      "testsExecuted": 10,
+      "testsNotExecuted": 1,
+      "uncertainOperations": 0,
+      "verification": "verified-passed"
+    }
+  },
+  "R1-ts-refactor-gui": {
+    "run": "run_310c74c1ab15a22a5bb92adcab17ac52",
+    "state": "completed",
+    "turns": 51,
+    "tools": 48,
+    "recoveries": 1,
+    "seconds": 279,
+    "outcome": {
+      "blockedByApproval": 2,
+      "change": "applied",
+      "editsApplied": 10,
+      "editsNotApplied": 0,
+      "lastExitCode": 0,
+      "staleAfterEdit": false,
+      "testsExecuted": 9,
+      "testsNotExecuted": 2,
+      "uncertainOperations": 0,
+      "verification": "verified-passed"
+    }
+  },
+  "D1-gui-faults-interrupted": {
+    "run": "run_d372e268d801916cf2d3244ea71860fd",
+    "state": "failed",
+    "turns": 19,
+    "tools": 18,
+    "recoveries": 3,
+    "seconds": 189,
+    "outcome": {
+      "blockedByApproval": 0,
+      "change": "none-proposed",
+      "editsApplied": 0,
+      "editsNotApplied": 0,
+      "lastExitCode": null,
+      "staleAfterEdit": false,
+      "testsExecuted": 0,
+      "testsNotExecuted": 0,
+      "uncertainOperations": 0,
+      "verification": "no-test-executed"
+    }
+  },
+  "D2-gui-faults-continued-completed": {
+    "run": "run_31d79be9605404f72333a5165408ca23",
+    "state": "completed",
+    "turns": 41,
+    "tools": 40,
+    "recoveries": 4,
+    "seconds": 245,
+    "outcome": {
+      "blockedByApproval": 0,
+      "change": "applied",
+      "editsApplied": 8,
+      "editsNotApplied": 0,
+      "lastExitCode": 0,
+      "staleAfterEdit": false,
+      "testsExecuted": 15,
+      "testsNotExecuted": 0,
+      "uncertainOperations": 0,
+      "verification": "verified-passed"
+    }
+  }
+}

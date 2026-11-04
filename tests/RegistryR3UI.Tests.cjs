@@ -139,7 +139,19 @@ async function main() {
   await check('R3 modes: v1/v2/v3 listed with honest statuses, v3 non-executable', () => {
     const { modes, errors } = svc.listModes()
     assert.deepEqual(errors, [])
-    assert.equal(modes.length, 3)
+    // the three legacy modes, plus (in a source tree that carries it) the opt-in adaptive mode
+    // (EM-04C2; S10-A: active, selectable, runnable, needs an operator-saved configuration)
+    assert.deepEqual(modes.map((m) => m.id).filter((id) => id !== 'engineering-v2-adaptive'), ['engineering-v1', 'engineering-v2', 'engineering-v3'])
+    const adaptive = modes.find((m) => m.id === 'engineering-v2-adaptive')
+    if (adaptive) {
+      assert.equal(adaptive.status, 'active')
+      assert.equal(adaptive.selectable, true)
+      assert.equal(adaptive.runnable, true)
+      assert.equal(adaptive.persisted, false)
+      // EM-04C2 S10 SEC-5: it runs only from an operator-saved configuration
+      assert.equal(require('../config/registry/native-issuer.cjs').scopeOf('engineering-v2-adaptive').requiresSavedConfiguration, true)
+    }
+    assert.equal(modes.length, adaptive ? 4 : 3)
     const byId = Object.fromEntries(modes.map((m) => [m.id, m]))
     assert.equal(byId['engineering-v1'].status, 'deprecated')
     assert.equal(byId['engineering-v2'].status, 'active-legacy')
@@ -415,11 +427,18 @@ async function main() {
   const allBodies = []
   const capture = (res) => { allBodies.push(res.body) }
 
-  await check('R3 host modes route lists three manifests', async () => {
+  await check('R3 host modes route lists the three manifests (plus the dormant adaptive one in a source tree)', async () => {
     const res = await runHandler(handlers.modesHandler, fakeReq({ method: 'GET', url: '/nexus/registry/v1/modes' }))
     assert.equal(res.status, 200)
     const body = JSON.parse(res.body)
-    assert.equal(body.modes.length, 3)
+    const legacy = body.modes.filter((m) => m.id !== 'engineering-v2-adaptive')
+    assert.equal(legacy.length, 3)
+    for (const m of body.modes.filter((x) => x.id === 'engineering-v2-adaptive')) {
+      assert.equal(m.selectable, true)
+      assert.equal(m.runnable, true)
+      assert.equal(m.persisted, false)
+    }
+    assert.ok(body.modes.length <= 4)
     capture(res)
   })
 
