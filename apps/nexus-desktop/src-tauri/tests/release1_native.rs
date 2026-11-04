@@ -1,3 +1,4 @@
+#![cfg(not(target_os = "macos"))]
 //! Release 1: the Desktop's native layer for project access, previews and recovery. A scripted fake broker
 //! records exactly what crosses the wire, so these tests state what the NATIVE process asks a person and
 //! what it will and will not send: only a "yes" in a native dialog reaches the broker, permissions are

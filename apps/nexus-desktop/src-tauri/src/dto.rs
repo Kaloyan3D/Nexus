@@ -1,7 +1,7 @@
 //! Typed Rust-to-frontend data contracts. Mirrored by `src/lib/contracts.ts`.
 //! Every value originates from nexus-client v1; nothing is synthesized here.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -236,7 +236,7 @@ pub struct MockResult {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiError {
     pub code: String,

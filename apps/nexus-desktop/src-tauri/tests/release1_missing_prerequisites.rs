@@ -1,3 +1,4 @@
+#![cfg(not(target_os = "macos"))]
 //! Release 1: a computer without Node.js, and an installation whose programs are missing, must fail at
 //! start-up with a message that names the cause - never with a hang or a half-started runtime. (The page
 //! turns these into steps; see `startupHelp`.) One test per process: the environment is global.

@@ -1,3 +1,4 @@
+#![cfg(not(target_os = "macos"))]
 //! Release 1: the whole preview journey on the REAL runtime - nexusd + the broker started by the same
 //! supervisor code the application uses, a real sandbox, a real Node server on a real loopback bridge.
 //! Dialogs are scripted (nobody is at the keyboard) and so is "the model": the server is started through

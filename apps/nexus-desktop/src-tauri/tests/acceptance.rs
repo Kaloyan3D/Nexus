@@ -1,3 +1,4 @@
+#![cfg(not(target_os = "macos"))]
 //! A6.1.4 P7 - real end-to-end autonomous acceptance runner (DEVELOPMENT).
 //!
 //! Drives the SAME native backend code the Desktop uses - the runtime supervisor, the

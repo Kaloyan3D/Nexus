@@ -1,3 +1,4 @@
+#![cfg(not(target_os = "macos"))]
 //! M2.1: the Desktop's REAL runtime (nexusd + broker started by the same supervisor code the app uses) is
 //! provisioned with the approver channel, says so truthfully, and the Desktop's own backend manages
 //! permissions through it. Dialogs are scripted (nobody is at the keyboard): that is stated here.

@@ -170,6 +170,16 @@ impl Runtime {
         }
     }
 
+    /// The runtime's current phase (`starting` | `ready` | `error` | `stopped`), cheap to read.
+    pub fn phase_name(&self) -> String {
+        self.phase()
+    }
+
+    /// Runs that have not ended, as far as the broker can say (used by the engine bridge's heartbeat).
+    pub fn active_run_count(&self) -> Result<usize, String> {
+        active_runs(self)
+    }
+
     fn phase(&self) -> String {
         self.state.lock().map(|s| s.0.clone()).unwrap_or_default()
     }

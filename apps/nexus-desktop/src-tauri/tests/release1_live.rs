@@ -1,3 +1,4 @@
+#![cfg(not(target_os = "macos"))]
 //! Release 1 LIVE acceptance: the real runtime, the real sandbox and the REAL model provider (billable),
 //! driven through the same native-layer functions the GUI's Tauri commands call. What is scripted: the
 //! system dialogs (nobody can click them in an automated run), so every "native confirmation" is answered
@@ -80,6 +81,7 @@ impl Live {
                 model: Some(&model),
                 route: Some(&sel.route_id),
                 mode_id: Some(&sel.mode_id),
+                reasoning_replay: None,
             },
         )
         .expect("send");

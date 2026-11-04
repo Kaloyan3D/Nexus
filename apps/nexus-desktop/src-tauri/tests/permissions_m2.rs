@@ -1,3 +1,4 @@
+#![cfg(not(target_os = "macos"))]
 //! Standing permissions through the Desktop's native backend: the broker produces the exact consent text,
 //! THIS process shows it and only a "yes" lets its digest reach the broker. A fake broker records the wire.
 

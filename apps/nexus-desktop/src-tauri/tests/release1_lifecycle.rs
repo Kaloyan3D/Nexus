@@ -1,3 +1,4 @@
+#![cfg(not(target_os = "macos"))]
 //! Release 1: a runtime the application (or a test) starts must be stopped when its guard ends, with nothing
 //! left behind - no `nexusd`, no broker, no socket - and a second runtime in another home must be untouched.
 //! This is the regression test for the orphaned test runtimes found during Release 1 acceptance.

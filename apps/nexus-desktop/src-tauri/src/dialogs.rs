@@ -3,11 +3,18 @@
 //! These are shown by the NATIVE backend, never by the renderer: a path chosen in the
 //! picker, a consent answered "yes" and an API key typed into the password prompt
 //! reach this process directly. Page content (and so any model-influenced text) can
-//! neither synthesize the click nor read the key. Linux uses `kdialog` or `zenity`;
-//! if neither exists the operation fails closed with a clear message.
+//! neither synthesize the click nor read the key. Linux uses `kdialog` or `zenity`
+//! (if neither exists the operation fails closed with a clear message); macOS shows
+//! its own `NSOpenPanel` / `NSAlert` from this process (`macos_dialogs`).
 
+#[cfg(not(target_os = "macos"))]
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+
+#[cfg(target_os = "macos")]
+mod macos_dialogs;
+#[cfg(target_os = "macos")]
+pub use macos_dialogs::MacDialogs;
 
 /// The three things the backend ever asks a person. A trait so the acceptance runner
 /// and tests can script them, clearly labelled as scripted.
@@ -35,14 +42,18 @@ pub fn is_local_preview_url(url: &str) -> bool {
     })
 }
 
+/// Linux: `kdialog` / `zenity` / `xdg-open`.
+#[cfg(not(target_os = "macos"))]
 pub struct SystemDialogs;
 
+#[cfg(not(target_os = "macos"))]
 fn which(name: &str) -> bool {
     std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
         .unwrap_or(false)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn run(cmd: &mut Command) -> Result<(bool, String), String> {
     let o = cmd
         .stdin(Stdio::null())
@@ -57,10 +68,12 @@ fn run(cmd: &mut Command) -> Result<(bool, String), String> {
     ))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn no_tool() -> String {
     "no dialog tool found: install kdialog or zenity".to_owned()
 }
 
+#[cfg(not(target_os = "macos"))]
 impl Dialogs for SystemDialogs {
     fn pick_folder(&self, title: &str) -> Result<Option<String>, String> {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());

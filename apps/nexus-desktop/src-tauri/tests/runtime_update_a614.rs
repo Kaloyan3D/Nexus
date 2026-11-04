@@ -1,3 +1,4 @@
+#![cfg(not(target_os = "macos"))]
 //! A6.1.4: the Desktop's runtime replaces a broker older than the installed binary
 //! before work is sent, never while a task is running, and reports a failed restart.
 //! Real daemon + broker (private copies of the workspace binaries).

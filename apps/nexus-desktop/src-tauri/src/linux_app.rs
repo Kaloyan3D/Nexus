@@ -5,6 +5,9 @@
 
 use crate::dto::*;
 use crate::{backend, dialogs, interactive};
+
+#[cfg(feature = "engine-bridge")]
+pub mod bridge;
 use nexus_client::ClientConfig;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -14,6 +17,16 @@ struct AppState {
     cfg: ClientConfig,
     mock_running: AtomicBool,
     mock_counter: AtomicU64,
+}
+
+impl AppState {
+    fn new(cfg: ClientConfig) -> Self {
+        Self {
+            cfg,
+            mock_running: AtomicBool::new(false),
+            mock_counter: AtomicU64::new(0),
+        }
+    }
 }
 
 /// Released on drop so a panic can never wedge the single-flight guard.
@@ -1093,6 +1106,8 @@ async fn thread_send(
     route_id: Option<String>,
     idempotency_key: String,
     engine: Option<String>,
+    permission_mode: Option<String>,
+    reasoning_replay: Option<String>,
 ) -> Result<serde_json::Value, UiError> {
     // R-NATIVE-3: optional selection as identities only (default sends none,
     // byte-for-byte the same request as before). Rejected before the broker.
@@ -1161,6 +1176,8 @@ async fn thread_send(
                     model: model.as_deref(),
                     route: route.as_deref(),
                     mode_id: engine_mode.as_deref(),
+                    permission_mode: permission_mode.as_deref(),
+                    reasoning_replay: reasoning_replay.as_deref(),
                 },
             )
             .map_err(|e| backend::ui_error(&e))
@@ -1242,6 +1259,28 @@ async fn intent_activity(
     .map_err(|_| internal())?
 }
 
+/// M4.1: one stored browser screenshot of one of this user's runs (the exact bytes a vision model was
+/// shown), by evidence id and the file name the evidence lists. Read-only; the broker checks that the
+/// run is this user's and never takes a path.
+#[tauri::command]
+async fn intent_browser_artifact(
+    run_id: String,
+    evidence_id: String,
+    file: String,
+) -> Result<nexus_client::intent_client::BrowserArtifact, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::browser_artifact(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+            &evidence_id,
+            &file,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
 /// The final text of a finished run, as the broker recorded it (the report or summary).
 #[tauri::command]
 async fn intent_result(run_id: String) -> Result<String, UiError> {
@@ -1291,6 +1330,106 @@ async fn intent_cancel(
         nexus_client::intent_client::cancel(
             &nexus_client::intent_client::default_broker_socket(),
             &run_id,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// M4.6: execution analytics of a run (read-only, derived by the broker from the run's own records).
+#[tauri::command]
+async fn run_analytics(run_id: String) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::run_analytics(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+            false,
+            None,
+            None,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// M4.6: the versioned benchmark document of a run. The Mac adds its own platform and app version.
+#[tauri::command]
+async fn run_analytics_export(
+    run_id: String,
+    host_platform: Option<String>,
+    app_version: Option<String>,
+) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::run_analytics(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+            true,
+            host_platform.as_deref(),
+            app_version.as_deref(),
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// M4.5: record the person's decision on the pending permission request. The decision itself is made in a
+/// native confirmation by the Mac app; this command only carries it (and refuses anything not bound to the
+/// request's id and digest).
+#[tauri::command]
+async fn permission_decide(
+    run_id: String,
+    request_id: String,
+    digest: String,
+    decision: String,
+) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::permission_decide(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+            &request_id,
+            &digest,
+            &decision,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// M4.5: change the run's permission mode (upgrades carry the single-use token of a confirmed upgrade).
+#[tauri::command]
+async fn permission_set_mode(
+    run_id: String,
+    mode: String,
+    upgrade_token: Option<String>,
+) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::permission_set_mode(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+            &mode,
+            upgrade_token.as_deref(),
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// M4.5: the text and single-use token for a move to a more autonomous mode.
+#[tauri::command]
+async fn permission_prepare_upgrade(
+    run_id: String,
+    mode: String,
+) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::permission_prepare_upgrade(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+            &mode,
         )
         .map_err(|e| backend::ui_error(&e))
     })
@@ -1407,6 +1546,7 @@ pub fn bundled_layout(
 
 /// Point the runtime at the bundled programs, unless an operator or a developer already named others.
 /// Must run before the runtime is created (it discovers its programs once).
+#[cfg(feature = "window")]
 fn use_bundled_programs(resource_dir: &std::path::Path) {
     let Some((bin, repo)) = bundled_layout(resource_dir) else {
         return;
@@ -1419,6 +1559,93 @@ fn use_bundled_programs(resource_dir: &std::path::Path) {
     }
 }
 
+/// The registered command set, shared by the desktop window and the engine bridge so both
+/// serve exactly the same commands.
+pub(crate) fn invoke_handler<R: tauri::Runtime>(
+) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        app_info,
+        engine_choice,
+        engine_prefer,
+        adaptive_setup,
+        run_engine,
+        runtime_status,
+        list_tasks,
+        task_journal,
+        model_catalog,
+        live_blockers,
+        run_mock,
+        conversation_read,
+        model_io_read,
+        list_mock_conversations,
+        list_model_conversations,
+        model_run_status,
+        cancel_model_run,
+        intent_models,
+        intent_targets,
+        intent_submit,
+        intent_workspaces,
+        intent_inspect_submit,
+        intent_code_sources,
+        intent_code_limits,
+        intent_code_submit,
+        intent_diff,
+        intent_activity,
+        intent_browser_artifact,
+        intent_copy,
+        intent_status,
+        intent_result,
+        intent_cancel,
+        permission_decide,
+        run_analytics,
+        run_analytics_export,
+        permission_set_mode,
+        permission_prepare_upgrade,
+        intent_resume,
+        run_resumable,
+        intent_list,
+        tool_events,
+        list_approvals,
+        integrity_status,
+        runtime_state,
+        runtime_start,
+        provider_connect,
+        provider_consent,
+        provider_revoke,
+        project_pick,
+        project_list,
+        job_list,
+        job_stop,
+        project_refresh,
+        project_set_policy,
+        project_set_edit_mode,
+        project_set_grant,
+        project_end_grant,
+        code_limits_set,
+        project_forget,
+        project_adopt,
+        project_allow_work,
+        project_allow_previews,
+        project_revoke_previews,
+        project_allow_installs,
+        project_use_automatic_approval,
+        job_logs,
+        preview_open,
+        environment_check,
+        exec_effects,
+        exec_restore_preview,
+        exec_restore_apply,
+        run_restore_preview,
+        run_restore_apply,
+        thread_list,
+        thread_get,
+        thread_send,
+        thread_create,
+        thread_update
+    ]
+}
+
+#[cfg(feature = "window")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1438,87 +1665,10 @@ pub fn run() {
             let cfg = ClientConfig::resolve(None, None, false).expect("client configuration");
             app.manage(runtime);
             app.manage::<Arc<dyn dialogs::Dialogs>>(Arc::new(dialogs::SystemDialogs));
-            app.manage(AppState {
-                cfg,
-                mock_running: AtomicBool::new(false),
-                mock_counter: AtomicU64::new(0),
-            });
+            app.manage(AppState::new(cfg));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            app_info,
-            engine_choice,
-            engine_prefer,
-            adaptive_setup,
-            run_engine,
-            runtime_status,
-            list_tasks,
-            task_journal,
-            model_catalog,
-            live_blockers,
-            run_mock,
-            conversation_read,
-            model_io_read,
-            list_mock_conversations,
-            list_model_conversations,
-            model_run_status,
-            cancel_model_run,
-            intent_models,
-            intent_targets,
-            intent_submit,
-            intent_workspaces,
-            intent_inspect_submit,
-            intent_code_sources,
-            intent_code_limits,
-            intent_code_submit,
-            intent_diff,
-            intent_activity,
-            intent_copy,
-            intent_status,
-            intent_result,
-            intent_cancel,
-            intent_resume,
-            run_resumable,
-            intent_list,
-            tool_events,
-            list_approvals,
-            integrity_status,
-            runtime_state,
-            runtime_start,
-            provider_connect,
-            provider_consent,
-            provider_revoke,
-            project_pick,
-            project_list,
-            job_list,
-            job_stop,
-            project_refresh,
-            project_set_policy,
-            project_set_edit_mode,
-            project_set_grant,
-            project_end_grant,
-            code_limits_set,
-            project_forget,
-            project_adopt,
-            project_allow_work,
-            project_allow_previews,
-            project_revoke_previews,
-            project_allow_installs,
-            project_use_automatic_approval,
-            job_logs,
-            preview_open,
-            environment_check,
-            exec_effects,
-            exec_restore_preview,
-            exec_restore_apply,
-            run_restore_preview,
-            run_restore_apply,
-            thread_list,
-            thread_get,
-            thread_send,
-            thread_create,
-            thread_update
-        ])
+        .invoke_handler(invoke_handler())
         .build(tauri::generate_context!())
         .expect("error while building Nexus")
         .run(move |app, event| {
@@ -1590,10 +1740,17 @@ mod authz_tests {
         "intent_code_submit",
         "intent_diff",
         "intent_activity",
+        "intent_browser_artifact",
         "intent_copy",
         "intent_status",
         "intent_result",
         "intent_cancel",
+        "permission_decide",
+        "run_analytics",
+        "run_analytics_export",
+        "run_analytics_save",
+        "permission_set_mode",
+        "permission_prepare_upgrade",
         "intent_list",
         "tool_events",
         "list_approvals",
@@ -2356,6 +2513,7 @@ mod authz_tests {
             None,
             nexus_client::intent_client::fresh_key("gui"),
             engine,
+            None,
         ))
         .expect("thread_send");
         let run_id = sent["run"]["runId"].as_str().unwrap().to_owned();
@@ -2450,6 +2608,7 @@ mod authz_tests {
                 None,
                 key.into(),
                 engine.map(str::to_owned),
+                None,
             ))
         };
         std::env::set_var("NEXUS_BROKER_SOCKET", &sock);
@@ -2564,6 +2723,7 @@ mod authz_tests {
             None,
             "gui-0000000000000001".into(),
             Some("stable".to_owned()),
+            None,
         ))
         .unwrap();
         // Choice: identities only (logical id with a slash stays intact via route).
@@ -2579,6 +2739,7 @@ mod authz_tests {
             Some("acme/large".into()),
             "gui-0000000000000002".into(),
             Some("stable".to_owned()),
+            None,
         ))
         .unwrap();
         let got = frames.lock().unwrap().clone();
@@ -2601,6 +2762,7 @@ mod authz_tests {
             None,
             "gui-0000000000000003".into(),
             Some("stable".to_owned()),
+            None,
         ));
         assert_eq!(bad.unwrap_err().code, "bad-usage");
         let lone = tauri::async_runtime::block_on(super::thread_send(
@@ -2615,6 +2777,7 @@ mod authz_tests {
             None,
             "gui-0000000000000004".into(),
             Some("stable".to_owned()),
+            None,
         ));
         assert_eq!(lone.unwrap_err().code, "bad-usage");
         assert_eq!(frames.lock().unwrap().len(), 2, "rejections send no frames");

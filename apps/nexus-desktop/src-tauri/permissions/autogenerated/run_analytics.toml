@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-run-analytics"
+description = "Enables the run_analytics command without any pre-configured scope."
+commands.allow = ["run_analytics"]
+
+[[permission]]
+identifier = "deny-run-analytics"
+description = "Denies the run_analytics command without any pre-configured scope."
+commands.deny = ["run_analytics"]
