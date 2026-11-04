@@ -221,6 +221,11 @@ fn refuse_cmd(msg: impl Into<String>) -> ToolError {
     ToolError::new(ToolErrorCode::CommandRefused, msg)
 }
 
+/// A program the strict policy would run does not exist in this runtime (not a policy decision).
+fn missing_cmd(msg: impl Into<String>) -> ToolError {
+    ToolError::new(ToolErrorCode::ExecutableNotFound, msg)
+}
+
 impl CommandPolicy {
     pub fn standard(toolchain: Toolchain) -> Self {
         Self {
@@ -417,7 +422,7 @@ impl CommandPolicy {
         match name {
             "cargo" => {
                 if self.toolchain.cargo_home_bin.is_none() {
-                    return Err(refuse_cmd("cargo toolchain is not available on this host"));
+                    return Err(missing_cmd("cargo toolchain is not available on this host"));
                 }
                 // A writable RUSTUP_HOME on the scratch tmpfs; only the
                 // toolchains directory and settings.toml are bound (ro).
@@ -486,7 +491,7 @@ impl CommandPolicy {
                     ));
                 }
                 if !Path::new("/usr/bin/npm").exists() {
-                    return Err(refuse_cmd("npm is not available on this host"));
+                    return Err(missing_cmd("npm is not available on this host"));
                 }
                 Ok(ResolvedCommand {
                     name: "npm".into(),
@@ -546,7 +551,7 @@ impl CommandPolicy {
                 let prog = ["/usr/bin/python3", "/usr/local/bin/python3"]
                     .iter()
                     .find(|p| Path::new(p).exists())
-                    .ok_or_else(|| refuse_cmd("python3 is not available on this host"))?;
+                    .ok_or_else(|| missing_cmd("python3 is not available on this host"))?;
                 env.insert("PYTHONDONTWRITEBYTECODE".into(), "1".into());
                 env.insert("PYTHONPYCACHEPREFIX".into(), "/work/out/pycache".into());
                 env.insert("PYTHONNOUSERSITE".into(), "1".into());
@@ -575,7 +580,7 @@ impl CommandPolicy {
                 let prog = ["/usr/bin/node", "/usr/local/bin/node"]
                     .iter()
                     .find(|p| Path::new(p).exists())
-                    .ok_or_else(|| refuse_cmd("node is not available on this host"))?;
+                    .ok_or_else(|| missing_cmd("node is not available on this host"))?;
                 Ok(ResolvedCommand {
                     name: "node".into(),
                     program: (*prog).to_owned(),
@@ -614,7 +619,7 @@ impl CommandPolicy {
                 let p = ["/usr/bin/tsc", "/usr/local/bin/tsc"]
                     .iter()
                     .find(|p| Path::new(p).exists())
-                    .ok_or_else(|| refuse_cmd("tsc is not available on this host"))?;
+                    .ok_or_else(|| missing_cmd("tsc is not available on this host"))?;
                 Ok(ResolvedCommand {
                     name: "tsc".into(),
                     program: (*p).to_owned(),

@@ -30,6 +30,7 @@ pub mod target;
 pub mod testkit;
 pub mod trace;
 pub mod transport;
+pub mod vision;
 
 pub use authorized::{dispatch_authorized, dispatch_redeemed_streaming, RedeemedDispatch};
 pub use error::{redact, ModelError, ModelErrorCode};
@@ -40,7 +41,8 @@ pub use prepare::{
 pub use request::{ChatMessage, InputItem, ModelRequest, ToolDefinition, ToolProfile};
 pub use runtime::{ModelRuntime, OfflineModelRuntime};
 pub use sse::{
-    AssembledMessage, AssembledToolCall, ModelEvent, StreamAssembler, TerminalResponse, Usage,
+    parse_usage, AssembledMessage, AssembledToolCall, ModelEvent, StreamAssembler,
+    TerminalResponse, Usage,
 };
 pub use stream::{AttemptState, AttemptStore, AttemptTracker, CancellationToken};
 pub use target::{

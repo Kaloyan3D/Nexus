@@ -44,6 +44,97 @@ pub struct Usage {
     pub input_tokens: u64,
     /// Output tokens.
     pub output_tokens: u64,
+    /// Input tokens served from the provider's prompt cache, when the provider says so. A SUBSET of
+    /// `input_tokens` (OpenAI-style definition); `None` when not reported (never 0 by assumption).
+    pub cached_input_tokens: Option<u64>,
+    /// Input tokens written to the cache (providers that bill cache writes), when reported.
+    pub cache_write_tokens: Option<u64>,
+    /// Reasoning tokens, when reported. A SUBSET of `output_tokens` for OpenAI-style providers.
+    pub reasoning_tokens: Option<u64>,
+    /// The provider's own total, when reported.
+    pub total_tokens: Option<u64>,
+    /// Provider-reported cost of the request in micro-USD, when the provider reports one (never estimated).
+    pub cost_micro_usd: Option<u64>,
+    /// Provider-reported list-price equivalent of the request in nano-USD (OpenCode Go reports `opencode.list_cost`
+    /// next to a plan-billed `cost` of 0). A reported figure, not an estimate.
+    pub list_cost_nano_usd: Option<u64>,
+}
+
+/// Read the provider's `usage` object. Absent fields stay `None`; the raw object is returned too (only numeric leaves,
+/// bounded) so nothing the provider reported is lost and nothing else (text, headers, ids) is kept.
+pub fn parse_usage(u: &serde_json::Value) -> (Usage, String) {
+    let n = |v: Option<&serde_json::Value>| v.and_then(|x| x.as_u64());
+    let nested = |a: &str, b: &str| n(u.get(a).and_then(|d| d.get(b)));
+    let input = n(u.get("input_tokens")).or_else(|| n(u.get("prompt_tokens")));
+    let output = n(u.get("output_tokens")).or_else(|| n(u.get("completion_tokens")));
+    let cached = nested("input_tokens_details", "cached_tokens")
+        .or_else(|| nested("prompt_tokens_details", "cached_tokens"))
+        .or_else(|| n(u.get("cache_read_input_tokens")))
+        .or_else(|| n(u.get("prompt_cache_hit_tokens")));
+    let cache_write = n(u.get("cache_creation_input_tokens"))
+        .or_else(|| nested("input_tokens_details", "cache_creation_tokens"))
+        .or_else(|| nested("prompt_tokens_details", "cache_write_tokens"));
+    let reasoning = nested("output_tokens_details", "reasoning_tokens")
+        .or_else(|| nested("completion_tokens_details", "reasoning_tokens"));
+    // OpenCode Go: explicit cache-write counters and the list-price cost, under `opencode`
+    let oc = u.get("opencode");
+    let oc_tokens = oc.and_then(|o| o.get("tokens"));
+    let w5 = n(oc_tokens.and_then(|t| t.get("cache_write_5m")));
+    let w1 = n(oc_tokens.and_then(|t| t.get("cache_write_1h")));
+    let cache_write = cache_write.or_else(|| match (w5, w1) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+    });
+    let list_cost = oc
+        .and_then(|o| o.get("list_cost"))
+        .and_then(|c| c.as_f64())
+        .filter(|c| c.is_finite() && *c >= 0.0)
+        .map(|c| (c * 1_000_000_000.0).round() as u64);
+    let cost = u
+        .get("cost")
+        .and_then(|c| c.as_f64())
+        .filter(|c| c.is_finite() && *c >= 0.0)
+        .map(|c| (c * 1_000_000.0).round() as u64);
+    let usage = Usage {
+        input_tokens: input.unwrap_or(0),
+        output_tokens: output.unwrap_or(0),
+        cached_input_tokens: cached,
+        cache_write_tokens: cache_write,
+        reasoning_tokens: reasoning,
+        total_tokens: n(u.get("total_tokens")),
+        cost_micro_usd: cost,
+        list_cost_nano_usd: list_cost,
+    };
+    (usage, numeric_leaves(u))
+}
+
+/// Canonical JSON of an object reduced to its numeric leaves (depth <= 3, <= 32 keys).
+fn numeric_leaves(v: &serde_json::Value) -> String {
+    fn walk(v: &serde_json::Value, depth: u8, left: &mut usize) -> Option<serde_json::Value> {
+        match v {
+            serde_json::Value::Number(_) if *left > 0 => {
+                *left -= 1;
+                Some(v.clone())
+            }
+            serde_json::Value::Object(m) if depth < 3 => {
+                let mut o = serde_json::Map::new();
+                for (k, x) in m {
+                    if *left == 0 {
+                        break;
+                    }
+                    if let Some(y) = walk(x, depth + 1, left) {
+                        o.insert(k.chars().take(48).collect(), y);
+                    }
+                }
+                (!o.is_empty()).then_some(serde_json::Value::Object(o))
+            }
+            _ => None,
+        }
+    }
+    let mut left = 32usize;
+    walk(v, 0, &mut left)
+        .map(|x| x.to_string())
+        .unwrap_or_else(|| "{}".to_owned())
 }
 
 /// Normalized terminal response.
@@ -105,6 +196,10 @@ pub enum ModelEvent {
     /// Provider response identifier (`response.id`), as supplied. Never
     /// synthesized.
     ResponseId(String),
+    /// The raw numeric `usage` fields the provider reported (canonical JSON, numeric leaves only).
+    UsageRaw(String),
+    /// The model identifier the provider says served the response (`response.model`), as supplied.
+    ResponseModel(String),
     /// A complete `reasoning` item (`output_item.done`), reduced to the fields a later
     /// request may echo (`type`, `id`, `encrypted_content`, `summary`) as canonical JSON.
     ReasoningDone { item: String },
@@ -319,6 +414,8 @@ impl StreamAssembler {
                 self.response_id = Some(id);
                 Ok(())
             }
+            // read by the turn runner straight from the event stream (analytics); not part of the committed response
+            ModelEvent::UsageRaw(_) | ModelEvent::ResponseModel(_) => Ok(()),
             ModelEvent::ReasoningDone { item } => {
                 self.message_bytes += item.len();
                 if self.message_bytes > self.max_text_bytes {
@@ -765,13 +862,25 @@ pub fn parse_data_payload(
                 .and_then(|r| r.get("usage"))
                 .filter(|u| u.is_object())
             {
-                out.push(ModelEvent::Usage(Usage {
-                    input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                    output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                }));
+                let (usage, raw) = parse_usage(u);
+                out.push(ModelEvent::Usage(usage));
+                out.push(ModelEvent::UsageRaw(raw));
             }
             if let Some(id) = response.and_then(|r| r.get("id")).and_then(|v| v.as_str()) {
                 push_response_id(id, out);
+            }
+            if let Some(m) = response
+                .and_then(|r| r.get("model"))
+                .and_then(|v| v.as_str())
+            {
+                let m: String = m
+                    .chars()
+                    .filter(|c| c.is_ascii_graphic())
+                    .take(96)
+                    .collect();
+                if !m.is_empty() {
+                    out.push(ModelEvent::ResponseModel(m));
+                }
             }
             // Function calls listed in the final response object are complete.
             if let Some(items) = response
@@ -816,13 +925,25 @@ pub fn parse_data_payload(
                 .and_then(|r| r.get("usage"))
                 .filter(|u| u.is_object())
             {
-                out.push(ModelEvent::Usage(Usage {
-                    input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                    output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                }));
+                let (usage, raw) = parse_usage(u);
+                out.push(ModelEvent::Usage(usage));
+                out.push(ModelEvent::UsageRaw(raw));
             }
             if let Some(id) = response.and_then(|r| r.get("id")).and_then(|v| v.as_str()) {
                 push_response_id(id, out);
+            }
+            if let Some(m) = response
+                .and_then(|r| r.get("model"))
+                .and_then(|v| v.as_str())
+            {
+                let m: String = m
+                    .chars()
+                    .filter(|c| c.is_ascii_graphic())
+                    .take(96)
+                    .collect();
+                if !m.is_empty() {
+                    out.push(ModelEvent::ResponseModel(m));
+                }
             }
             let why = response
                 .and_then(|r| r.get("incomplete_details"))
@@ -996,4 +1117,122 @@ fn error_offset(e: &serde_json::Error) -> usize {
     // serde_json 1.x exposes the byte offset via column(); line is always 1
     // for single-frame payloads.
     e.column()
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_responses_api_shape_keeps_cached_reasoning_and_the_raw_numbers() {
+        let (u, raw) = parse_usage(&json!({
+            "input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500,
+            "input_tokens_details": {"cached_tokens": 1000},
+            "output_tokens_details": {"reasoning_tokens": 120}
+        }));
+        assert_eq!((u.input_tokens, u.output_tokens), (1200, 300));
+        assert_eq!(u.cached_input_tokens, Some(1000));
+        assert_eq!(u.reasoning_tokens, Some(120));
+        assert_eq!(u.total_tokens, Some(1500));
+        assert_eq!(u.cache_write_tokens, None, "not reported: absent, not zero");
+        let r: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(r["input_tokens_details"]["cached_tokens"], 1000);
+    }
+
+    #[test]
+    fn other_providers_shapes_are_normalized_without_assuming_the_same_definitions() {
+        let (chat, _) = parse_usage(&json!({"prompt_tokens": 50, "completion_tokens": 9,
+            "prompt_tokens_details": {"cached_tokens": 40}, "completion_tokens_details": {"reasoning_tokens": 3}}));
+        assert_eq!(
+            (
+                chat.input_tokens,
+                chat.output_tokens,
+                chat.cached_input_tokens,
+                chat.reasoning_tokens
+            ),
+            (50, 9, Some(40), Some(3))
+        );
+        let (anthropic, _) = parse_usage(&json!({"input_tokens": 10, "output_tokens": 5,
+            "cache_read_input_tokens": 700, "cache_creation_input_tokens": 200}));
+        assert_eq!(anthropic.cached_input_tokens, Some(700));
+        assert_eq!(anthropic.cache_write_tokens, Some(200));
+    }
+
+    #[test]
+    fn the_opencode_shape_keeps_cache_writes_the_plan_billed_cost_and_the_list_price() {
+        let (u, raw) = parse_usage(
+            &json!({"cost": 0, "input_tokens": 4666, "output_tokens": 92, "total_tokens": 4758,
+            "input_tokens_details": {"cached_tokens": 3953}, "output_tokens_details": {"reasoning_tokens": 3},
+            "opencode": {"allowance": 9.761e-05, "list_cost": 9.761e-05,
+                "tokens": {"cache_read": 3953, "cache_write_1h": 0, "cache_write_5m": 0, "input": 713, "output": 92, "reasoning": 3}}}),
+        );
+        assert_eq!(
+            u.cost_micro_usd,
+            Some(0),
+            "plan-billed: the provider's own cost is 0"
+        );
+        assert_eq!(u.list_cost_nano_usd, Some(97_610));
+        assert_eq!(
+            u.cache_write_tokens,
+            Some(0),
+            "reported as zero, not unknown"
+        );
+        assert_eq!(u.cached_input_tokens, Some(3953));
+        let r: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            r["opencode"]["tokens"]["cache_write_5m"], 0,
+            "the raw fields are kept verbatim"
+        );
+        // when the provider sends no opencode block nothing is invented
+        let (plain, _) = parse_usage(&json!({"input_tokens": 1, "output_tokens": 1}));
+        assert_eq!(
+            (plain.cache_write_tokens, plain.list_cost_nano_usd),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn missing_and_partial_usage_stays_missing() {
+        let (u, raw) = parse_usage(&json!({"input_tokens": 7}));
+        assert_eq!((u.input_tokens, u.output_tokens), (7, 0));
+        assert_eq!(
+            (
+                u.cached_input_tokens,
+                u.reasoning_tokens,
+                u.total_tokens,
+                u.cost_micro_usd
+            ),
+            (None, None, None, None)
+        );
+        assert_eq!(raw, r#"{"input_tokens":7}"#);
+        let (empty, raw) = parse_usage(&json!({}));
+        assert_eq!(empty, Usage::default());
+        assert_eq!(raw, "{}");
+    }
+
+    #[test]
+    fn the_provider_reported_cost_is_kept_in_micro_dollars_and_only_when_reported() {
+        let (u, _) = parse_usage(&json!({"input_tokens": 1, "output_tokens": 1, "cost": 0.012345}));
+        assert_eq!(u.cost_micro_usd, Some(12345));
+        let (n, _) = parse_usage(&json!({"input_tokens": 1, "cost": -1.0}));
+        assert_eq!(n.cost_micro_usd, None);
+    }
+
+    #[test]
+    fn the_raw_record_holds_numbers_only_never_text_or_credentials() {
+        let (_, raw) = parse_usage(&json!({
+            "input_tokens": 3, "authorization": "Bearer sk-SECRET-TOKEN", "model": "x",
+            "nested": {"api_key": "sk-ANOTHER", "n": 5, "deep": {"deeper": {"deepest": 1}}}
+        }));
+        assert!(
+            !raw.contains("sk-")
+                && !raw.contains("Bearer")
+                && !raw.contains("authorization")
+                && !raw.contains("api_key"),
+            "{raw}"
+        );
+        assert!(raw.contains("\"input_tokens\":3") && raw.contains("\"n\":5"));
+        assert!(!raw.contains("deepest"), "depth is bounded");
+    }
 }

@@ -412,3 +412,135 @@ fn a_check_that_passed_over_files_that_exist_only_in_its_scratch_copy_is_not_a_v
     .unwrap();
     assert_eq!(o.verification, "verified-passed");
 }
+
+// ─── M4.1: the four kinds of evidence stay apart ───────────────────────────────────────────────
+
+use nexus_client::intent_client::{BrowserEvidence, ScreenshotRef};
+
+fn shot(sha: &str, delivered: bool) -> ScreenshotRef {
+    ScreenshotRef {
+        name: "loaded".into(),
+        file: "01-loaded.jpg".into(),
+        sha256: sha.repeat(64).chars().take(64).collect(),
+        bytes: 1000,
+        media_type: "image/jpeg".into(),
+        viewport_w: 1280,
+        viewport_h: 800,
+        taken_at: "t".into(),
+        delivery: if delivered {
+            "delivered"
+        } else {
+            "not-delivered"
+        }
+        .into(),
+    }
+}
+
+fn browse(index: u32, delivered: bool, ok: bool) -> ToolActivity {
+    let mut a = act(index, "browser_inspect", "executed", None);
+    a.browser = Some(BrowserEvidence {
+        evidence_id: format!("br-run-{index}"),
+        launched: ok,
+        loaded: ok,
+        screenshots: if ok {
+            vec![shot("a", delivered)]
+        } else {
+            vec![]
+        },
+        image_delivery: if !ok {
+            "no-screenshot"
+        } else if delivered {
+            "delivered-to-vision-model"
+        } else {
+            "not-delivered-text-only-model"
+        }
+        .into(),
+        ..Default::default()
+    });
+    a
+}
+
+fn visual_run(acts: Vec<ToolActivity>, unavailable: Option<&str>) -> IntentRun {
+    let mut r = run("completed", acts);
+    r.visual_requested = true;
+    r.visual_unavailable = unavailable.map(str::to_owned);
+    r
+}
+
+#[test]
+fn a_passing_syntax_check_is_static_evidence_only_and_never_a_met_visual_request() {
+    let r = visual_run(vec![test_run(1, "pass", 0)], Some("no-browser"));
+    let e = derive_coding_outcome(&r).unwrap().evidence;
+    assert_eq!(e.static_checks, "passed");
+    assert_eq!(e.browser_runtime, "none");
+    assert_eq!(e.visual_observation, "none");
+    assert_eq!(e.visual_assessment, "none");
+    assert_eq!(e.visual_requirement, "unmet-no-browser");
+}
+
+#[test]
+fn a_screenshot_that_no_model_saw_is_captured_not_observed() {
+    let e = derive_coding_outcome(&visual_run(
+        vec![browse(1, false, true)],
+        Some("model-cannot-see"),
+    ))
+    .unwrap()
+    .evidence;
+    assert_eq!(e.browser_runtime, "passed");
+    assert_eq!(e.visual_observation, "captured-not-seen");
+    assert_eq!(e.visual_assessment, "none");
+    assert_eq!(e.visual_requirement, "unmet-model-cannot-see");
+    assert!(e.visual_basis.is_empty());
+}
+
+#[test]
+fn a_screenshot_shown_to_the_model_meets_the_request_only_if_it_postdates_the_last_edit() {
+    let edit = applied_edit(2);
+    // inspect, edit, no re-inspection: seen, but stale
+    let stale = derive_coding_outcome(&visual_run(vec![browse(1, true, true), edit.clone()], None))
+        .unwrap()
+        .evidence;
+    assert_eq!(stale.visual_observation, "seen-by-model");
+    assert_eq!(stale.visual_requirement, "unmet-stale-after-edit");
+    assert!(!stale.inspected_after_last_edit);
+    // inspect, edit, inspect again: met; the assessment is only ever the model's own
+    let met = derive_coding_outcome(&visual_run(
+        vec![browse(1, true, true), edit, browse(3, true, true)],
+        None,
+    ))
+    .unwrap()
+    .evidence;
+    assert_eq!(met.visual_requirement, "met");
+    assert!(met.inspected_after_last_edit);
+    assert_eq!(met.visual_assessment, "model-stated");
+    assert_eq!(met.visual_basis.len(), 2);
+}
+
+#[test]
+fn a_browser_that_never_produced_a_screenshot_is_a_failure_not_an_untestable_page() {
+    let e = derive_coding_outcome(&visual_run(vec![browse(1, false, false)], None))
+        .unwrap()
+        .evidence;
+    assert_eq!(e.browser_runtime, "failed");
+    assert_eq!(e.visual_observation, "none");
+    assert_eq!(e.visual_requirement, "unmet-browser-failed");
+    let never = derive_coding_outcome(&visual_run(vec![], None))
+        .unwrap()
+        .evidence;
+    assert_eq!(never.visual_requirement, "unmet-not-attempted");
+}
+
+#[test]
+fn an_ordinary_run_asks_nothing_visual_and_an_unsupported_claim_is_carried() {
+    let r = run("completed", vec![]);
+    let e = derive_coding_outcome(&r).unwrap().evidence;
+    assert_eq!(e.visual_requirement, "not-requested");
+    let mut claimed = visual_run(vec![browse(1, false, true)], Some("model-cannot-see"));
+    claimed.visual_claim_unsupported = true;
+    assert!(
+        derive_coding_outcome(&claimed)
+            .unwrap()
+            .evidence
+            .unsupported_visual_claim
+    );
+}

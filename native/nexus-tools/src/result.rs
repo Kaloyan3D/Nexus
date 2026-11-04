@@ -39,8 +39,11 @@ pub enum ToolErrorCode {
     SnapshotFailed,
     /// Locked dependencies are not available from the verified cache.
     DependencyUnavailable,
-    /// Command refused by policy.
+    /// Command refused by policy (its name, arguments or the grant do not allow it).
     CommandRefused,
+    /// The program does not exist in the runtime. NOT a policy decision: nothing forbade it, it is not
+    /// installed there, and nothing was run.
+    ExecutableNotFound,
     /// Bytes were published but could not be verified.
     PublishedUnverified,
     Cancelled,
@@ -80,6 +83,7 @@ impl ToolErrorCode {
             Self::SnapshotFailed => "snapshot-failed",
             Self::DependencyUnavailable => "dependency-unavailable",
             Self::CommandRefused => "command-refused",
+            Self::ExecutableNotFound => "executable-not-found",
             Self::Cancelled => "cancelled",
             Self::Revoked => "revoked",
             Self::AuthorizationRefused => "authorization-refused",

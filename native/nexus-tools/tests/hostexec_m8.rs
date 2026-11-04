@@ -294,3 +294,166 @@ fn orphan_reconciliation_preserves_another_live_supervisors_command() {
         assert!(String::from_utf8_lossy(&out.stdout).contains("still-supervised"));
     });
 }
+
+/// PIDs (other than this test process) whose command line contains `marker`.
+fn procs_with(marker: &str) -> Vec<u32> {
+    let me = std::process::id();
+    let mut found = Vec::new();
+    for e in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == me {
+            continue;
+        }
+        if let Ok(c) = std::fs::read(e.path().join("cmdline")) {
+            if String::from_utf8_lossy(&c).contains(marker) {
+                found.push(pid);
+            }
+        }
+    }
+    found
+}
+
+/// Regression for the intermittent hang (M4.4): every execution of one process shares its pid and start time,
+/// and the leaf name's only distinguishing part was the wall clock, which two concurrent executions can read
+/// as the same tick. The second `mkdir` then failed with EEXIST, the error was dropped, that run silently
+/// lost its cgroup and a `setsid` descendant escaped and held the output pipe forever. Many executions start
+/// at the same instant here, repeatedly, and each must keep kernel cgroup supervision and leave nothing behind.
+#[test]
+fn m81_simultaneous_executions_all_keep_cgroup_supervision_and_leave_no_descendant() {
+    use std::sync::{Arc, Barrier};
+    const ROUNDS: usize = 5;
+    const N: usize = 16;
+    // is a kernel cgroup offered here at all? (same escape hatch as the other cgroup assertions)
+    {
+        let w = world();
+        let r = run(
+            &w,
+            "sh",
+            &["-c", "echo probe"],
+            "full",
+            &CancellationToken::new("probe"),
+        );
+        let out = r.output.expect("output");
+        if out["resourceEnforcement"] != "kernel-cgroup" {
+            println!("NOT RUN (concurrency assertion): no writable cgroup on this machine");
+            return;
+        }
+    }
+    let marker = format!("m81sim{}x", std::process::id());
+    for round in 0..ROUNDS {
+        let barrier = Arc::new(Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let barrier = barrier.clone();
+                let marker = marker.clone();
+                std::thread::spawn(move || {
+                    let w = world();
+                    barrier.wait();
+                    let script = format!(
+                        "setsid sh -c ': {marker}-{round}-{i}; while true; do date +%s%N >> hb.txt; sleep 0.2; done' & echo spawned"
+                    );
+                    let r = run(
+                        &w,
+                        "sh",
+                        &["-c", &script],
+                        "full",
+                        &CancellationToken::new(&format!("sim-{round}-{i}")),
+                    );
+                    let out = r.output.expect("output");
+                    // the detached descendant must be dead: its heartbeat stops growing
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    let hb = w.root.join("hb.txt");
+                    let len = || std::fs::metadata(&hb).map(|m| m.len()).unwrap_or(0);
+                    let s1 = len();
+                    std::thread::sleep(std::time::Duration::from_millis(700));
+                    (
+                        out["resourceEnforcement"].as_str().unwrap_or("").to_owned(),
+                        out["exitCode"].as_i64(),
+                        out["cgroup"].as_str().unwrap_or("").to_owned(),
+                        s1,
+                        len(),
+                    )
+                })
+            })
+            .collect();
+        for (i, h) in handles.into_iter().enumerate() {
+            let (enforcement, exit, cgroup, s1, s2) = h.join().expect("execution thread");
+            assert_eq!(
+                enforcement, "kernel-cgroup",
+                "round {round} run {i} lost cgroup supervision: {cgroup}"
+            );
+            assert_eq!(exit, Some(0), "round {round} run {i}");
+            assert_eq!(
+                s1, s2,
+                "round {round} run {i}: descendant survived (hb {s1} -> {s2})"
+            );
+        }
+        assert_eq!(
+            procs_with(&marker),
+            Vec::<u32>::new(),
+            "round {round}: processes left behind by finished executions"
+        );
+    }
+}
+
+/// Degraded mode: when a command is supervised only as a process group (no cgroup), a descendant that left
+/// the group by `setsid` cannot be reached, and it keeps the output pipes open. The run must still return,
+/// with what the command wrote, and say that output may be incomplete, rather than wait for ever.
+#[test]
+fn m81_process_group_only_supervision_never_waits_for_a_detached_descendants_pipe() {
+    use nexus_tools::host_exec::{run_host_with, HostRun, Supervision};
+    let w = world();
+    let marker = format!("m81pg{}x", std::process::id());
+    let script =
+        format!("setsid sh -c ': {marker}; while true; do sleep 0.2; done' & echo spawned");
+    let mut never_stop = || None;
+    let started = std::time::Instant::now();
+    let out = run_host_with(
+        HostRun {
+            program: "/usr/bin/sh".into(),
+            argv: vec!["sh".into(), "-c".into(), script],
+            cwd: w.root.clone(),
+            env: std::collections::BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+            wall_ms: 20_000,
+            tail_bytes: 4096,
+            should_stop: &mut never_stop,
+        },
+        Supervision::ProcessGroupOnly,
+    )
+    .expect("run");
+    let took = started.elapsed();
+    // the descendant is genuinely outside Nexus's reach, and is still running: clean it up ourselves
+    let leaked = procs_with(&marker);
+    for pid in &leaked {
+        unsafe { libc_kill(*pid as i32) };
+    }
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "returned only after {took:?}"
+    );
+    assert!(
+        !leaked.is_empty(),
+        "the scenario did not leave a detached descendant"
+    );
+    assert_eq!(out.exit, nexus_tools::sandbox::ExitKind::Exited(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("spawned"));
+    assert_eq!(out.resource_enforcement, "process-group-polling");
+    assert!(
+        out.cgroup.contains("process-group supervision requested")
+            && out.cgroup.contains("output may be incomplete"),
+        "{}",
+        out.cgroup
+    );
+    // give the killed loop a moment, then nothing may remain
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(procs_with(&marker), Vec::<u32>::new());
+}
+
+unsafe fn libc_kill(pid: i32) {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    kill(pid, 9);
+}

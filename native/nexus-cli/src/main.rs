@@ -969,8 +969,7 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
                             idempotency_key: &key,
                             model: model.as_deref(),
                             route: route.as_deref(),
-                            mode_id: mode_flag.as_deref(),
-                        },
+                            mode_id: mode_flag.as_deref(), permission_mode: None, reasoning_replay: None, },
                     )?;
                     let human = format!("thread {} run {}", v["threadId"].as_str().unwrap_or("?"), v["run"]["runId"].as_str().unwrap_or("?"));
                     intent_ok(cfg, v, &human);

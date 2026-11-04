@@ -115,6 +115,9 @@ impl AttemptTracker {
 /// Recorded outcome for one attempt id (durable-intent support hook: the
 /// store is in-memory in A2.2; crash recovery re-derives `send_uncertain`
 /// from a missing terminal, never success).
+// The committed terminal now carries the full normalized usage (cache, reasoning, cost): one rarely-built variant
+// being larger than the others is intended; boxing would add an allocation to every replay for no benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 enum AttemptOutcome {
     /// Terminal response committed (replayable without new bytes).
@@ -140,6 +143,7 @@ pub struct AttemptStore {
 }
 
 /// Result of consulting the store before sending.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Preflight {
     /// First send for this attempt: proceed exactly once.

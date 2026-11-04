@@ -279,3 +279,61 @@ fn an_offline_command_resolves_localhost_from_the_sandbox_own_hosts_file() {
     .expect("hosts");
     assert!(out(&h).contains("127.0.0.1 localhost"), "{}", out(&h));
 }
+
+/// M4.5: Rust dependencies (clap, rusqlite) are acquired through the install class (`cargo add`/`cargo fetch`
+/// with the install network), kept in the project environment, and then built and tested OFFLINE.
+#[test]
+fn rust_dependencies_are_fetched_once_with_the_install_network_then_built_and_tested_offline() {
+    let c = nexus_tools::sandbox::preflight();
+    let has_cargo = std::process::Command::new("cargo")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !c.available || !has_cargo {
+        println!("NOT RUN: sandbox or cargo unavailable: {:?}", c.problems);
+        return;
+    }
+    let mut fx = fixture("wb-cargo");
+    let envdir = fx.dir.path().join("envs").join("proj");
+    std::fs::create_dir_all(&envdir).unwrap();
+    let env = ProjectEnv {
+        dir: envdir,
+        installs: true,
+    };
+    fx.write(
+        "Cargo.toml",
+        b"[package]\nname = \"todo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nclap = { version = \"4\", features = [\"derive\"] }\nrusqlite = { version = \"0.31\", features = [\"bundled\"] }\n",
+    );
+    fx.write(
+        "src/main.rs",
+        b"use clap::Parser;\n#[derive(Parser)]\nstruct Cli { #[arg(long, default_value = \"hello\")] name: String }\nfn main() {\n    let c = Cli::parse();\n    let db = rusqlite::Connection::open_in_memory().unwrap();\n    db.execute(\"create table t (n text)\", []).unwrap();\n    db.execute(\"insert into t values (?1)\", [&c.name]).unwrap();\n    let n: String = db.query_row(\"select n from t\", [], |r| r.get(0)).unwrap();\n    println!(\"stored={n}\");\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn sqlite_works() {\n        let db = rusqlite::Connection::open_in_memory().unwrap();\n        let v: i64 = db.query_row(\"select 41 + 1\", [], |r| r.get(0)).unwrap();\n        assert_eq!(v, 42);\n    }\n}\n",
+    );
+    // offline, before acquiring anything: an honest, fixable failure (no network, nothing cached)
+    fx.approve_process(900_000);
+    let v = run(&mut fx, Some(&env), "cargo", &["build", "--offline"]).expect("runs");
+    assert_eq!(v["verification"], "fail", "{}", out(&v));
+    assert_eq!(v["network"], "none");
+
+    // acquire: the one networked class
+    fx.approve_process(900_000);
+    let v = run(&mut fx, Some(&env), "cargo", &["fetch"]).expect("fetch is not refused");
+    if v["verification"] != "pass" {
+        let t = out(&v);
+        if t.contains("resolve host") || t.contains("network") || t.contains("Could not resolve") {
+            println!("NOT RUN: no crate registry reachable: {t}");
+            return;
+        }
+        panic!("cargo fetch failed: {t}");
+    }
+    assert_eq!(v["network"], "install");
+
+    // build and test offline from the cache (bundled sqlite is compiled with the image's gcc)
+    fx.approve_process(900_000);
+    let v = run(&mut fx, Some(&env), "cargo", &["build", "--offline"]).expect("runs");
+    assert_eq!(v["verification"], "pass", "{}", out(&v));
+    assert_eq!(v["network"], "none");
+    fx.approve_process(900_000);
+    let v = run(&mut fx, Some(&env), "cargo", &["test", "--offline"]).expect("runs");
+    assert_eq!(v["verification"], "pass", "{}", out(&v));
+    assert!(out(&v).contains("test result: ok. 1 passed"), "{}", out(&v));
+}

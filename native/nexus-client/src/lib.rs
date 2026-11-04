@@ -39,7 +39,7 @@ pub use conversation::{
 pub use error::{ClientError, ExitCode};
 pub use inspect_run::{
     prepare_inspect_turn, run_inspect_turn, InspectBasics, InspectSession, InspectTurn, TurnEnd,
-    TurnOutput,
+    TurnOutput, UsageDetail,
 };
 pub use mock::{
     live_blockers, run_mock, run_mock_streaming, MockCheck, MockProgress, MockRunReport,

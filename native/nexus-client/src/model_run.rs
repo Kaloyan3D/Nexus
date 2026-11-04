@@ -861,6 +861,8 @@ pub fn run_model_only(
                 | ModelEvent::ToolFragment { .. }
                 | ModelEvent::ToolDone { .. }
                 | ModelEvent::MessageDone { .. }
+                | ModelEvent::UsageRaw(_)
+                | ModelEvent::ResponseModel(_)
                 | ModelEvent::ReasoningDone { .. } => {}
             }
         };

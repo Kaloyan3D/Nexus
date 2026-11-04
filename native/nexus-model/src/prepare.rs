@@ -178,7 +178,8 @@ pub fn prepare(
                     | crate::request::ToolProfile::RepoCodeJobsV1
                     | crate::request::ToolProfile::RepoCodeMuseSignalsV1
                     | crate::request::ToolProfile::RepoCodeAcceptanceV1
-                    | crate::request::ToolProfile::RepoCodeAdaptiveJobsV1),
+                    | crate::request::ToolProfile::RepoCodeAdaptiveJobsV1
+                    | crate::request::ToolProfile::RepoCodeAdaptiveBrowserV1),
                 ) => serde_json::json!({
                     "model": target.remote_model_id_confirmed,
                     "input": input.items.iter().map(responses_input_item).collect::<Vec<_>>(),
@@ -254,6 +255,22 @@ pub fn responses_input_item(it: &crate::request::InputItem) -> serde_json::Value
         // `prepare` before serialization)
         crate::request::InputItem::Reasoning { item } => {
             serde_json::from_str::<serde_json::Value>(item).unwrap_or(serde_json::Value::Null)
+        }
+        // pixels Nexus captured, as a user message: the caption names the evidence, the image is the
+        // exact stored bytes (Responses `input_image` with a data URL)
+        crate::request::InputItem::UserImage {
+            text,
+            media_type,
+            data_b64,
+            ..
+        } => {
+            serde_json::json!({
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": text },
+                    { "type": "input_image", "image_url": format!("data:{media_type};base64,{data_b64}") },
+                ],
+            })
         }
         // the model's own message item, phase intact (Responses `message` item)
         crate::request::InputItem::AssistantPhase { phase, content } => {

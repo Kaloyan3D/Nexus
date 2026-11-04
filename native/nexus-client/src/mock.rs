@@ -281,6 +281,16 @@ pub fn run_mock_streaming(
                 kind: "response-id".to_owned(),
                 content: id.clone(),
             },
+            ModelEvent::UsageRaw(raw) => MockStreamItem {
+                index: i as u64,
+                kind: "usage-raw".to_owned(),
+                content: raw.clone(),
+            },
+            ModelEvent::ResponseModel(m) => MockStreamItem {
+                index: i as u64,
+                kind: "response-model".to_owned(),
+                content: m.clone(),
+            },
             ModelEvent::ReasoningDone { item } => MockStreamItem {
                 index: i as u64,
                 kind: "reasoning-complete".to_owned(),

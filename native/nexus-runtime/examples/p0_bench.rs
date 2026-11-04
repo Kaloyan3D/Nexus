@@ -51,6 +51,8 @@ fn main() {
                     model: None,
                     route: None,
                     mode_id: None,
+                    permission_mode: None,
+                    reasoning_replay: None,
                 },
             )
             .expect("thread-send");

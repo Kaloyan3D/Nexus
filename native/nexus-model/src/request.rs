@@ -60,7 +60,22 @@ pub enum InputItem {
     /// One of the model's own `reasoning` items from an earlier response of this run,
     /// replayed verbatim (canonical JSON from `sse::replayable_reasoning`).
     Reasoning { item: String },
+    /// Pixels Nexus itself captured (a browser screenshot), delivered to a vision-capable model as
+    /// an `input_image` of a user message. `text` is the Nexus-authored caption that names the
+    /// evidence (run, viewport, digest); `data_b64` is the exact stored image; `sha256` is the digest
+    /// of the decoded bytes. Never produced from model or web-page text.
+    UserImage {
+        text: String,
+        media_type: String,
+        data_b64: String,
+        sha256: String,
+    },
 }
+
+/// Largest base64 image one request item may carry (screenshots are bounded well below this).
+pub const MAX_IMAGE_B64_BYTES: usize = 900 * 1024;
+/// Most images one request may carry; older ones are replaced by their caption.
+pub const MAX_IMAGES_PER_REQUEST: usize = 4;
 
 /// Which fixed tool catalog a request offers. `None` on a request means
 /// text-only: the OpenCode Go adapter then refuses every tool.
@@ -83,6 +98,10 @@ pub enum ToolProfile {
     /// Adaptive + Jobs: the `nexus-adaptive-v1` catalog — the full coding
     /// catalog, the reasoning-signals tool, and the four job tools.
     RepoCodeAdaptiveJobsV1,
+    /// M4.1: `RepoCodeAdaptiveJobsV1` plus the broker-handled `browser_inspect` tool (headless
+    /// Chromium on demand, project-scoped URLs only). Offered to `nexus-adaptive-v1` only where the
+    /// engine has a browser; a conversation bound to an older catalog keeps it.
+    RepoCodeAdaptiveBrowserV1,
     /// Phase 06 (opt-in): `RepoCodeV1` plus the broker-handled `acceptance_propose` tool, with which
     /// the SAME coding model records its proposed acceptance criteria (always as model-proposed
     /// provenance; it has no Kernel tool id and no authority). Offered only to the `muse-v0-acceptance`
@@ -281,6 +300,27 @@ impl ModelRequest {
                         return refuse("message content is empty or oversized");
                     }
                 }
+                InputItem::UserImage {
+                    text,
+                    media_type,
+                    data_b64,
+                    sha256,
+                } => {
+                    if media_type != "image/jpeg" && media_type != "image/png" {
+                        return refuse("image media type is not accepted");
+                    }
+                    if data_b64.is_empty()
+                        || data_b64.len() > MAX_IMAGE_B64_BYTES
+                        || !data_b64
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+                    {
+                        return refuse("image data is empty, oversized or not base64");
+                    }
+                    if text.len() > MAX_MESSAGE_CHARS || sha256.len() != 64 {
+                        return refuse("image caption or digest is malformed");
+                    }
+                }
             }
         }
         // Every output must answer an earlier call with the same id, once.
@@ -303,8 +343,18 @@ impl ModelRequest {
                 }
                 InputItem::Message { .. }
                 | InputItem::AssistantPhase { .. }
+                | InputItem::UserImage { .. }
                 | InputItem::Reasoning { .. } => {}
             }
+        }
+        if self
+            .items
+            .iter()
+            .filter(|i| matches!(i, InputItem::UserImage { .. }))
+            .count()
+            > MAX_IMAGES_PER_REQUEST
+        {
+            return refuse("too many images in one request");
         }
         if !open.is_empty() {
             return refuse("a function call has no output; the provider would reject the request");
@@ -349,5 +399,74 @@ impl ModelRequest {
                 "session override differs from the pinned session binding",
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod image_item_tests {
+    use super::*;
+
+    fn img(media: &str, data: &str) -> InputItem {
+        InputItem::UserImage {
+            text: "[Nexus screenshot] evidence br-1".into(),
+            media_type: media.into(),
+            data_b64: data.into(),
+            sha256: "a".repeat(64),
+        }
+    }
+    fn req(items: Vec<InputItem>) -> ModelRequest {
+        ModelRequest {
+            messages: Vec::new(),
+            items,
+            tool_profile: Some(ToolProfile::RepoCodeAdaptiveBrowserV1),
+            tools: Vec::new(),
+            reasoning_effort_override: None,
+            session_override: None,
+            stream: true,
+            max_output_tokens: None,
+        }
+    }
+    fn task() -> InputItem {
+        InputItem::Message {
+            role: "user".into(),
+            content: "look at the site".into(),
+        }
+    }
+
+    #[test]
+    fn an_image_is_a_valid_user_side_item_and_may_end_the_conversation() {
+        assert!(req(vec![task(), img("image/jpeg", "/9j/4AAQ")])
+            .validate_shape()
+            .is_ok());
+    }
+
+    #[test]
+    fn images_are_bounded_in_type_encoding_size_and_number() {
+        for bad in [
+            img("image/svg+xml", "AAAA"),
+            img("image/jpeg", ""),
+            img("image/jpeg", "not base64 !!"),
+            img("image/jpeg", &"A".repeat(MAX_IMAGE_B64_BYTES + 4)),
+        ] {
+            assert!(req(vec![task(), bad]).validate_shape().is_err());
+        }
+        let mut many = vec![task()];
+        many.extend((0..=MAX_IMAGES_PER_REQUEST).map(|_| img("image/jpeg", "AAAA")));
+        assert!(
+            req(many).validate_shape().is_err(),
+            "more than the allowance is refused"
+        );
+    }
+
+    #[test]
+    fn the_wire_form_is_a_user_message_with_text_and_an_input_image_data_url() {
+        let v = crate::prepare::responses_input_item(&img("image/jpeg", "/9j/4AAQ"));
+        assert_eq!(v["role"], "user");
+        assert_eq!(v["content"][0]["type"], "input_text");
+        assert_eq!(v["content"][1]["type"], "input_image");
+        assert_eq!(
+            v["content"][1]["image_url"],
+            "data:image/jpeg;base64,/9j/4AAQ"
+        );
     }
 }

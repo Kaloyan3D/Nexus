@@ -65,6 +65,36 @@ fn refuse(msg: impl Into<String>) -> ToolError {
     ToolError::new(ToolErrorCode::CommandRefused, msg)
 }
 
+/// The program does not exist in the runtime: NOT a policy decision. The code says so
+/// (`executable-not-found`), the message says what was searched and what to do, and that nothing was run.
+pub fn not_found(name: &str, searched: &str) -> ToolError {
+    let rust = matches!(
+        name,
+        "cargo"
+            | "rustc"
+            | "rustfmt"
+            | "cargo-clippy"
+            | "clippy-driver"
+            | "cargo-fmt"
+            | "cargo-nextest"
+    );
+    let hint = if rust {
+        " The Rust toolchain is not installed in this runtime, so Rust code cannot be compiled or tested here: say so plainly rather than reporting a result you could not obtain."
+    } else {
+        ""
+    };
+    ToolError::new(
+        ToolErrorCode::ExecutableNotFound,
+        format!(
+            "program '{name}' is not available inside the authorized runtime: it does not exist there \
+             (searched {searched}). This is not a permission decision: nothing prevented it from \
+             running, it is simply not installed, and nothing was run. Retrying it will not change \
+             that.{hint} Use a program that is installed, or install it into the project and name it \
+             by path (./node_modules/.bin/{name}). Nexus does not fall back to host execution"
+        ),
+    )
+}
+
 fn find(candidates: &[&str]) -> Option<String> {
     candidates
         .iter()
@@ -181,7 +211,7 @@ pub(crate) fn resolve(pol: &CommandPolicy, a: &ProcessArgs) -> Result<ResolvedCo
         program = format!("/work/src/{rel}");
     } else if is_shell {
         program = find(&[&format!("/usr/bin/{name}"), &format!("/bin/{name}")])
-            .ok_or_else(|| refuse(format!("{name} is not available inside the authorized runtime (no {name} in /usr/bin or /bin); Nexus does not fall back to host execution")))?;
+            .ok_or_else(|| not_found(name, "/usr/bin and /bin"))?;
         match args.first().map(String::as_str) {
             Some(f) if is_dash_c(f) => {
                 if args.len() < 2 {
@@ -209,18 +239,17 @@ pub(crate) fn resolve(pol: &CommandPolicy, a: &ProcessArgs) -> Result<ResolvedCo
                 program = find(&["/usr/bin/npx", "/usr/local/bin/npx"])
                     .or_else(|| pol.private_node_program("npx"))
                     .ok_or_else(|| {
-                        refuse(
-                            "tsc needs npx, which is not available inside the authorized runtime",
-                        )
+                        not_found("npx", "/usr/bin and /usr/local/bin (tsc needs npx)")
                     })?;
                 argv.insert(0, "tsc".to_owned());
                 argv.insert(0, "--no-install".to_owned());
                 env.insert("npm_config_offline".into(), "true".into());
             }
             "pip" | "pip3" => {
-                program = find(&["/usr/bin/python3", "/usr/local/bin/python3"]).ok_or_else(|| {
-                    refuse("pip needs python3, which is not available inside the authorized runtime")
-                })?;
+                program =
+                    find(&["/usr/bin/python3", "/usr/local/bin/python3"]).ok_or_else(|| {
+                        not_found("python3", "/usr/bin and /usr/local/bin (pip needs python3)")
+                    })?;
                 argv.insert(0, "pip".to_owned());
                 argv.insert(0, "-m".to_owned());
             }
@@ -230,7 +259,7 @@ pub(crate) fn resolve(pol: &CommandPolicy, a: &ProcessArgs) -> Result<ResolvedCo
                     "/usr/local/bin/python3",
                     "/usr/bin/python",
                 ])
-                .ok_or_else(|| refuse("python is not available inside the authorized runtime"))?;
+                .ok_or_else(|| not_found("python", "/usr/bin and /usr/local/bin"))?;
             }
             _ => {
                 program = find(&[
@@ -239,19 +268,26 @@ pub(crate) fn resolve(pol: &CommandPolicy, a: &ProcessArgs) -> Result<ResolvedCo
                     &format!("/bin/{name}"),
                 ])
                 .or_else(|| pol.private_node_program(name))
-                .ok_or_else(|| refuse(format!(
-                    "program '{name}' is not available inside the authorized runtime: no '{name}' in \
-                     /usr/local/bin, /usr/bin, /bin or the Rust toolchain. Install it on this machine, \
-                     install it into the project and name it by path (./node_modules/.bin/{name}), or \
-                     use an available program. Nexus does not fall back to host execution"
-                )))?;
+                .ok_or_else(|| {
+                    not_found(
+                        name,
+                        if pol.toolchain_has_cargo() {
+                            "/usr/local/bin, /usr/bin, /bin and the Rust toolchain"
+                        } else {
+                            "/usr/local/bin, /usr/bin and /bin"
+                        },
+                    )
+                })?;
             }
         }
         // Legacy dependency-installation classification: ONLY the install forms of known package
         // managers get the host-network install class. Every other command - known or not - is
         // offline unless the task's grant says Controlled Internet (handled outside this resolver).
         install = match name {
-            "cargo" => sub == "fetch",
+            "cargo" => matches!(
+                sub,
+                "fetch" | "add" | "update" | "generate-lockfile" | "vendor"
+            ),
             "npm" => matches!(sub, "ci" | "install" | "i" | "add" | "update" | "up"),
             "pnpm" => matches!(sub, "install" | "i" | "add" | "update" | "up"),
             "yarn" => matches!(sub, "install" | "add" | "up" | "upgrade") || sub.is_empty(),

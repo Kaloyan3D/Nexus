@@ -158,14 +158,54 @@ pub struct IntentRun {
     /// activity list.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub unresolved_failed_checks: u32,
+    /// M4.2: compound verification commands whose exit 0 attested nothing and that were never re-established.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub unresolved_unattested_checks: u32,
     /// repo-code: the operation waiting for an independent approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_approval: Option<PendingApproval>,
+    /// M4.5: the run's permission mode (`ask` | `auto-safe` | `full`); empty on runs that predate it (read as `ask`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub permission_mode: String,
+    /// M4.7: how the model's own reasoning items are replayed to the provider (`window` | `append-only` | `none`);
+    /// empty = the broker's default. Chosen per run; recorded so telemetry can attribute cache behaviour.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning_replay: String,
+    /// M4.7: how long the run's work took on a MONOTONIC clock (the guest wall clock can jump: found live, a
+    /// 155 s run whose created/updated stamps were 1,719 s apart). Absent on runs that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_elapsed_ms: Option<u64>,
+    /// M4.5: the operation waiting for the person's decision (a dependency installation or a deletion).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_permission: Option<PendingPermission>,
+    /// M4.5: the audit trail of permission decisions and mode changes, oldest first (bounded).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_events: Vec<PermissionEvent>,
+    /// M4.5: every dependency acquisition this run attempted, with the command, the mode and who decided.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<DependencyRecord>,
     /// repo-code (A6.1.1): what the RUNTIME verified, derived on read from the
     /// recorded tool receipts. Independent of the lifecycle `state` and of
     /// anything the model said. Absent on other run types.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coding_outcome: Option<CodingOutcome>,
+    /// M4.1: the user's request asked for the website to be looked at (decided by the broker from the
+    /// request text; never from model output).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub visual_requested: bool,
+    /// M4.1: why visual inspection could not be offered to this run: `no-browser` (the engine has no
+    /// browser, or the conversation predates the browser tool) | `model-cannot-see` (the model does not
+    /// take images).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_unavailable: Option<String>,
+    /// M4.1: the final answer claimed to have seen the page although no screenshot reached a model.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub visual_claim_unsupported: bool,
+    /// Statements in the final answer that contradict the run's receipts (files changed, checks run or
+    /// passing, what was seen), still present after the model was asked to restate. The stored result
+    /// carries Nexus's own record beneath the answer when this is non-empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answer_conflicts: Vec<String>,
     /// repo-code: commit the isolated working copy was made from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_commit: Option<String>,
@@ -407,6 +447,14 @@ pub struct ToolActivity {
     pub pre_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_sha256: Option<String>,
+    /// M4.5: the permission mode in force when the command was decided, its class and the decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_class: Option<String>,
+    /// `auto` | `auto-full-access` | `approved-once` | `denied` | `expired`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_decision: Option<String>,
     /// Process: exit code and `pass`/`fail`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i64>,
@@ -421,6 +469,160 @@ pub struct ToolActivity {
     /// scoped "allow previews on this port" action. Absent for every other tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_ports: Option<Vec<u16>>,
+    /// M4.1: for a `browser_inspect`, what Nexus itself measured and captured (never what the page said
+    /// about itself). Absent for every other tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<BrowserEvidence>,
+    /// A verification command that never examined the project (`invalid-invocation`: e.g. a checker handed
+    /// a pipe path it cannot open). The failure stays recorded and unresolved; only the controller's own
+    /// replacement can resolve it. `controller-recheck` marks that replacement. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_class: Option<String>,
+    /// On a `controller-recheck` that passed: the call index of the invalid-invocation check it resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolves_check: Option<u32>,
+    /// M4.2: the Core's own assessment of a verification command, kept apart from `verification` (the Kernel's
+    /// verdict on the exit status, never rewritten). `unverified` when the exit status cannot attest every check
+    /// in a compound command (`check; echo done`, `check || true`). Absent = the Kernel's verdict stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment: Option<String>,
+    /// M4.2: why the exit status is or is not attestable: `attested` | `unattested` | `unanalyzable`, with the
+    /// reason (`or-list`, `command-list`, `control-flow`, ...) after a colon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition: Option<String>,
+    /// What the exit status of an EXECUTED command means beyond its number: `executable-not-found` (exit 127: a
+    /// program named inside the command does not exist in this runtime) or `not-executable` (exit 126). It is
+    /// the process speaking, not a policy decision; absent for every other command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_class: Option<String>,
+    /// M4.2: on an `attested-recheck`: the call indices of the unattested checks this command re-established.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolves_hazards: Vec<u32>,
+    /// M4.7: on an attested pass: the call indices of earlier FAILED compound checks whose every check it passed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolves_failed: Vec<u32>,
+}
+
+impl ToolActivity {
+    /// The verdict consumers must use for a command: the Core's assessment when it made one, otherwise the
+    /// Kernel's verdict.
+    pub fn assessed(&self) -> Option<&str> {
+        self.assessment.as_deref().or(self.verification.as_deref())
+    }
+}
+
+/// One screenshot Nexus captured. `sha256` is the digest of the stored bytes, which are exactly the
+/// bytes a vision model is shown.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotRef {
+    pub name: String,
+    pub file: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub media_type: String,
+    pub viewport_w: u32,
+    pub viewport_h: u32,
+    pub taken_at: String,
+    /// Whether THIS image was put in front of the model: `delivered` | `not-delivered`.
+    pub delivery: String,
+}
+
+/// One interaction step and its outcome.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserStepResult {
+    #[serde(rename = "do")]
+    pub action: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// M4.1 browser evidence of one `browser_inspect` call (run-scoped, bounded, no page text beyond
+/// short, control-character-free fragments).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserEvidence {
+    /// `br-<run>-<call index>`; names the stored directory.
+    pub evidence_id: String,
+    pub run_id: String,
+    /// The address the model asked for (`project:index.html` or a loopback preview).
+    pub url: String,
+    pub viewport: String,
+    pub viewport_w: u32,
+    pub viewport_h: u32,
+    pub started_at: String,
+    /// A real browser process started.
+    pub launched: bool,
+    /// The page loaded (navigation produced a document).
+    pub loaded: bool,
+    pub http_status: Option<u16>,
+    pub title: Option<String>,
+    pub steps: Vec<BrowserStepResult>,
+    pub console_errors: u32,
+    pub console_warnings: u32,
+    pub page_errors: u32,
+    pub failed_requests: u32,
+    pub blocked_requests: u32,
+    pub horizontal_overflow: Option<bool>,
+    pub screenshots: Vec<ScreenshotRef>,
+    /// `delivered-to-vision-model` | `not-delivered-text-only-model` | `not-delivered-unknown-model` |
+    /// `not-delivered-too-large` | `no-screenshot`
+    pub image_delivery: String,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl BrowserEvidence {
+    /// A browser really ran, the page rendered, no step failed and the page raised no error.
+    pub fn runtime_passed(&self) -> bool {
+        self.launched
+            && self.loaded
+            && self.error.is_none()
+            && self.page_errors == 0
+            && self.steps.iter().all(|s| s.ok)
+    }
+    /// At least one screenshot was captured (an observation exists as bytes).
+    pub fn captured(&self) -> bool {
+        self.screenshots.iter().any(|s| !s.sha256.is_empty())
+    }
+    /// At least one screenshot was actually shown to a vision-capable model.
+    pub fn delivered(&self) -> bool {
+        self.image_delivery == "delivered-to-vision-model"
+            && self.screenshots.iter().any(|s| s.delivery == "delivered")
+    }
+}
+
+/// Four DIFFERENT kinds of evidence a coding run can have. They are never merged: a passing static
+/// check says nothing about the rendered page, a rendered page says nothing about whether anyone
+/// looked at it, and a model's description of what it saw is a judgement, not a measurement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceLevels {
+    /// Commands run in the sandbox (tests, parsers, linters, `node --check`): `none` | `passed` | `failed` | `unverified`.
+    pub static_checks: String,
+    /// A real browser loaded the page and ran the requested interactions: `none` | `passed` | `failed`
+    /// (failed = launch/load error, failed step or page error on the LAST inspection).
+    pub browser_runtime: String,
+    /// Pixels captured and put in front of a vision-capable model: `none` | `captured-not-seen` | `seen-by-model`.
+    pub visual_observation: String,
+    /// The model's own judgement of the appearance: `none` | `model-stated`. Never `verified`: Nexus
+    /// cannot check a description, it can only trace it to the screenshots in `visualBasis`.
+    pub visual_assessment: String,
+    /// Screenshot digests the assessment can be traced to (delivered images only).
+    pub visual_basis: Vec<String>,
+    /// The user asked for the website to be looked at.
+    pub visual_requested: bool,
+    /// `not-requested` | `met` | `unmet-no-browser` | `unmet-model-cannot-see` | `unmet-browser-failed` |
+    /// `unmet-not-attempted`
+    pub visual_requirement: String,
+    /// Browser inspections made / the last one made after the last edit.
+    pub browser_runs: u32,
+    pub inspected_after_last_edit: bool,
+    /// The final answer claimed to have seen the page although no screenshot reached a model.
+    pub unsupported_visual_claim: bool,
 }
 
 /// An operation waiting for an independent human approval (A5.6). The
@@ -448,6 +650,69 @@ pub struct PendingApproval {
     pub restrictions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at_ms: Option<u64>,
+}
+
+/// M4.5: one operation that needs the person's decision before it runs. Every field is the broker's own
+/// record of the exact operation (never model text); `digest` binds a decision to it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPermission {
+    pub request_id: String,
+    /// `dependency-install` | `delete` | `bulk-delete`
+    pub kind: String,
+    /// sha256 over the run, request id, kind and the exact program, arguments and directory that will run.
+    pub digest: String,
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: String,
+    /// For installs: `{manager, verb, packages:[{name, constraint}], options, fromManifest}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<serde_json::Value>,
+    /// What the request was started for (the run's request text, bounded).
+    pub purpose: String,
+    /// The permission mode in force when the request was made.
+    pub mode: String,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+    /// Set by the person's decision (`approve` | `deny`); consumed by the waiting run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+}
+
+/// M4.5: one entry of a run's permission audit trail.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionEvent {
+    pub at_ms: u64,
+    /// `mode-set` | `mode-upgrade-confirmed` | `mode-downgrade` | `requested` | `approved` | `denied` |
+    /// `expired` | `cancelled` | `auto` | `revoked-unused`
+    pub kind: String,
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub digest: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+/// M4.5: the record of one dependency acquisition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyRecord {
+    pub at_ms: u64,
+    pub manager: String,
+    pub verb: String,
+    pub packages: Vec<String>,
+    /// The exact command (program and arguments).
+    pub command: String,
+    pub mode: String,
+    /// `approved-once` | `auto-full-access` | `denied` | `expired` | `cancelled`
+    pub decision: String,
+    /// `installed` | `failed` | `not-run`
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
 }
 
 /// What the runtime actually verified about a coding run (A6.1.1). Derived
@@ -500,6 +765,23 @@ pub struct CodingOutcome {
     /// to the project: what it verified is then not the project as it is. 0 = none.
     #[serde(default)]
     pub last_check_unsaved_files: u32,
+    /// M4.1: static / browser-runtime / visual-observation / visual-assessment evidence, kept apart.
+    #[serde(default)]
+    pub evidence: EvidenceLevels,
+    /// Invalid-invocation checks (see `ToolActivity::check_class`) still unresolved / resolved by the
+    /// controller's own replacement. Unresolved ones are ALSO counted in `checks_failed_unresolved`
+    /// (fail closed); they are listed apart so they are not mistaken for project failures.
+    #[serde(default)]
+    pub checks_invalid_unresolved: u32,
+    #[serde(default)]
+    pub checks_invalid_resolved: u32,
+    /// M4.2: verification commands whose exit 0 could not attest every check in them (compound commands) and
+    /// that no attested command has re-established yet. A suspected masked failure: blocks automatic writeback
+    /// under EVERY policy (including "apply unverified"). Counted apart from real failures.
+    #[serde(default)]
+    pub checks_unattested_unresolved: u32,
+    #[serde(default)]
+    pub checks_unattested_resolved: u32,
 }
 
 /// Derive the verified coding outcome of a `repo-code` run from its receipts.
@@ -511,6 +793,11 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
     let mut o = CodingOutcome::default();
     let mut last_test: Option<(u32, bool, Option<i64>, u32)> = None; // (index, passed, exit, unsaved files)
     let mut failed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut invalid_keys: std::collections::BTreeMap<u32, String> =
+        std::collections::BTreeMap::new();
+    let mut hazards: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    let mut failed_by_index: std::collections::BTreeMap<u32, String> =
+        std::collections::BTreeMap::new();
     let mut last_applied_edit: Option<u32> = None;
     let mut cmd_blocked = false;
     let mut mut_proposed = false;
@@ -562,11 +849,39 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
             }
         } else {
             if executed {
-                match a.verification.as_deref() {
+                // M4.2: a compound command whose exit 0 attested nothing is an open hazard until an attested
+                // command re-establishes its checks
+                if matches!(
+                    a.check_class.as_deref(),
+                    Some("unattested-composition" | "filter-status")
+                ) {
+                    hazards.insert(a.index);
+                }
+                match a.assessed() {
                     Some("pass") => {
                         o.tests_executed += 1;
                         last_test =
                             Some((a.index, true, a.exit_code, a.unsaved_files.unwrap_or(0)));
+                        for i in &a.resolves_hazards {
+                            if hazards.remove(i) {
+                                o.checks_unattested_resolved += 1;
+                            }
+                        }
+                        // M4.7: earlier failed compound checks this attested pass re-established
+                        for i in &a.resolves_failed {
+                            if let Some(k) = failed_by_index.remove(i) {
+                                failed.remove(&k);
+                            }
+                        }
+                        // the controller's own replacement of an invalid-invocation check resolves it
+                        if let (Some("controller-recheck"), Some(i)) =
+                            (a.check_class.as_deref(), a.resolves_check)
+                        {
+                            if let Some(k) = invalid_keys.remove(&i) {
+                                failed.remove(&k);
+                                o.checks_invalid_resolved += 1;
+                            }
+                        }
                         failed.remove(
                             &a.args_digest
                                 .clone()
@@ -577,11 +892,15 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
                         o.tests_executed += 1;
                         last_test =
                             Some((a.index, false, a.exit_code, a.unsaved_files.unwrap_or(0)));
-                        failed.insert(
-                            a.args_digest
-                                .clone()
-                                .unwrap_or_else(|| a.args_summary.clone()),
-                        );
+                        let key = a
+                            .args_digest
+                            .clone()
+                            .unwrap_or_else(|| a.args_summary.clone());
+                        if a.check_class.as_deref() == Some("invalid-invocation") {
+                            invalid_keys.insert(a.index, key.clone());
+                        }
+                        failed_by_index.insert(a.index, key.clone());
+                        failed.insert(key);
                     }
                     // a pipeline whose status proves nothing: not a pass, not a failure
                     Some("unverified") => o.checks_unverified += 1,
@@ -601,6 +920,11 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
     o.last_check_unsaved_files = last_test.map(|t| t.3).unwrap_or(0);
     // the run's own count covers failures that left the bounded activity list
     o.checks_failed_unresolved = (failed.len() as u32).max(run.unresolved_failed_checks);
+    o.checks_unattested_unresolved = (hazards.len() as u32).max(run.unresolved_unattested_checks);
+    o.checks_invalid_unresolved = invalid_keys
+        .values()
+        .filter(|k| failed.contains(*k))
+        .count() as u32;
     let run_uncertain =
         run.state == "uncertain" || run.error_code.as_deref() == Some("tool-outcome-uncertain");
     let uncertain = run_uncertain || o.uncertain_operations > 0;
@@ -653,7 +977,121 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
         "not-yet-verified"
     }
     .to_owned();
+    // M4.2: an unresolved hazard (a suspected masked failure) can never leave the run "verified"; a real failure or
+    // an uncertain outcome stays what it is
+    if o.checks_unattested_unresolved > 0
+        && !matches!(o.verification.as_str(), "verified-failed" | "uncertain")
+    {
+        o.verification = "unattested-checks".into();
+    }
+    o.evidence = derive_evidence(run, &o, last_applied_edit, last_test.map(|t| t.1));
     Some(o)
+}
+
+/// The four evidence levels, from receipts alone (see [`EvidenceLevels`]).
+fn derive_evidence(
+    run: &IntentRun,
+    o: &CodingOutcome,
+    last_applied_edit: Option<u32>,
+    last_test_passed: Option<bool>,
+) -> EvidenceLevels {
+    let browsers: Vec<(u32, &BrowserEvidence)> = run
+        .tool_activity
+        .iter()
+        .filter_map(|a| a.browser.as_ref().map(|b| (a.index, b)))
+        .collect();
+    let static_checks = if o.tests_executed == 0 && o.checks_unverified == 0 {
+        "none"
+    } else if o.checks_failed_unresolved > 0 || last_test_passed == Some(false) {
+        "failed"
+    } else if last_test_passed == Some(true) {
+        "passed"
+    } else {
+        "unverified"
+    };
+    let last = browsers.last().map(|(_, b)| *b);
+    let browser_runtime = match last {
+        None => "none",
+        Some(b) if b.runtime_passed() => "passed",
+        Some(_) => "failed",
+    };
+    let captured = browsers.iter().any(|(_, b)| b.captured());
+    let delivered_all: Vec<&ScreenshotRef> = browsers
+        .iter()
+        .filter(|(_, b)| b.delivered())
+        .flat_map(|(_, b)| b.screenshots.iter().filter(|s| s.delivery == "delivered"))
+        .collect();
+    let seen = !delivered_all.is_empty();
+    let visual_observation = if seen {
+        "seen-by-model"
+    } else if captured {
+        "captured-not-seen"
+    } else {
+        "none"
+    };
+    let last_browser_index = browsers.last().map(|(i, _)| *i);
+    let inspected_after_last_edit = match (last_browser_index, last_applied_edit) {
+        (Some(_), None) => true,
+        (Some(bi), Some(ei)) => bi > ei,
+        _ => false,
+    };
+    // the last DELIVERED inspection must also postdate the last edit for the result to count as seen
+    let seen_after_edit = match (
+        browsers
+            .iter()
+            .rev()
+            .find(|(_, b)| b.delivered())
+            .map(|(i, _)| *i),
+        last_applied_edit,
+    ) {
+        (Some(_), None) => true,
+        (Some(bi), Some(ei)) => bi > ei,
+        _ => false,
+    };
+    let visual_basis: Vec<String> = delivered_all
+        .iter()
+        .rev()
+        .take(8)
+        .rev()
+        .map(|s| s.sha256.clone())
+        .collect();
+    let completed = run.terminal && run.state == "completed";
+    let visual_requirement = if !run.visual_requested {
+        "not-requested"
+    } else if seen && seen_after_edit {
+        "met"
+    } else if seen {
+        "unmet-stale-after-edit"
+    } else if run.visual_unavailable.as_deref() == Some("no-browser") {
+        "unmet-no-browser"
+    } else if run.visual_unavailable.as_deref() == Some("model-cannot-see")
+        || browsers
+            .iter()
+            .any(|(_, b)| b.image_delivery.starts_with("not-delivered-") && b.captured())
+    {
+        "unmet-model-cannot-see"
+    } else if !browsers.is_empty() {
+        "unmet-browser-failed"
+    } else {
+        "unmet-not-attempted"
+    };
+    EvidenceLevels {
+        static_checks: static_checks.into(),
+        browser_runtime: browser_runtime.into(),
+        visual_observation: visual_observation.into(),
+        visual_assessment: if seen && completed {
+            "model-stated"
+        } else {
+            "none"
+        }
+        .into(),
+        visual_basis,
+        visual_requested: run.visual_requested,
+        visual_requirement: visual_requirement.into(),
+        browser_runs: browsers.len() as u32,
+        inspected_after_last_edit,
+        unsupported_visual_claim: run.visual_claim_unsupported,
+    }
 }
 
 /// What a `repo-code` run is given per MODEL CALL. Only the output ceiling of one provider request lives
@@ -971,6 +1409,24 @@ pub fn submit(socket: &Path, intent: &NexusIntentV1) -> Result<SubmitReply, Clie
     decode(v)
 }
 
+/// As [`submit`], starting the run in the given permission mode (`ask` | `auto-safe` | `full`).
+pub fn submit_with_permission(
+    socket: &Path,
+    intent: &NexusIntentV1,
+    mode: &str,
+) -> Result<SubmitReply, ClientError> {
+    intent
+        .validate()
+        .map_err(|e| ClientError::usage(format!("{}: {}", e.code, e.message)))?;
+    let v = call(
+        socket,
+        "intent-submit",
+        serde_json::json!({ "intent": intent, "permissionMode": mode }),
+        60_000,
+    )?;
+    decode(v)
+}
+
 pub fn status(socket: &Path, run_id: &str) -> Result<IntentRun, ClientError> {
     let v = call(
         socket,
@@ -1026,6 +1482,72 @@ pub fn cancel(socket: &Path, run_id: &str) -> Result<CancelReply, ClientError> {
         serde_json::json!({ "runId": run_id }),
         10_000,
     )?)
+}
+
+/// M4.6: the execution analytics of one run (`export` = the versioned benchmark document).
+pub fn run_analytics(
+    socket: &Path,
+    run_id: &str,
+    export: bool,
+    host_platform: Option<&str>,
+    app_version: Option<&str>,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        if export {
+            "intent-analytics-export"
+        } else {
+            "intent-analytics"
+        },
+        serde_json::json!({ "runId": run_id, "hostPlatform": host_platform, "appVersion": app_version }),
+        20_000,
+    )
+}
+
+/// M4.5: record the person's decision on the pending permission request.
+pub fn permission_decide(
+    socket: &Path,
+    run_id: &str,
+    request_id: &str,
+    digest: &str,
+    decision: &str,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "intent-permission-decide",
+        serde_json::json!({ "runId": run_id, "requestId": request_id, "digest": digest, "decision": decision }),
+        10_000,
+    )
+}
+
+/// M4.5: change a run's permission mode. A move to a more autonomous mode needs the single-use token that
+/// `permission_prepare_upgrade` returned (the native confirmation that precedes it is the caller's job).
+pub fn permission_set_mode(
+    socket: &Path,
+    run_id: &str,
+    mode: &str,
+    upgrade_token: Option<&str>,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "intent-permission-mode",
+        serde_json::json!({ "runId": run_id, "mode": mode, "upgradeToken": upgrade_token }),
+        10_000,
+    )
+}
+
+/// M4.5: ask for the exact text and single-use token of a permission upgrade.
+pub fn permission_prepare_upgrade(
+    socket: &Path,
+    run_id: &str,
+    mode: &str,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "intent-permission-prepare",
+        serde_json::json!({ "runId": run_id, "mode": mode }),
+        10_000,
+    )
 }
 
 /// Workspaces this client may select for `repo-inspect`.
@@ -1133,6 +1655,30 @@ pub fn activity_page(
         socket,
         "intent-activity",
         serde_json::json!({ "runId": run_id, "offset": offset, "limit": limit }),
+        15_000,
+    )?)
+}
+
+/// One stored browser screenshot (M4.1), exactly the bytes a vision model was shown.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserArtifact {
+    pub media_type: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub data_b64: String,
+}
+
+pub fn browser_artifact(
+    socket: &Path,
+    run_id: &str,
+    evidence_id: &str,
+    file: &str,
+) -> Result<BrowserArtifact, ClientError> {
+    decode(call(
+        socket,
+        "intent-browser-artifact",
+        serde_json::json!({ "runId": run_id, "evidenceId": evidence_id, "file": file }),
         15_000,
     )?)
 }
@@ -1712,9 +2258,13 @@ pub struct ThreadSend<'a> {
     pub model: Option<&'a str>,
     /// Optional route identity: exact catalog `routeId`.
     pub route: Option<&'a str>,
+    /// M4.5: permission mode the run starts in (`ask` | `auto-safe` | `full`); absent = `ask`.
+    pub permission_mode: Option<&'a str>,
     /// Optional Engineering Mode id (e.g. `engineering-v2-adaptive`); needs an explicit model
     /// selection and is bound to the conversation. Absent = the default mode.
     pub mode_id: Option<&'a str>,
+    /// M4.7: optional reasoning replay policy for the run (`window` | `append-only` | `none`).
+    pub reasoning_replay: Option<&'a str>,
 }
 
 pub fn thread_send(socket: &Path, s: &ThreadSend<'_>) -> Result<serde_json::Value, ClientError> {
@@ -1727,6 +2277,8 @@ pub fn thread_send(socket: &Path, s: &ThreadSend<'_>) -> Result<serde_json::Valu
             "workspace": if s.workspace.is_empty() { "continue" } else { s.workspace },
             "idempotencyKey": s.idempotency_key,
             "model": s.model, "route": s.route, "modeId": s.mode_id,
+            "permissionMode": s.permission_mode,
+            "reasoningReplay": s.reasoning_replay,
         }),
         90_000,
     )

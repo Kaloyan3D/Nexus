@@ -41,6 +41,7 @@ pub mod mutate;
 pub mod netpolicy;
 pub mod observe;
 pub mod offline;
+pub mod permission;
 pub mod process;
 pub mod protect;
 pub mod read;

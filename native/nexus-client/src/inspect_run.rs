@@ -311,6 +311,16 @@ pub struct InspectTurn<'a> {
     pub grant: &'a serde_json::Value,
 }
 
+/// Everything the provider reported about one response's usage, normalized, with the raw numeric fields beside it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UsageDetail {
+    pub usage: nexus_model::Usage,
+    /// The raw numeric `usage` fields as the provider sent them (canonical JSON).
+    pub raw: Option<String>,
+    /// The model the provider says served the response.
+    pub actual_model: Option<String>,
+}
+
 /// What one provider response contained (all of it untrusted data).
 #[derive(Debug, Clone)]
 pub struct TurnOutput {
@@ -322,6 +332,8 @@ pub struct TurnOutput {
     pub reasoning: Vec<String>,
     pub tool_calls: Vec<AssembledToolCall>,
     pub usage: Option<(u64, u64)>,
+    /// M4.6: the full usage the provider reported (cache, reasoning, cost, raw fields) and the serving model.
+    pub usage_detail: Option<UsageDetail>,
     pub response_id: Option<String>,
     pub finish_reason: String,
     pub http_status: Option<u16>,
@@ -395,6 +407,7 @@ pub fn run_inspect_turn(
         | ToolProfile::RepoCodeMuseSignalsV1
         | ToolProfile::RepoCodeJobsV1
         | ToolProfile::RepoCodeAcceptanceV1
+        | ToolProfile::RepoCodeAdaptiveBrowserV1
         | ToolProfile::RepoCodeAdaptiveJobsV1 => nexus_kernel::SCOPE_REPO_CODE,
     };
     if grant.scope != want_scope {
@@ -559,6 +572,8 @@ pub fn run_inspect_turn(
             rec.meta.finish_reason = report.finish_reason.clone();
             let mut response_id: Option<String> = None;
             let mut usage: Option<(u64, u64)> = None;
+            let mut detail = UsageDetail::default();
+            let mut saw_detail = false;
             let mut asm = StreamAssembler::new(
                 &req.attempt_id,
                 &request_digest,
@@ -570,7 +585,16 @@ pub fn run_inspect_turn(
             for ev in &report.events {
                 match ev {
                     ModelEvent::ResponseId(id) => response_id = Some(id.clone()),
-                    ModelEvent::Usage(u) => usage = Some((u.input_tokens, u.output_tokens)),
+                    ModelEvent::Usage(u) => {
+                        usage = Some((u.input_tokens, u.output_tokens));
+                        detail.usage = *u;
+                        saw_detail = true;
+                    }
+                    ModelEvent::UsageRaw(r) => detail.raw = Some(r.clone()),
+                    ModelEvent::ResponseModel(m) => {
+                        detail.actual_model = Some(m.clone());
+                        saw_detail = true;
+                    }
                     _ => {}
                 }
                 if let Err(e) = asm.push(ev.clone()) {
@@ -615,6 +639,7 @@ pub fn run_inspect_turn(
                     reasoning: Vec::new(),
                     tool_calls: Vec::new(),
                     usage,
+                    usage_detail: saw_detail.then(|| detail.clone()),
                     response_id,
                     finish_reason: "incomplete:max_output_tokens".to_owned(),
                     http_status: report.http_status,
@@ -651,6 +676,7 @@ pub fn run_inspect_turn(
                         reasoning: t.reasoning_items,
                         tool_calls: t.tool_calls,
                         usage,
+                        usage_detail: saw_detail.then(|| detail.clone()),
                         response_id,
                         finish_reason: t.finish_reason,
                         http_status: report.http_status,
