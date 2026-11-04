@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-thread-create"
+description = "Enables the thread_create command without any pre-configured scope."
+commands.allow = ["thread_create"]
+
+[[permission]]
+identifier = "deny-thread-create"
+description = "Denies the thread_create command without any pre-configured scope."
+commands.deny = ["thread_create"]

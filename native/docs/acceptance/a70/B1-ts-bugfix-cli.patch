@@ -1,0 +1,13 @@
+diff --git a/src/encoding.ts b/src/encoding.ts
+index a53dc2f..0708453 100644
+--- a/src/encoding.ts
++++ b/src/encoding.ts
+@@ -163,7 +163,7 @@ export function decodeQueryKey(text: string): string {
+  * @returns decoded string
+  */
+ export function decodeQueryValue(text: string): string {
+-  return decode(text);
++  return decode(text.replace(PLUS_RE, " "));
+ }
+ 
+ /**

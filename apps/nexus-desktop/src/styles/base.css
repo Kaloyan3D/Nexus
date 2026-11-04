@@ -1,0 +1,75 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+body {
+  background: var(--nv-bg);
+  color: var(--nv-text);
+  font-family: var(--nv-font-sans);
+  font-size: var(--nv-text-base);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+button {
+  cursor: pointer;
+}
+button:disabled,
+[aria-disabled="true"] {
+  cursor: not-allowed;
+}
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+code,
+pre,
+.nv-mono {
+  font-family: var(--nv-font-mono);
+}
+:focus {
+  outline: none;
+}
+:focus-visible {
+  outline: 2px solid var(--nv-purple);
+  outline-offset: 1px;
+}
+::selection {
+  background: var(--nv-purple-tint-strong);
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--nv-border) transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--nv-border);
+  border-radius: 8px;
+}
+.nv-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

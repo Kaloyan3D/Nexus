@@ -1,0 +1,25 @@
+[Unit]
+Description=Nexus engine bridge (vsock), supervising the Kernel and broker
+After=nexus-state.service
+Requires=nexus-state.service
+
+[Service]
+User=nexus
+Group=nexus
+# The engine's sandbox builds cgroups under its own unit: the cgroup subtree must be delegated.
+Delegate=yes
+Environment=HOME=/home/nexus
+Environment=NEXUS_HOME=/home/nexus/.nexus
+Environment=NEXUS_BIN_DIR=/opt/nexus/bin
+Environment=NEXUS_REPO_ROOT=/opt/nexus/repo
+Environment=NEXUS_MAC_ROOT=/home/nexus/NexusMac
+# M4.1: the broker offers browser_inspect only where this names the helper (headless Chromium on demand)
+Environment=NEXUS_BROWSE_BIN=/opt/nexus/bin/nexus-browse.cjs
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+ExecStart=/opt/nexus/bin/nexus-bridge --vsock 1024
+Restart=always
+RestartSec=1
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

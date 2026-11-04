@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-model-catalog"
+description = "Enables the model_catalog command without any pre-configured scope."
+commands.allow = ["model_catalog"]
+
+[[permission]]
+identifier = "deny-model-catalog"
+description = "Denies the model_catalog command without any pre-configured scope."
+commands.deny = ["model_catalog"]

@@ -1,0 +1,27 @@
+History
+
+Every conversation, restored from durable records, including after a restart. Open one to continue it.
+
+Project
+Search conversations
+Do you know anything about findings F1 or F2 from an earlier review of this pro…
+East India game
+1 run
+Completed
+2m ago
+I don't have any knowledge of findings F1 or F2 from an earlier review of this project.
+Read ARCHITECTURE.md, then create the file NOTES_A71.md in the project root wit…
+East India game
+2 runs
+Completed
+2m ago
+Task complete.
+Review this repository: this is a read-only task, do not change any files. Look…
+East India game
+5 runs
+10 findings
+Completed
+7m ago
+F1 fix summary — `mortgage` out-of-turn money:
+
+[rows of the user's other projects omitted from this evidence]

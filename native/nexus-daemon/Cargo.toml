@@ -1,0 +1,44 @@
+[package]
+name = "nexus-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "nexusd: persistent Nexus Native Kernel daemon with versioned local IPC (A1.3 shadow-only)"
+license = "MIT"
+
+[[bin]]
+name = "nexusd"
+path = "src/main.rs"
+
+[[bin]]
+name = "nexus-witness"
+path = "src/bin/nexus-witness.rs"
+
+[[bin]]
+name = "nexus-approver"
+path = "src/bin/nexus-approver.rs"
+
+[dependencies]
+nexus-contracts = { workspace = true }
+nexus-store = { workspace = true }
+nexus-kernel = { workspace = true }
+nexus-tools = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hex = { workspace = true }
+fs2 = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+nexus-contracts = { workspace = true }
+nexus-model = { workspace = true }
+nexus-client = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+nexus-tools = { workspace = true, features = ["crash-injection"] }

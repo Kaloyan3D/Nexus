@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nexus A6.1.2 mockups</title>
+<style>
+:root{--bg:#09090b;--s1:#111114;--s2:#17171c;--bd:#26262d;--tx:#e7e7ea;--mu:#9a9aa6;--pu:#8b5cf6;--pu2:#2a2147;--ok:#3ecf8e;--wa:#f5a524;--er:#f4606c}
+*{box-sizing:border-box}body{margin:0;background:#050506;color:var(--tx);font:14px/1.45 Inter,system-ui,sans-serif;padding:24px}
+h1{font-size:18px;margin:0 0 4px}p.lead{color:var(--mu);margin:0 0 24px;max-width:900px}
+.cap{margin:28px 0 8px;font-weight:600}.cap small{color:var(--mu);font-weight:400}
+.frame{width:1280px;height:720px;background:var(--bg);border:1px solid var(--bd);border-radius:10px;display:grid;grid-template-columns:56px 1fr;overflow:hidden;position:relative}
+.rail{background:var(--s1);border-right:1px solid var(--bd);padding:12px 0;display:flex;flex-direction:column;align-items:center;gap:14px;color:var(--mu);font-size:11px}
+.rail .logo{color:var(--pu);font-size:20px}.rail .i{width:36px;height:36px;border-radius:8px;display:grid;place-items:center;font-size:15px}.rail .i.on{background:var(--pu2);color:var(--pu)}
+.rail .sp{flex:1}
+.main{display:flex;flex-direction:column;min-width:0}
+.top{height:44px;border-bottom:1px solid var(--bd);display:flex;align-items:center;padding:0 16px;gap:12px}
+.search{flex:1;max-width:420px;background:var(--s1);border:1px solid var(--bd);border-radius:8px;padding:6px 10px;color:var(--mu);font-size:13px}
+.pill{margin-left:auto;border:1px solid var(--bd);border-radius:999px;padding:3px 10px;font-size:12px;color:var(--mu)}.pill i{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok);margin-right:6px}
+.col{width:900px;max-width:100%;margin:0 auto;padding:28px 0;display:flex;flex-direction:column;gap:14px}
+.hero{text-align:center;font-size:22px;font-weight:600;margin:22px 0 4px}
+.comp{background:var(--s1);border:1px solid #3a3066;border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.comp .ta{color:var(--mu);min-height:46px}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.seg{display:inline-flex;border:1px solid var(--bd);border-radius:8px;overflow:hidden}.seg span{padding:5px 12px;font-size:13px;color:var(--mu)}.seg span.on{background:var(--pu2);color:#d7c9ff}
+.chip{border:1px solid var(--bd);border-radius:7px;padding:4px 9px;font-size:12.5px;color:var(--mu);background:var(--s2)}
+.btn{margin-left:auto;background:var(--pu);color:#fff;border-radius:8px;padding:7px 16px;font-weight:600;font-size:13px}.btn.off{background:#2a2a33;color:#777}
+.note{font-size:12.5px;color:var(--mu)}.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:12px}
+.recent{display:flex;flex-direction:column;border:1px solid var(--bd);border-radius:10px;overflow:hidden}
+.recent div{display:flex;gap:10px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--bd);font-size:13px}.recent div:last-child{border:0}
+.badge{font-size:10.5px;letter-spacing:.04em;border:1px solid var(--bd);border-radius:5px;padding:1px 6px;color:#c9b8ff;background:var(--pu2)}
+.badge.fx{color:var(--wa);background:#2a2110;border-color:#4a3a14}
+.tag{font-size:12px;border-radius:6px;padding:2px 8px;border:1px solid}.t-ok{color:var(--ok);border-color:#1d5a40;background:#0e2a1f}.t-wa{color:var(--wa);border-color:#5a4210;background:#2a2110}.t-er{color:var(--er);border-color:#5a2128;background:#2a1014}.t-nu{color:var(--mu);border-color:var(--bd)}
+.head{display:flex;align-items:flex-start;gap:12px}.head h2{margin:0;font-size:18px}.head .x{margin-left:auto;display:flex;gap:8px;align-items:center}
+.ghost{border:1px solid var(--bd);border-radius:8px;padding:5px 12px;font-size:13px;color:var(--tx)}
+.prog{border:1px solid var(--bd);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;background:var(--s1)}
+.banner{border:1px solid #5a4210;background:#241d0d;border-radius:10px;padding:8px 12px;display:flex;align-items:center;gap:12px}
+.banner b{color:var(--wa)}.banner.big{flex-direction:column;align-items:stretch;gap:8px}
+pre{margin:0;background:#0c0c0f;border:1px solid var(--bd);border-radius:8px;padding:8px 10px;font:12px/1.5 "JetBrains Mono",monospace}.add{color:var(--ok)}.del{color:var(--er)}
+.card{border:1px solid var(--bd);border-radius:12px;padding:16px;background:var(--s1);display:flex;flex-direction:column;gap:10px}
+.card.ok{border-color:#1d5a40}.card.wa{border-color:#5a4210}.card .big{font-size:20px;font-weight:600}
+.panel{position:absolute;right:0;top:44px;bottom:0;width:420px;background:var(--s1);border-left:1px solid var(--bd);box-shadow:-12px 0 30px #0008;padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.tabs{display:flex;gap:16px;border-bottom:1px solid var(--bd);padding-bottom:6px;font-size:13px;color:var(--mu)}.tabs .on{color:var(--tx);border-bottom:2px solid var(--pu);padding-bottom:5px}
+.claim{border-left:3px solid var(--bd);padding:2px 12px;color:var(--mu);font-style:italic}
+.hl{outline:2px dashed #5b46a8;outline-offset:3px;border-radius:10px}
+</style></head><body>
+<h1>Nexus Desktop — focus-first mockups (A6.1.2 proposal)</h1>
+<p class="lead">Static wireframes at laptop size (1280×720). The rail shows icons only at this width; at ≥1440 px it is labelled. These are design proposals for review, not the implemented UI. Fixture data is marked FIXTURE. No Approve control exists anywhere in the Desktop.</p>
+
+<div class="cap">1 · Idle <small>— one composer, one primary button, contextual controls only, recents as a short list; no empty inspector</small></div>
+<div class="frame"><div class="rail"><div class="logo">◆</div><div class="i on">⌂</div><div class="i">▤</div><div class="i">⟲</div><div class="i">◫</div><div class="i">⛨</div><div class="sp"></div><div class="i">⚙</div><div class="i" title="Advanced">▸</div></div>
+<div class="main"><div class="top"><div class="search">⌕ Search or jump… Ctrl K</div><div class="pill"><i></i>Runtime ready ▾</div></div>
+<div class="col"><div class="hero">What should Nexus work on?</div>
+<div class="comp"><div class="ta">Describe the task…</div>
+<div class="row"><div class="seg"><span>Ask</span><span>Inspect</span><span class="on">Code in copy</span></div><span class="chip">▢ synthetic-test ▾</span><span class="chip">model ▾</span></div>
+<div class="row note"><span>12 turns · 5 edits · 5 commands · 128 KiB</span><span class="chip">limits ▾</span></div>
+<div class="row note"><span>☐ I understand selected source text and command output go to the provider, and every edit and command needs a separate approval. <u>more</u></span></div>
+<div class="row"><span class="note mono">Prompt: 0 bytes · sha256 —</span><span class="btn off">Start coding</span></div></div>
+<div class="note" style="margin-top:6px">Recent</div>
+<div class="recent"><div><span class="badge">CODE</span><span style="flex:1">The test in tests/add.rs fails. Work efficiently…</span><span class="tag t-nu">Model completed</span><span class="tag t-ok">Tests passed · exit 0</span></div>
+<div><span class="badge">CODE</span><span class="badge fx">FIXTURE</span><span style="flex:1">Fix the failing add test [liar]</span><span class="tag t-nu">Model completed</span><span class="tag t-wa">Blocked · approval expired · not executed</span></div>
+<div><span class="badge">ASK</span><span style="flex:1">Reply with exactly: NEXUS_NATIVE_OK</span><span class="tag t-er">Failed</span></div></div>
+<div class="note" style="text-align:right">View all in History →</div></div></div></div>
+
+<div class="cap">2 · Running <small>— composer collapses into the task header; progress is plain language; details on demand</small></div>
+<div class="frame"><div class="rail"><div class="logo">◆</div><div class="i on">⌂</div><div class="i">▤</div><div class="i">⟲</div><div class="i">◫</div><div class="i">⛨</div><div class="sp"></div><div class="i">⚙</div><div class="i">▸</div></div>
+<div class="main"><div class="top"><div class="search">⌕ Search or jump… Ctrl K</div><div class="pill"><i></i>Runtime ready ▾</div></div>
+<div class="col"><div class="head"><div><span class="badge">CODE</span> <span class="note">synthetic-test · opencode-go-native / muse-spark-1.3-contributor</span><h2>The test in tests/add.rs fails. Work efficiently, list the root once…</h2></div><div class="x"><span class="tag t-nu">◉ Running 0:48</span><span class="ghost">Cancel</span></div></div>
+<div class="prog"><div><b>Now:</b> reading tests/add.rs …<span class="note" style="float:right">turn 3 of 12</span></div><div class="note">✓ Listed project root &nbsp; ✓ Read src/lib.rs &nbsp; ◦ Reading tests/add.rs</div><div class="note">2 reads · 0 edits proposed · 0 commands proposed</div></div>
+<div class="note">▸ Details &nbsp; Timeline · Transcript · Tool calls · Model I/O</div></div></div></div>
+
+<div class="cap">3 · Pending approval <small>— compact banner (≈56 px), expandable; the proposal is labelled as the model's, not the daemon's request</small></div>
+<div class="frame"><div class="rail"><div class="logo">◆</div><div class="i on">⌂</div><div class="i">▤</div><div class="i">⟲</div><div class="i">◫</div><div class="i">⛨</div><div class="sp"></div><div class="i">⚙</div><div class="i">▸</div></div>
+<div class="main"><div class="top"><div class="search">⌕ Search or jump… Ctrl K</div><div class="pill"><i></i>Runtime ready ▾</div></div>
+<div class="col"><div class="head"><div><span class="badge">CODE</span> <span class="note">synthetic-test</span><h2>The test in tests/add.rs fails. Work efficiently…</h2></div><div class="x"><span class="tag t-wa">⏸ Awaiting approval</span><span class="ghost">Cancel</span></div></div>
+<div class="banner"><b>⏸ Approval needed</b><span>Edit <span class="mono">src/lib.rs</span> · expires in 4:32</span><span class="note" style="flex:1">Review in the separate approver: <span class="mono">nexus-approver … review 9fe67e11…</span></span><span class="ghost">Copy id</span><span class="ghost">Details ▾</span></div>
+<div class="note" style="margin-top:6px">…expanded:</div>
+<div class="banner big hl"><div><b>⏸ Approval needed</b> · Edit <span class="mono">src/lib.rs</span> · expires in 4:32 &nbsp;<span class="ghost">Copy id</span> <span class="ghost">Details ▴</span></div>
+<div class="note"><b>Model proposal — not the authoritative request.</b> The exact request is derived by the daemon and shown only to the approver. Inspect it in <span class="mono">nexus-approver review</span> before approving.</div>
+<pre><span class="del">- a - b</span>
+<span class="add">+ a + b</span></pre>
+<div class="note">Restrictions: throw-away working copy only · path confined · nothing committed, pushed or merged · request digest 95b876f1…</div>
+<div class="note">There is no Approve or Deny button in this application.</div></div></div></div></div>
+
+<div class="cap">4a · Completed, verified <small>— verified outcome first; the model's summary is a labelled claim; diff/test output in the side panel</small></div>
+<div class="frame"><div class="rail"><div class="logo">◆</div><div class="i on">⌂</div><div class="i">▤</div><div class="i">⟲</div><div class="i">◫</div><div class="i">⛨</div><div class="sp"></div><div class="i">⚙</div><div class="i">▸</div></div>
+<div class="main"><div class="top"><div class="search">⌕ Search or jump… Ctrl K</div><div class="pill"><i></i>Runtime ready ▾</div></div>
+<div class="col"><div class="head"><div><span class="badge">CODE</span> <span class="note">synthetic-test · reopened from History · 2 d ago</span><h2>The test in tests/add.rs fails. Work efficiently…</h2></div><div class="x"><span class="tag t-nu">Model completed</span></div></div>
+<div class="card ok"><div class="big" style="color:var(--ok)">✓ Tests passed · exit 0 &nbsp;<span class="tag t-ok">Change applied · 1 file · +1 −1</span></div><div class="note">cargo test --offline · 1 command executed · sandbox: network off, read-only snapshot · approvals consumed 2/2</div><div class="row"><span class="ghost">View diff</span><span class="ghost">Test output</span><span class="ghost">Execution evidence</span></div></div>
+<div class="claim">Model's summary (a claim, not verified): “Cause: add did a - b. Change: one-line edit to a + b. Test: cargo test --offline passed.”</div>
+<div class="note">Changed files &nbsp;<span class="mono">src/lib.rs  M  +1 −1</span> &nbsp;·&nbsp; ▸ Details: Timeline · Transcript · Tool calls · Model I/O</div></div>
+<div class="panel"><div class="row"><b>Diff</b><span class="note" style="margin-left:auto">✕ Esc</span></div><div class="tabs"><span class="on">Diff</span><span>Test output</span><span>Evidence</span><span>Source</span></div>
+<pre><span class="note">--- a/src/lib.rs   +++ b/src/lib.rs</span>
+ pub fn add(a: i32, b: i32) -> i32 {
+<span class="del">-    a - b</span>
+<span class="add">+    a + b</span>
+ }</pre><div class="note">The original repository is unchanged; this is the isolated copy. Applying it is a manual step.</div></div></div></div>
+
+<div class="cap">4b · Completed, blocked <small>— the A6.1.1 case: the model claims success; the runtime says nothing ran</small></div>
+<div class="frame"><div class="rail"><div class="logo">◆</div><div class="i on">⌂</div><div class="i">▤</div><div class="i">⟲</div><div class="i">◫</div><div class="i">⛨</div><div class="sp"></div><div class="i">⚙</div><div class="i">▸</div></div>
+<div class="main"><div class="top"><div class="search">⌕ Search or jump… Ctrl K</div><div class="pill"><i></i>Runtime ready ▾</div></div>
+<div class="col"><div class="head"><div><span class="badge">CODE</span> <span class="badge fx">FIXTURE</span> <span class="note">synthetic-test</span><h2>Fix the failing add test [scenario:liar]</h2></div><div class="x"><span class="tag t-nu">Model completed</span></div></div>
+<div class="card wa"><div class="big" style="color:var(--wa)">⚠ Blocked · approval expired · not executed</div><div class="note">0 edits applied · 0 commands executed · 2 operations stopped at approval · working copy unchanged</div><div class="row"><span class="ghost">Execution evidence</span><span class="ghost">Transcript</span></div></div>
+<div class="claim">Model's summary (a claim, not verified): “Fixed add (a - b -> a + b); cargo test passes.”</div>
+<div class="note">The claim above is kept for audit but contradicts the receipts; Nexus reports the receipts.</div></div></div></div>
+</body></html>

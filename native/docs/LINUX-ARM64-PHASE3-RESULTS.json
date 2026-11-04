@@ -1,0 +1,962 @@
+{
+  "workspace_log_sha256": "6954288aa0f48ab6d2deffd9aefd42e9239a5303be448a81674095cf5d0f7b42",
+  "workspace": {
+    "passed": 1663,
+    "failed": 0,
+    "ignored": 65
+  },
+  "interrupted": 0,
+  "targets": [
+    {
+      "target": "Running unittests src/lib.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_broker-f079db4c3d35c4e1)",
+      "passed": 385,
+      "failed": 0,
+      "ignored": 7
+    },
+    {
+      "target": "Running unittests src/main.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_broker-12ba6264be48afd2)",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/broker_a53.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/broker_a53-b32a9116e704bac2)",
+      "passed": 25,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "target": "Running tests/code_a56.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/code_a56-b81d3f036ad13112)",
+      "passed": 260,
+      "failed": 0,
+      "ignored": 6
+    },
+    {
+      "target": "Running tests/em02_attempt_targets.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/em02_attempt_targets-455d00483b7d575a)",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/inspect_a55.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/inspect_a55-a150fc38d6db6469)",
+      "passed": 17,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/jobs_m7.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/jobs_m7-ff8f7f138ea3ce65)",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/rn2_binding.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/rn2_binding-80eb1eb16b4036be)",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/main.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus-4c0969b388795f4c)",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/cli.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/cli-6746061e3f1a2742)",
+      "passed": 19,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/lib.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_client-3aea357e1cb31df7)",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/client_api.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/client_api-83fac0b5d544d887)",
+      "passed": 10,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/coding_outcome.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/coding_outcome-ac8ae9a4eef50b87)",
+      "passed": 18,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/conversation.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/conversation-fc0e5a6e00596efa)",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/desktop_code_limits.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/desktop_code_limits-e547cc0f813b73f4)",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/desktop_contract.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/desktop_contract-1bf5764efb206aa3)",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/real_history.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/real_history-6308848c966ee0e8)",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 3
+    },
+    {
+      "target": "Running tests/registry_target.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/registry_target-bb4db5ee0924ef89)",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/lib.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_contracts-22834b08d74f7b00)",
+      "passed": 28,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/lib.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_daemon-e5c1c6d230878ed5)",
+      "passed": 43,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/bin/nexus-approver.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_approver-9941434958f2e874)",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/bin/nexus-witness.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_witness-a6888c2c09c63d93)",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/main.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexusd-547577e784d63cdf)",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/admission.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/admission-09e40e8cc2f30e1a)",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/approvals_a42.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/approvals_a42-ffbac3d5f35d5f9f)",
+      "passed": 16,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/auth.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/auth-ad50809e2e3fda05)",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/autonomous_a614.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/autonomous_a614-84d79bafa7a1a18c)",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/e2e_native.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/e2e_native-aa34faac418b3309)",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/framing.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/framing-23967115d331d9f8)",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/isolation.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/isolation-b674559d82762062)",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/lifecycle.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/lifecycle-7dfeac710a2301ef)",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/model_only_a51.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/model_only_a51-fc84b2d21aea3f42)",
+      "passed": 21,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/multuid.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/multuid-503c31fbd1230933)",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 40
+    },
+    {
+      "target": "Running tests/process_a34.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/process_a34-4e0387a9e5b8fcc9)",
+      "passed": 10,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/protocol.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/protocol-3e4800ad99e7c676)",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/tools_a32.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/tools_a32-539f97d00dedf778)",
+      "passed": 22,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/units_a44.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/units_a44-cfc4ecd21760ac00)",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/witness_a43.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/witness_a43-6856799534fe9ee0)",
+      "passed": 21,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/writes_a33.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/writes_a33-818487369438a38e)",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/lib.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_kernel-7369a2af7052b660)",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/main.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_kernel-3406fa13212e132d)",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/bridge_protocol.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/bridge_protocol-46caf0d69b22b7cb)",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/dispatch_safety.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/dispatch_safety-c8235635177f6c16)",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/durability.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/durability-42e9d20d23c0867c)",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/idempotency_concurrency.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/idempotency_concurrency-c03229abad25bd0a)",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/identity_auth.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/identity_auth-e1d648d14dd3dd1c)",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/journal_robustness.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/journal_robustness-3b40d4ce466f9902)",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/model_only.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/model_only-3827f454c94cc100)",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/native_dispatch.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/native_dispatch-581997cde593651b)",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/recovery.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/recovery-8bf1279a5b4b8890)",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/sealed_grants.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/sealed_grants-b09fb3e4fb758688)",
+      "passed": 12,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/lib.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_model-8aab75f65bc9e777)",
+      "passed": 15,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/audit_inject.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/audit_inject-29a48343228205f2)",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/audit_sse.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/audit_sse-00df970d5e92e7d4)",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/audit_trust.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/audit_trust-dfd225e6a59a732d)",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/authorized_dispatch.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/authorized_dispatch-f8a9c266b6063238)",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/conformance.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/conformance-45dd1f3a7454517f)",
+      "passed": 36,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/dns_policy_a54.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/dns_policy_a54-f23536019e807e8d)",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/opencode_go_a54.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/opencode_go_a54-3411185e130e9fb0)",
+      "passed": 37,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/p0_transport_upload.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/p0_transport_upload-97094f0d3fed9656)",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/tls_a52.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/tls_a52-ebd21348c99546b7)",
+      "passed": 18,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/lib.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_runtime-ef76bee0966024a2)",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/lifecycle_a614.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/lifecycle_a614-10ac0a3191b5f45d)",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/lib.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_store-75eadf27842e8993)",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/store_initialization.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/store_initialization-0d157fbbf151a386)",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/task_bindings_em02.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/task_bindings_em02-bb802a325934a506)",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/lib.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_tools-cc0d24d186d1da7d)",
+      "passed": 82,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/bin/nexus-confine.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_confine-b3bb264631ea85e9)",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/bin/nexus-egress.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_egress-248afda281fffe1c)",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/a32.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/a32-86f1b78f331891ce)",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/adversarial.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/adversarial-ae90cffcebc43c49)",
+      "passed": 30,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/audit.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/audit-d75a33c48a4f3ebd)",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/checkpoint_m3b.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/checkpoint_m3b-3dbf84f545aad2a9)",
+      "passed": 23,
+      "failed": 0,
+      "ignored": 2
+    },
+    {
+      "target": "Running tests/compat_m3c.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/compat_m3c-343888cba53af722)",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "target": "Running tests/confine_m3c.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/confine_m3c-8fd0bfc7f22c98d8)",
+      "passed": 24,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "target": "Running tests/depcache_a35.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/depcache_a35-26ad2d6b8b38d412)",
+      "passed": 23,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/depcache_process_a35.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/depcache_process_a35-1080097457d37457)",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/devflow_m6.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/devflow_m6-03b4b338823c9311)",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "target": "Running tests/devjobs_m7.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/devjobs_m7-6b91351c25568b2f)",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/edit_restore_rel1.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/edit_restore_rel1-3410c4fd92fbece9)",
+      "passed": 10,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/effects_m3a.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/effects_m3a-d7a6d9c55bdb4d1c)",
+      "passed": 10,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "target": "Running tests/egress_m5.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/egress_m5-58a26e7073486e17)",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "target": "Running tests/gitwrite_m6.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/gitwrite_m6-dfc398a9b7e6ad99)",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/grants_m2.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/grants_m2-c8997e65b2ac43dc)",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/hostexec_m8.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/hostexec_m8-8c33e92543b39440)",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/inplace_m1.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/inplace_m1-024c817e4d796039)",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/live_m6.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/live_m6-6ef14594b0c2e363)",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/pipefail_d5.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/pipefail_d5-a318646807acf2e3)",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/process_a34.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/process_a34-8ef87c9b78539429)",
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/profiles_a614.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/profiles_a614-76f8f515d4e4fa78)",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/registry_a613.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/registry_a613-7bc2be9eba8c101b)",
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/sandbox_a34.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/sandbox_a34-26d1fef24cf4fae1)",
+      "passed": 26,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/seccomp_arch.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/seccomp_arch-e22db25931a7e628)",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/toolchains_m5.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/toolchains_m5-5016f6ca1e83858d)",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/workbench_a614.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/workbench_a614-75c57eb3352643f6)",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/worktree_a56.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/worktree_a56-781593dd6534b2b9)",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/write_a33.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/write_a33-79c76a45b0ffd219)",
+      "passed": 34,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running unittests src/lib.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/nexus_transcript-4fb59d42e4291bb1)",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Running tests/history_and_store.rs (/home/kaloyan/.cache/nexus-validation/phase3-target/debug/deps/history_and_store-cb3ac8c0c9b5661e)",
+      "passed": 28,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Doc-tests nexus_broker",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Doc-tests nexus_client",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Doc-tests nexus_contracts",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Doc-tests nexus_daemon",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Doc-tests nexus_kernel",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Doc-tests nexus_model",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "target": "Doc-tests nexus_runtime",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Doc-tests nexus_store",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Doc-tests nexus_tools",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Doc-tests nexus_transcript",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "not_run_lines": [
+    "NOT RUN: sandbox unavailable after 1 probe(s): [\"bwrap not found\"]",
+    "NOT RUN: sandbox unavailable after 1 probe(s): [\"bubblewrap not found\"]",
+    "NOT RUN: sandbox unavailable after 3 probe(s): [\"systemd scope was not created\"]",
+    "NOT RUN (reporter): NEXUS_MULTUID=1 is not set",
+    "NOT RUN (live): NEXUS_LIVE_M6 != 1 \u2014 owner approval + this flag are required",
+    "NOT RUN (pnpm): pnpm is not installed on this host; it uses the same HTTP(S) proxy variables as npm but was not exercised",
+    "NOT RUN: sandbox or dotnet unavailable"
+  ],
+  "ignored_tests": [
+    "test engine::effort_limiter_tests::regenerate_the_pinned_governor_traces ... ignored, explicit, reviewed fixture regeneration",
+    "test engine::muse_v1_tests::em04a_measure_bridge_latency ... ignored",
+    "test engine::worker_tests::the_persistent_worker_is_faster_than_the_one_shot_bridge ... ignored, benchmark: run explicitly, preferably in release",
+    "test engine::worker_tests::the_worker_memory_budget_after_ten_thousand_requests ... ignored, measurement: 10,000 requests per node",
+    "test engine::worker_tests::the_worker_memory_plateaus ... ignored, measurement: run explicitly",
+    "test engine_state::em04b_measure::em04b_measure_signal_processing ... ignored",
+    "test request_budget::measure::em04a_measure_budget_cost ... ignored",
+    "test broker_child_entry ... ignored, child entry point for the crash test; run only via the parent test",
+    "test a613_gui_fixture_hold ... ignored, manual GUI fixture; needs NEXUS_A61_HOLD_DIR",
+    "test a613_rehearsal_acceptance_project ... ignored, manual rehearsal; needs NEXUS_A613_PROJECT",
+    "test a61_gui_fixture_hold ... ignored, manual GUI fixture; needs NEXUS_A61_HOLD_DIR",
+    "test a61_rehearsal_selfhost_validation_command_in_the_sandbox ... ignored, manual rehearsal; needs NEXUS_A61_SNAPSHOT and NEXUS_A61_DEPCACHE",
+    "test em04a_measure_a614_configurations ... ignored",
+    "test p5_broker_child ... ignored, child entry point for the feedback crash tests; run only via the parent tests",
+    "test real_cursor_replay_has_no_duplicates ... ignored",
+    "test real_ledger_integrity_isolation_and_limits ... ignored",
+    "test real_task_0058_content_and_switching ... ignored",
+    "test broker_a53::multuid_a55_repo_inspect_read_only_tools_across_distinct_identities ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test broker_a53::multuid_a56_positive_independent_approval_executes_edit_and_sandboxed_test_via_the_real_approver_cli ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test broker_a53::multuid_a56_repo_code_write_and_process_authority_across_distinct_identities ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test broker_a53::multuid_a613_project_registry_owned_by_a_third_identity_is_read_only_for_everyone_else ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test broker_a53::multuid_broker_end_to_end_across_distinct_identities ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test broker_a53::multuid_broker_restart_preserves_ownership_and_idempotency_and_leaks_no_process ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test broker_a53::multuid_desktop_contract_reads_runs_without_transcript_access ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_a41_misconfiguration_and_hostile_paths_fail_closed_without_residue ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_approver_identity_cannot_issue_even_holding_the_issuer_key ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_approver_with_stolen_approver_cap_from_wrong_uid_is_refused ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_bystander_with_stolen_cap_gets_peer_unauthorized ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_credential_files_have_exact_owners_and_cross_identity_reads_fail ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_credentials_never_appear_in_responses_or_diagnostics ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_daemon_uid_rollback_of_its_own_journal_is_detected_by_the_witness ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_dependency_cache_is_single_owner_and_wrong_owner_fails_closed ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_each_role_credential_is_refused_for_the_other_roles_commands ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_forged_and_replayed_commands_rejected ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_human_approval_end_to_end_with_separate_real_identities ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_independent_human_approval_store_cannot_be_downgraded_by_restart ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_insecure_permissions_refuse_startup ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_integrated_offline_e2e_under_the_production_profile ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_issuer_cannot_touch_kernel_persistence ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_issuer_completes_acquire_seal_accept ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_model_pilot_redeem_obeys_real_identity_gates ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_no_shadow_operation_dispatches ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_only_the_daemon_uid_can_talk_to_the_witness_and_cannot_rewind_it ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_process_commands_require_issuer_and_approver_and_deny_everyone_else ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_production_configuration_refuses_overlapping_or_test_only_approval ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_production_profile_refuses_incomplete_downgraded_and_test_only_starts ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_receipts_stable_across_restart_with_key_rotation ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_restart_preserves_ownership_and_privilege_changes_apply ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_sandboxed_build_cannot_reach_capability_files_or_daemon_state ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_sandboxed_process_under_approval_and_witness ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_socket_membership_grants_no_credential_access_before_and_after_restart ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_stolen_credentials_cannot_forge_human_approval ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_terminal_approver_cli_requires_a_real_terminal_and_typed_code ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_tool_commands_require_issuer_and_writes_require_the_approver ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_untrusted_and_bystander_cannot_use_tool_commands_or_read_events ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_untrusted_with_stolen_cap_is_denied_at_connect ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test multuid_witness_state_and_key_are_unreachable_to_every_other_identity ... ignored, requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere",
+    "test bench_checkpoint ... ignored",
+    "test bench_checkpoint_large_files ... ignored",
+    "test bench_end_to_end ... ignored",
+    "test bench_confinement ... ignored",
+    "test perf_m6_measurements ... ignored",
+    "test bench_observation ... ignored",
+    "test perf_m5_measurements ... ignored",
+    "test nexus-model/src/runtime.rs - runtime (line 7) ... ignored"
+  ],
+  "stress_cycles": [
+    {
+      "cycle": 1,
+      "targets": [
+        {
+          "target": "confine_m3c-baae8ee1c39701d4",
+          "passed": 24,
+          "failed": 0,
+          "ignored": 1,
+          "not_run": 0
+        },
+        {
+          "target": "hostexec_m8-f94d677c35c68843",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "process_a34-0c02e5081f320857",
+          "passed": 11,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "sandbox_a34-794496a846867a5c",
+          "passed": 26,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "seccomp_arch-49c3e310d658b43e",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        }
+      ]
+    },
+    {
+      "cycle": 2,
+      "targets": [
+        {
+          "target": "confine_m3c-baae8ee1c39701d4",
+          "passed": 24,
+          "failed": 0,
+          "ignored": 1,
+          "not_run": 0
+        },
+        {
+          "target": "hostexec_m8-f94d677c35c68843",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "process_a34-0c02e5081f320857",
+          "passed": 11,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "sandbox_a34-794496a846867a5c",
+          "passed": 26,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "seccomp_arch-49c3e310d658b43e",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        }
+      ]
+    },
+    {
+      "cycle": 3,
+      "targets": [
+        {
+          "target": "confine_m3c-baae8ee1c39701d4",
+          "passed": 24,
+          "failed": 0,
+          "ignored": 1,
+          "not_run": 0
+        },
+        {
+          "target": "hostexec_m8-f94d677c35c68843",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "process_a34-0c02e5081f320857",
+          "passed": 11,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "sandbox_a34-794496a846867a5c",
+          "passed": 26,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "seccomp_arch-49c3e310d658b43e",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        }
+      ]
+    },
+    {
+      "cycle": 4,
+      "targets": [
+        {
+          "target": "confine_m3c-baae8ee1c39701d4",
+          "passed": 24,
+          "failed": 0,
+          "ignored": 1,
+          "not_run": 0
+        },
+        {
+          "target": "hostexec_m8-f94d677c35c68843",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "process_a34-0c02e5081f320857",
+          "passed": 11,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "sandbox_a34-794496a846867a5c",
+          "passed": 26,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "seccomp_arch-49c3e310d658b43e",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        }
+      ]
+    },
+    {
+      "cycle": 5,
+      "targets": [
+        {
+          "target": "confine_m3c-baae8ee1c39701d4",
+          "passed": 24,
+          "failed": 0,
+          "ignored": 1,
+          "not_run": 0
+        },
+        {
+          "target": "hostexec_m8-f94d677c35c68843",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "process_a34-0c02e5081f320857",
+          "passed": 11,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "sandbox_a34-794496a846867a5c",
+          "passed": 26,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        },
+        {
+          "target": "seccomp_arch-49c3e310d658b43e",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0
+        }
+      ]
+    }
+  ],
+  "source_sha256": {
+    "native/nexus-tools/src/sandbox.rs": "99e670b71882cdf67de1a567bae70c0201a27266174fc74cd6e922ed3c002185",
+    "native/nexus-tools/src/host_exec.rs": "3c7cda193bc3562171d71a586d2a4df91d695d35084d0905e537dc111bd45584",
+    "native/nexus-tools/src/observe.rs": "624a32f5a1616c21974725212a028e2c6ed9aca52ef73320e3c21efb87d4325a",
+    "native/nexus-daemon/src/main.rs": "8117771ef48be43c966118d21ca352fcdddf3e6ca9ec2d1057071bf444858ecf",
+    "native/nexus-broker/tests/code_a56.rs": "dfc140b11d9f3cc19f6c0eeee6e087f07ed57c031e5e02a2c5675c2a7c9f05e4",
+    "native/nexus-broker/tests/inspect_a55.rs": "f95bf975546d4f6e6e015b23c5929cce09d6eb2bd1e5b56f8bb164d5a6bac863",
+    "native/nexus-tools/tests/confine_m3c.rs": "187b79bd3b2be3669592523c1cb28a964f79191520d334368359b92366c67392",
+    "native/nexus-tools/tests/devjobs_m7.rs": "027e9d15210388ce888ff23c2a8b968e5aeb61e6fa78b06989784626c0c52fdf",
+    "native/nexus-tools/tests/hostexec_m8.rs": "d4d794b8585196713e7173d918ea6375423b0616d1d036e786033b617dac3906",
+    "native/nexus-tools/tests/process_a34.rs": "ac6a696c07affc5da8a6c078977f436c4cf64b6eb574506490844a745e296127",
+    "native/nexus-tools/tests/sandbox_a34.rs": "bf76038b77dca1e1a893d39bac7a73b012350a2e00ca328383e11feee9a7ace1",
+    "native/nexus-tools/tests/toolchains_m5.rs": "b36dbbc7f7c9772ec80b7701d07bf4cfe034b98823c4c21fe3fc508372053d88"
+  },
+  "prior_interrupted_evidence": {
+    "terminated_handshake_target": 1,
+    "manually_cleaned_host_escape_case": 1,
+    "unexplained_host_setup_fallback": "unresolved; not included as successful enforcement"
+  }
+}

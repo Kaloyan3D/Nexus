@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-code-limits-set"
+description = "Enables the code_limits_set command without any pre-configured scope."
+commands.allow = ["code_limits_set"]
+
+[[permission]]
+identifier = "deny-code-limits-set"
+description = "Denies the code_limits_set command without any pre-configured scope."
+commands.deny = ["code_limits_set"]

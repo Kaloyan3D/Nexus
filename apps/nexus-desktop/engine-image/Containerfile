@@ -1,0 +1,30 @@
+# The Nexus engine's guest userland: the smallest Fedora that keeps what the engine's sandbox needs
+# (systemd + cgroups v2 delegation, bubblewrap, Landlock/seccomp via the kernel) plus Node.js and a
+# headless Chromium for visual verification, and a Rust toolchain (rustc, cargo, rustfmt, clippy) with a C linker
+# (gcc) so Rust projects can really be compiled and tested in the runtime (the sandbox resolves them from /usr/bin).
+# Built rootless; see build.sh for the disk image step.
+FROM registry.fedoraproject.org/fedora-minimal:44
+RUN microdnf -y --setopt=install_weak_deps=0 --setopt=tsflags=nodocs install \
+      systemd systemd-networkd systemd-resolved systemd-udev kernel-core kernel-modules-core \
+      bubblewrap nodejs npm git-core iproute util-linux procps-ng shadow-utils e2fsprogs \
+      ca-certificates python3 findutils tar gzip gtk3 libseccomp sqlite-libs \
+      nss nspr atk at-spi2-atk cups-libs libdrm libxkbcommon mesa-libgbm alsa-lib pango cairo \
+      libXcomposite libXdamage libXfixes libXrandr libX11 libxcb fontconfig dejavu-sans-fonts liberation-fonts \
+      rust cargo rustfmt clippy gcc \
+    && microdnf clean all && rm -rf /var/cache/* /usr/share/doc /usr/share/man /usr/share/locale
+RUN useradd -m -u 1000 -s /bin/bash nexus \
+ && mkdir -p /opt/nexus/bin /opt/nexus/repo /opt/ms-playwright
+# headless Chromium (Playwright's build, installed here so agents never download a browser)
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN npm install -g --omit=dev playwright-core@1.52.0 \
+ && node /usr/local/lib/node_modules/playwright-core/cli.js install chromium-headless-shell \
+ && npm cache clean --force
+COPY overlay/ /
+COPY stage/bin/ /opt/nexus/bin/
+RUN ln -s /opt/nexus/bin/nexus-browse.cjs /opt/nexus/bin/nexus-browse && chmod 755 /opt/nexus/bin/nexus-browse.cjs
+COPY stage/repo/ /opt/nexus/repo/
+RUN ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf; \
+    systemctl enable systemd-networkd systemd-resolved nexus-state.service nexus-bridge.service \
+ && systemctl mask dnf-makecache.timer fstrim.timer systemd-homed.service systemd-userdbd.socket systemd-oomd.service \
+ && passwd -l root \
+ && echo nexus-engine > /etc/hostname

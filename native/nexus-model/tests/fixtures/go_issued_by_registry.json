@@ -1,0 +1,60 @@
+{
+ "core": {
+  "schemaVersion": 1,
+  "resolutionId": "ab8dcd37ff34d45a520d6f836a9d8a225b3183d63a83a10e41bcfa9f24a6886a",
+  "modeId": "engineering-v2",
+  "orchestrationEngineId": "muse-v0",
+  "modeConfigRevision": 0,
+  "roleId": "muse_main",
+  "logicalModelId": "meta/muse-spark-1.3-contributor-native",
+  "routeId": "opencode-go-native/muse",
+  "providerId": "opencode-go-native",
+  "remoteModelId": "muse-spark-1.3-contributor",
+  "connectionId": "conn-opencode-go-native",
+  "executionKind": "raw-model",
+  "accessType": "api-key",
+  "protocolId": "openai-responses",
+  "reasoning": "low",
+  "requiredCapabilities": [
+   "adaptiveReasoningContract",
+   "singleAgent",
+   "toolCalling"
+  ],
+  "slotRequirements": {
+   "toolCalling": true,
+   "adaptiveReasoningContract": "muse-v0",
+   "singleAgent": true
+  },
+  "dataUseTier": "contributor"
+ },
+ "extension": {
+  "extensionVersion": 1,
+  "endpoint": {
+   "protocol": "https",
+   "origin": "https://opencode.ai",
+   "path": "/inference/go/openai/v1/responses",
+   "method": "POST",
+   "localLoopback": false
+  },
+  "remoteModelIdConfirmed": "muse-spark-1.3-contributor",
+  "reasoningEffort": "low",
+  "billing": {
+   "tier": "opencode-go-plan",
+   "dataUse": "contributor"
+  },
+  "session": {
+   "sessionId": "sess-x"
+  },
+  "capabilities": [
+   "adaptiveReasoningContract",
+   "singleAgent",
+   "toolCalling"
+  ],
+  "contextLimitTokens": 1048576,
+  "outputLimitTokens": 131072,
+  "connectionBinding": "conn-opencode-go-native",
+  "credentialRef": "credential://connections/conn-opencode-go-native",
+  "wireProfile": "opencode-go-responses"
+ },
+ "extensionDigest": "6f67be28b8d3823b3b52970e8018268d6d98053adec5e0f8279ce11498e0ed32"
+}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-run-restore-preview"
+description = "Enables the run_restore_preview command without any pre-configured scope."
+commands.allow = ["run_restore_preview"]
+
+[[permission]]
+identifier = "deny-run-restore-preview"
+description = "Denies the run_restore_preview command without any pre-configured scope."
+commands.deny = ["run_restore_preview"]

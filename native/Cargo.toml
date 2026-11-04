@@ -1,0 +1,37 @@
+[workspace]
+members = ["nexus-contracts", "nexus-store", "nexus-kernel", "nexus-daemon", "nexus-model", "nexus-client", "nexus-cli", "nexus-transcript", "nexus-tools", "nexus-broker", "nexus-runtime"]
+resolver = "2"
+
+[workspace.dependencies]
+nexus-contracts = { path = "nexus-contracts" }
+nexus-store = { path = "nexus-store" }
+nexus-kernel = { path = "nexus-kernel" }
+nexus-model = { path = "nexus-model" }
+nexus-client = { path = "nexus-client" }
+nexus-transcript = { path = "nexus-transcript" }
+nexus-tools = { path = "nexus-tools" }
+libc = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
+fs2 = "0.4"
+
+# Dependencies that do real work in every operation (SQLite, hashing, JSON) are optimized even in the dev/test
+# profile: the Kernel's chain checks scan growing tables, and an unoptimized SQLite made a long task's tests
+# ~10x slower than the shipped (release) build. Behaviour is identical; only the speed of the tests changes.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 2
+[profile.dev.package.rusqlite]
+opt-level = 2
+[profile.dev.package.sha2]
+opt-level = 2
+[profile.dev.package.hmac]
+opt-level = 2
+[profile.dev.package.serde_json]
+opt-level = 2

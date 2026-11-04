@@ -56,14 +56,14 @@ try {
   }
   // R7.1.1: the controller profile pins the Registry mode definitions, so the
   // synthetic fixture must carry them like any real source checkout does.
-  for (const modeFile of ['engineering-v1.json', 'engineering-v2.json', 'engineering-v3.json']) {
+  for (const modeFile of ['engineering-v1.json', 'engineering-v2.json', 'engineering-v2-adaptive.json', 'engineering-v3.json']) {
     fs.mkdirSync(path.join(fixtureConfig, 'registry', 'modes'), { recursive: true });
     fs.writeFileSync(path.join(fixtureConfig, 'registry', 'modes', modeFile), JSON.stringify({ schemaVersion: 1, id: modeFile }));
     execFileSync('git', ['-C', fixture, 'add', '--', 'config/registry/modes/' + modeFile]);
   }
   const fixtureInstall = path.join(root, 'fixture-install')
   const fixturePreset = path.join(root, 'fixture-preset')
-  assert.deepEqual(prepare(fixture, fixtureInstall, { profile: 'controller' }).map(row => row.name), ['A.cjs', 'AihController.cjs', 'B.cjs', 'C.cjs', 'registry/modes/engineering-v1.json', 'registry/modes/engineering-v2.json', 'registry/modes/engineering-v3.json'])
+  assert.deepEqual(prepare(fixture, fixtureInstall, { profile: 'controller' }).map(row => row.name), ['A.cjs', 'AihController.cjs', 'B.cjs', 'C.cjs', 'registry/modes/engineering-v1.json', 'registry/modes/engineering-v2-adaptive.json', 'registry/modes/engineering-v2.json', 'registry/modes/engineering-v3.json'])
   const requiredSource = path.join(fixtureInstall, 'config/C.cjs')
   fs.rmSync(requiredSource)
   assert.throws(() => copy(fixtureInstall, fixturePreset, { profile: 'controller' }), /closure-missing/)

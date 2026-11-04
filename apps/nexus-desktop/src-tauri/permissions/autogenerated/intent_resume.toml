@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-intent-resume"
+description = "Enables the intent_resume command without any pre-configured scope."
+commands.allow = ["intent_resume"]
+
+[[permission]]
+identifier = "deny-intent-resume"
+description = "Denies the intent_resume command without any pre-configured scope."
+commands.deny = ["intent_resume"]

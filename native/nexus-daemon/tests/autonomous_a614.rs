@@ -1,0 +1,375 @@
+//! A6.1.4 start-up rules of the interactive (automated workspace policy) profile.
+//! The behaviour of the policy itself is covered by the daemon unit tests and the
+//! broker end-to-end tests; this file pins the configuration locks and the
+//! no-downgrade latch against the real `nexusd` binary.
+
+mod common;
+
+use common::*;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+fn euid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+struct Root {
+    dir: tempfile::TempDir,
+    bases: std::path::PathBuf,
+    wt: std::path::PathBuf,
+    acap_dir: tempfile::TempDir,
+}
+
+fn root() -> Root {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let bases = std::fs::canonicalize(dir.path()).unwrap().join("work");
+    let wt = bases.join("worktrees");
+    std::fs::create_dir_all(&wt).unwrap();
+    let acap_dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(acap_dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    Root {
+        dir,
+        bases,
+        wt,
+        acap_dir,
+    }
+}
+
+/// Start nexusd on `r`'s data root with `extra` flags; Ok(child) once healthy,
+/// Err(output) when it refuses to start.
+fn start(r: &Root, extra: &[String]) -> Result<Child, String> {
+    let d = r.dir.path();
+    let socket = d.join("n.sock");
+    let _ = std::fs::remove_file(&socket);
+    let uid = euid().to_string();
+    let mut c = Command::new(nexusd_bin());
+    c.arg("--db")
+        .arg(d.join("k.db"))
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--cap")
+        .arg(d.join("issuer.cap"))
+        .args(["--trust-mode", "shadow-test"])
+        .arg("--witness")
+        .arg(d.join("k.wit.db"))
+        .args(["--allowed-uids", &uid])
+        .arg("--workspace-bases")
+        .arg(&r.bases)
+        .args([
+            "--enable-model-pilot",
+            "--enable-repo-code",
+            "--enable-writes",
+            "--enable-process",
+        ])
+        .arg("--worktree-root")
+        .arg(&r.wt)
+        .args(extra)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    die_with_test(&mut c);
+    let mut child = c.spawn().unwrap();
+    let end = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Ok(v) = raw_request(
+            &socket,
+            r#"{"protocol":1,"id":"p","cmd":"health","params":{}}"#,
+        ) {
+            if v["ok"] == true {
+                return Ok(child);
+            }
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            use std::io::Read;
+            let mut out = String::new();
+            if let Some(mut e) = child.stderr.take() {
+                let _ = e.read_to_string(&mut out);
+            }
+            if let Some(mut o) = child.stdout.take() {
+                let _ = o.read_to_string(&mut out);
+            }
+            return Err(out);
+        }
+        if Instant::now() > end {
+            terminate(&mut child);
+            return Err("never became ready".into());
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+fn human_flags(r: &Root) -> Vec<String> {
+    vec![
+        "--approver-cap".into(),
+        r.acap_dir
+            .path()
+            .join("approver.cap")
+            .to_string_lossy()
+            .into_owned(),
+        "--approver-uids".into(),
+        euid().to_string(),
+        "--allow-nonindependent-approver-test-only".into(),
+        "--require-human-approval".into(),
+    ]
+}
+
+#[test]
+fn the_interactive_profile_cannot_be_combined_with_a_human_approver_or_started_incompletely() {
+    let r = root();
+    let auto = "--autonomous-workspace-policy".to_owned();
+    for extra in [
+        vec![auto.clone(), "--require-human-approval".into()],
+        vec![
+            auto.clone(),
+            "--allow-nonindependent-approver-test-only".into(),
+        ],
+        vec![auto.clone(), "--require-independent-approver".into()],
+        vec![auto.clone(), "--approver-cap".into(), "/tmp/x.cap".into()],
+        vec![auto.clone(), "--approver-uids".into(), "1".into()],
+    ] {
+        let e = start(&r, &extra).expect_err("must refuse");
+        assert!(e.contains("cannot be combined"), "{extra:?}: {e}");
+    }
+    // missing prerequisites are refused too (here: no writes/process/repo-code)
+    let d = r.dir.path();
+    let o = Command::new(nexusd_bin())
+        .arg("--db")
+        .arg(d.join("k2.db"))
+        .arg("--socket")
+        .arg(d.join("n2.sock"))
+        .arg("--cap")
+        .arg(d.join("i2.cap"))
+        .args([
+            "--trust-mode",
+            "shadow-test",
+            "--allowed-uids",
+            &euid().to_string(),
+            "--autonomous-workspace-policy",
+        ])
+        .arg("--workspace-bases")
+        .arg(&r.bases)
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("requires --enable-repo-code")
+            || String::from_utf8_lossy(&o.stdout).contains("requires --enable-repo-code")
+    );
+    // the production profile never accepts it
+    let o = Command::new(nexusd_bin())
+        .args([
+            "--security-profile",
+            "production-v1",
+            "--autonomous-workspace-policy",
+        ])
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+}
+
+#[test]
+fn a_store_latched_automated_never_starts_weaker_and_a_human_store_never_starts_automated() {
+    let r = root();
+    // 1. a store that ran with human approval cannot be restarted automated (downgrade)
+    let mut h = start(&r, &human_flags(&r)).expect("human mode starts");
+    terminate(&mut h);
+    let e = start(&r, &["--autonomous-workspace-policy".into()]).expect_err("downgrade refused");
+    assert!(
+        e.contains("approval-downgrade-refused") || e.contains("downgrade"),
+        "{e}"
+    );
+    // 2. a fresh store starts automated, has no approver credential, and reports honestly
+    let r2 = root();
+    let mut a = start(&r2, &["--autonomous-workspace-policy".into()]).expect("automated starts");
+    let cap = read_cap(&r2.dir.path().join("issuer.cap"));
+    let st = raw_request(
+        &r2.dir.path().join("n.sock"),
+        &authed_frame(&cap, "status", serde_json::json!({})),
+    )
+    .unwrap();
+    assert_eq!(st["automatedPolicy"], "autonomous-workspace/v1", "{st}");
+    assert_eq!(st["requireHumanApproval"], false);
+    assert_eq!(st["approvalGated"], true);
+    assert!(!r2.acap_dir.path().join("approver.cap").exists());
+    terminate(&mut a);
+    // 3. restarting the same store without the policy (mutating tools on) is refused: the latch only rises
+    let e = start(&r2, &[]).expect_err("weaker restart refused");
+    assert!(e.contains("approval-downgrade-refused"), "{e}");
+}
+
+#[test]
+fn m1_the_in_place_scope_is_an_explicit_operator_setting_that_fails_closed() {
+    let r = root();
+    // 'full' does not exist; unknown names never degrade to anything
+    for bad in ["full", "host", "Workspace", ""] {
+        let e = start(&r, &["--isolated-exec-scope".into(), bad.into()]).expect_err(bad);
+        assert!(e.contains("--isolated-exec-scope must be"), "{bad}: {e}");
+    }
+    // it needs the workbench command set (the automated workspace policy)
+    let e = start(&r, &["--isolated-exec-scope".into(), "workspace".into()])
+        .expect_err("needs the automated policy");
+    assert!(
+        e.contains("requires --enable-process and --autonomous-workspace-policy"),
+        "{e}"
+    );
+    // with it, the daemon starts and the default stays scratch when the flag is absent
+    let mut a = start(
+        &r,
+        &[
+            "--autonomous-workspace-policy".into(),
+            "--isolated-exec-scope".into(),
+            "workspace".into(),
+        ],
+    )
+    .expect("starts");
+    terminate(&mut a);
+}
+
+#[test]
+fn standing_grants_are_the_only_way_the_automated_policy_and_the_approver_coexist() {
+    let r = root();
+    let auto = "--autonomous-workspace-policy".to_owned();
+    let approver = |r: &Root| -> Vec<String> {
+        vec![
+            "--approver-cap".into(),
+            r.acap_dir
+                .path()
+                .join("approver.cap")
+                .to_string_lossy()
+                .into_owned(),
+            "--approver-uids".into(),
+            euid().to_string(),
+            "--allow-nonindependent-approver-test-only".into(),
+        ]
+    };
+    // without --standing-grants the old rule stands
+    let mut a = vec![auto.clone()];
+    a.extend(approver(&r));
+    let e = start(&r, &a).expect_err("approver flags with the automated policy alone");
+    assert!(e.contains("cannot be combined"), "{e}");
+    // --standing-grants needs the automated policy
+    // (a fresh store each time: a refused start can still have raised the store's latch)
+    let e = start(&root(), &["--standing-grants".into()]).expect_err("needs the policy");
+    assert!(e.contains("requires --autonomous-workspace-policy"), "{e}");
+    // the human-approval flag still cannot be combined
+    let e = start(
+        &root(),
+        &[
+            auto.clone(),
+            "--standing-grants".into(),
+            "--require-human-approval".into(),
+        ],
+    )
+    .expect_err("human flag");
+    assert!(e.contains("cannot be combined"), "{e}");
+    // with it, both channels start, and the status says so
+    let r = root();
+    let mut a = vec![auto.clone(), "--standing-grants".into()];
+    a.extend(approver(&r));
+    let mut d = start(&r, &a).expect("unified starts");
+    let cap = read_cap(&r.dir.path().join("issuer.cap"));
+    let st = raw_request(
+        &r.dir.path().join("n.sock"),
+        &authed_frame(&cap, "status", serde_json::json!({})),
+    )
+    .unwrap();
+    assert_eq!(st["standingGrants"], true, "{st}");
+    assert_eq!(st["approverChannel"], true, "{st}");
+    assert_eq!(st["automatedPolicy"], "autonomous-workspace/v1");
+    assert_eq!(st["approvalGated"], true);
+    assert!(r.acap_dir.path().join("approver.cap").exists());
+    terminate(&mut d);
+    // grants without an approver channel: starts (Ask projects are then refused at task creation)
+    let r2 = root();
+    let mut d =
+        start(&r2, &[auto.clone(), "--standing-grants".into()]).expect("grants without approver");
+    let cap = read_cap(&r2.dir.path().join("issuer.cap"));
+    let st = raw_request(
+        &r2.dir.path().join("n.sock"),
+        &authed_frame(&cap, "status", serde_json::json!({})),
+    )
+    .unwrap();
+    assert_eq!(
+        (st["standingGrants"].clone(), st["approverChannel"].clone()),
+        (serde_json::json!(true), serde_json::json!(false))
+    );
+    terminate(&mut d);
+    // the latch: automated -> unified is allowed, unified -> automated is allowed (same rank), and a store that
+    // ever ran with human approval can never start unified (the automated policy is weaker than a person)
+    let mut d = start(&r2, std::slice::from_ref(&auto))
+        .expect("unified store restarted as plain automated");
+    terminate(&mut d);
+    let mut d = start(&r2, &[auto.clone(), "--standing-grants".into()]).expect("and back");
+    terminate(&mut d);
+    let r3 = root();
+    let mut h = start(&r3, &human_flags(&r3)).expect("human mode starts");
+    terminate(&mut h);
+    let e = start(&r3, &[auto.clone(), "--standing-grants".into()]).expect_err("downgrade");
+    assert!(
+        e.contains("approval-downgrade-refused") || e.contains("downgrade"),
+        "{e}"
+    );
+    // production-v1 never accepts it
+    let o = Command::new(nexusd_bin())
+        .args(["--security-profile", "production-v1", "--standing-grants"])
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+}
+
+#[test]
+fn the_same_user_approver_flag_is_honest_narrow_and_never_part_of_the_strict_or_production_modes() {
+    let approver = |r: &Root| -> Vec<String> {
+        vec![
+            "--approver-cap".into(),
+            r.acap_dir
+                .path()
+                .join("approver.cap")
+                .to_string_lossy()
+                .into_owned(),
+            "--approver-uids".into(),
+            euid().to_string(),
+            "--approver-same-user".into(),
+        ]
+    };
+    let auto = "--autonomous-workspace-policy".to_owned();
+    // plain automated policy: refused (the flag belongs to --standing-grants)
+    let r = root();
+    let mut a = vec![auto.clone()];
+    a.extend(approver(&r));
+    let e = start(&r, &a).expect_err("not alone");
+    assert!(
+        e.contains("requires --standing-grants") || e.contains("cannot be combined"),
+        "{e}"
+    );
+    // strict human-approval mode: refused
+    let r = root();
+    let mut a = approver(&r);
+    a.push("--require-human-approval".into());
+    let e = start(&r, &a).expect_err("not for strict human mode");
+    assert!(e.contains("requires --standing-grants"), "{e}");
+    // with --standing-grants it starts and the approver credential is private
+    let r = root();
+    let mut a = vec![auto.clone(), "--standing-grants".into()];
+    a.extend(approver(&r));
+    let mut d = start(&r, &a).expect("starts");
+    let md = std::fs::metadata(r.acap_dir.path().join("approver.cap")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        md.permissions().mode() & 0o077,
+        0,
+        "the approver credential must be owner-only"
+    );
+    terminate(&mut d);
+    // production-v1 never accepts it
+    let o = Command::new(nexusd_bin())
+        .args([
+            "--security-profile",
+            "production-v1",
+            "--approver-same-user",
+        ])
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+}

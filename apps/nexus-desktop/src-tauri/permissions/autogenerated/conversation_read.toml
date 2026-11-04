@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-conversation-read"
+description = "Enables the conversation_read command without any pre-configured scope."
+commands.allow = ["conversation_read"]
+
+[[permission]]
+identifier = "deny-conversation-read"
+description = "Denies the conversation_read command without any pre-configured scope."
+commands.deny = ["conversation_read"]

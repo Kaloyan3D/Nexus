@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-intent-diff"
+description = "Enables the intent_diff command without any pre-configured scope."
+commands.allow = ["intent_diff"]
+
+[[permission]]
+identifier = "deny-intent-diff"
+description = "Denies the intent_diff command without any pre-configured scope."
+commands.deny = ["intent_diff"]

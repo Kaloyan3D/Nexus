@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-integrity-status"
+description = "Enables the integrity_status command without any pre-configured scope."
+commands.allow = ["integrity_status"]
+
+[[permission]]
+identifier = "deny-integrity-status"
+description = "Denies the integrity_status command without any pre-configured scope."
+commands.deny = ["integrity_status"]

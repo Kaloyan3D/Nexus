@@ -1,0 +1,13 @@
+{
+  "name": "interleaved-order",
+  "description": "Interleaved text and reasoning deltas prove wire-order assembly; unknown well-formed types are ignored.",
+  "sse_body": "data: {\"type\":\"response.reasoning.delta\",\"delta\":\"r1 \"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"t1 \"}\n\ndata: {\"type\":\"response.unknown_future_type\",\"payload\":\"ignored\"}\n\ndata: {\"type\":\"response.reasoning.delta\",\"delta\":\"r2\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"t2\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":5},\"finish_reason\":\"stop\"}}\n\ndata: [DONE]\n\n",
+  "expected_text": "t1 t2",
+  "expected_reasoning": "r1 r2",
+  "expected_tools": [],
+  "expected_usage": {
+    "input_tokens": 5,
+    "output_tokens": 5
+  },
+  "expected_finish": "stop"
+}

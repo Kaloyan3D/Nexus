@@ -1,0 +1,187 @@
+diff --git a/README.md b/README.md
+index 4a26073..85aedee 100644
+--- a/README.md
++++ b/README.md
+@@ -514,6 +514,20 @@ Removes the protocol from the input.
+ withoutProtocol("http://example.com"); // "example.com"
+ ```
+ 
++### `withoutQuery(input, keys)`
++
++Removes the given query parameter(s) from the URL.
++
++Other parameters keep their order and their original encoding. If no parameters are left, the `?` is removed as well. Keys are matched after decoding, so an encoded key like `a%20b` matches `a b`.
++
++**Example:**
++
++```js
++withoutQuery("/foo?bar=1&baz=2", "bar"); // "/foo?baz=2"
++withoutQuery("/foo?bar=1&bar=2&baz=3", "bar"); // "/foo?baz=3"
++withoutQuery("/foo?bar=1", "bar"); // "/foo"
++```
++
+ ### `withoutTrailingSlash(input, respectQueryAndFragment?)`
+ 
+ Removes the trailing slash from the URL or pathname.
+diff --git a/src/utils.ts b/src/utils.ts
+index ea98aba..c2ab431 100644
+--- a/src/utils.ts
++++ b/src/utils.ts
+@@ -3,6 +3,7 @@ import { QueryObject, parseQuery, stringifyQuery, ParsedQuery } from "./query";
+ import {
+   decode,
+   decodePath,
++  decodeQueryKey,
+   encodeHash,
+   encodeHost,
+   encodePath,
+@@ -380,6 +381,52 @@ export function filterQuery(
+   return stringifyParsedURL(parsed);
+ }
+ 
++/**
++ * Removes the given query parameter(s) from the URL.
++ *
++ * Other parameters keep their order and their original encoding.
++ * If no parameters are left, the `?` is removed as well.
++ * Keys are matched after decoding, so an encoded key like `a%20b` matches `a b`.
++ *
++ * @example
++ *
++ * ```js
++ * withoutQuery("/foo?bar=1&baz=2", "bar"); // "/foo?baz=2"
++ * withoutQuery("/foo?bar=1&bar=2&baz=3", "bar"); // "/foo?baz=3"
++ * withoutQuery("/foo?bar=1", "bar"); // "/foo"
++ * ```
++ *
++ * @group utils
++ */
++export function withoutQuery(input: string, keys: string | string[]): string {
++  if (!input.includes("?")) {
++    return input;
++  }
++  const _keys = Array.isArray(keys) ? keys : [keys];
++  if (_keys.length === 0) {
++    return input;
++  }
++  const keysToRemove = new Set(_keys.map((key) => decodeQueryKey(key)));
++  const parsed = parseURL(input);
++  if (!parsed.search || parsed.search === "?") {
++    return input;
++  }
++  const raw = parsed.search.startsWith("?")
++    ? parsed.search.slice(1)
++    : parsed.search;
++  const parts = raw.split("&");
++  const kept = parts.filter((part) => {
++    const eqIndex = part.indexOf("=");
++    const rawKey = eqIndex === -1 ? part : part.slice(0, eqIndex);
++    return !keysToRemove.has(decodeQueryKey(rawKey));
++  });
++  if (kept.length === parts.length) {
++    return input;
++  }
++  parsed.search = kept.length > 0 ? `?${kept.join("&")}` : "";
++  return stringifyParsedURL(parsed);
++}
++
+ /**
+  * Parses and decodes the query object of an input URL into an object.
+  *
+diff --git a/test/query.test.ts b/test/query.test.ts
+index 8ef15e4..505f87f 100644
+--- a/test/query.test.ts
++++ b/test/query.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, test } from "vitest";
+-import { filterQuery, getQuery, withQuery } from "../src";
++import { filterQuery, getQuery, withQuery, withoutQuery } from "../src";
+ 
+ describe("withQuery", () => {
+   const tests = [
+@@ -87,6 +87,85 @@ describe("filterQuery", () => {
+   }
+ });
+ 
++describe("withoutQuery", () => {
++  const tests = [
++    // Single key removal
++    { input: "/foo?bar=1&baz=2", keys: "bar", out: "/foo?baz=2" },
++    { input: "/foo?bar=1&baz=2", keys: "baz", out: "/foo?bar=1" },
++    // Multiple keys
++    {
++      input: "/foo?bar=1&baz=2&qux=3",
++      keys: ["bar", "qux"],
++      out: "/foo?baz=2",
++    },
++    { input: "/foo?bar=1&baz=2", keys: ["bar", "baz"], out: "/foo" },
++    // Last param removed => "?" disappears
++    { input: "/foo?bar=1", keys: "bar", out: "/foo" },
++    { input: "/foo?", keys: "bar", out: "/foo?" },
++    // Key not present => unchanged
++    { input: "/foo?bar=1", keys: "missing", out: "/foo?bar=1" },
++    { input: "/foo?bar=1", keys: ["x", "y"], out: "/foo?bar=1" },
++    // No query at all => unchanged
++    { input: "/foo", keys: "bar", out: "/foo" },
++    { input: "/foo#hash", keys: "bar", out: "/foo#hash" },
++    { input: "", keys: "bar", out: "" },
++    // Repeated keys are all removed
++    { input: "/foo?bar=1&bar=2&baz=3", keys: "bar", out: "/foo?baz=3" },
++    { input: "/foo?bar=1&bar=2", keys: "bar", out: "/foo" },
++    // Empty values
++    { input: "/foo?bar=&baz=2", keys: "bar", out: "/foo?baz=2" },
++    { input: "/foo?bar&baz=2", keys: "bar", out: "/foo?baz=2" },
++    { input: "/foo?bar=", keys: "bar", out: "/foo" },
++    { input: "/foo?bar", keys: "bar", out: "/foo" },
++    // Relative URLs
++    { input: "?bar=1&baz=2", keys: "bar", out: "?baz=2" },
++    { input: "?bar=1", keys: "bar", out: "" },
++    { input: "foo?bar=1&baz=2", keys: "bar", out: "foo?baz=2" },
++    // Hash is preserved
++    { input: "/foo?bar=1&baz=2#hash", keys: "bar", out: "/foo?baz=2#hash" },
++    { input: "/foo?bar=1#hash", keys: "bar", out: "/foo#hash" },
++    { input: "#hash", keys: "bar", out: "#hash" },
++    // Full URLs
++    {
++      input: "https://example.com/foo?bar=1&baz=2#hash",
++      keys: "bar",
++      out: "https://example.com/foo?baz=2#hash",
++    },
++    {
++      input: "https://example.com/foo?bar=1",
++      keys: "bar",
++      out: "https://example.com/foo",
++    },
++    // Order of remaining params is preserved
++    {
++      input: "/foo?c=3&a=1&b=2",
++      keys: "a",
++      out: "/foo?c=3&b=2",
++    },
++    // Encoding of remaining params is preserved
++    {
++      input: "/foo?bar=1&q=hello+world&baz=a%26b",
++      keys: "bar",
++      out: "/foo?q=hello+world&baz=a%26b",
++    },
++    // Keys matched after decoding
++    { input: "/foo?a%20b=1&c=2", keys: "a b", out: "/foo?c=2" },
++    { input: "/foo?a+b=1&c=2", keys: "a b", out: "/foo?c=2" },
++    { input: "/foo?a%20b=1&c=2", keys: "a%20b", out: "/foo?c=2" },
++    // Empty keys array => unchanged
++    { input: "/foo?bar=1", keys: [], out: "/foo?bar=1" },
++    // Values containing "=" are kept intact
++    { input: "/foo?bar=a%3Db&baz=2", keys: "bar", out: "/foo?baz=2" },
++    { input: "/foo?bar=a=b&baz=2", keys: "baz", out: "/foo?bar=a=b" },
++  ];
++
++  for (const t of tests) {
++    test(`${t.input} without ${JSON.stringify(t.keys)}`, () => {
++      expect(withoutQuery(t.input, t.keys)).toBe(t.out);
++    });
++  }
++});
++
+ describe("getQuery", () => {
+   const tests = {
+     "http://foo.com/foo?test=123&unicode=%E5%A5%BD": {

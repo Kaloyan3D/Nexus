@@ -1,0 +1,6 @@
+{
+  "providerId": "acme",
+  "remoteModelId": "acme-large-1",
+  "logicalModelId": "acme/large",
+  "routeId": "acme/large"
+}

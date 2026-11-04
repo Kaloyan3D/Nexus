@@ -1,0 +1,146 @@
+[
+ {
+  "run": "live-1",
+  "call": 3,
+  "program": "sh",
+  "args": [
+   "-c",
+   "cat index.html"
+  ],
+  "exitCode": 0,
+  "kernelVerdict": "pass",
+  "legacyActivityVerification": "run-pass"
+ },
+ {
+  "run": "live-1",
+  "call": 6,
+  "program": "sh",
+  "args": [
+   "-c",
+   "python3 -c \"from html.parser import HTMLParser; p=HTMLParser(); p.feed(open('index.html').read()); print('HTML parses OK')\" && grep -q 'hiiii' index.html && echo \"contains hiiii: OK\" && ls -l"
+  ],
+  "exitCode": 0,
+  "kernelVerdict": "pass",
+  "legacyActivityVerification": "run-pass"
+ },
+ {
+  "run": "live-1",
+  "call": 7,
+  "program": "sh",
+  "args": [
+   "-c",
+   "ls -la; echo '---'; if [ -f package.json ]; then echo 'package.json found, installing...'; npm ci; npm test; elif [ -f requirements.txt ]; then pip install -r requirements.txt; pytest; else echo 'No build system / dependencies detected (static HTML project). Running HTML verification...'; python3 -c \"from html.parser import HTMLParser; p=HTMLParser(); p.feed(open('index.html').read()); print('HTML parses OK')\"; grep -q 'hiiii' index.html && echo 'contains hiiii: OK'; echo 'verification passed'; fi"
+  ],
+  "exitCode": 0,
+  "kernelVerdict": "pass",
+  "legacyActivityVerification": "pass"
+ },
+ {
+  "run": "live-2",
+  "call": 12,
+  "program": "sh",
+  "args": [
+   "-c",
+   "python3 -c \"from html.parser import HTMLParser; p=HTMLParser(); p.feed(open('index.html').read()); print('HTML parses OK')\" && python3 -c \"import re; html=open('index.html').read(); m=re.search(r'<script>(.*?)</script>', html, re.S); open('/tmp/check.js','w').write(m.group(1)); print('script extracted:', len(m.group(1)), 'chars')\" && node --check /tmp/check.js && echo 'JS syntax OK' && ls -la && grep -c hiiii index.html"
+  ],
+  "exitCode": 0,
+  "kernelVerdict": "pass",
+  "legacyActivityVerification": "pass"
+ },
+ {
+  "run": "live-3-failed-run",
+  "call": 25,
+  "program": "sh",
+  "args": [
+   "-c",
+   "ls -la && echo \"---\" && python3 -c \"from html.parser import HTMLParser; p=HTMLParser(); open('index.html').read(); print('parse import ok')\" && python3 - <<'PY'\nimport re, pathlib\nsrc = pathlib.Path('index.html').read_text()\n# balanced tags check for main elements\nfor tag in ['html','head','body','main','nav','header','section','footer','script','style','button']:\n    o = len(re.findall(rf'<{tag}[\\s>]', src))\n    c = len(re.findall(rf'</{tag}>', src))\n    print(f'{tag}: open={o} close={c} {\"OK\" if o==c or tag==\"button\" and o==c else (\"OK\" if o==c else \"MISMATCH\")}')\n# checks\nchecks = [\n    ('doctype', '<!DOCTYPE html>' in src),\n    ('viewport meta', 'name=\"viewport\"' in src),\n    ('lang', 'lang=\"en\"' in src),\n    ('no emoji boxes in buttons', '\ud83d\udc4b' not in src and '\ud83c\udf89' not in src),\n    ('skip link', 'skip-link' in src),\n    ('aria-live', 'aria-live' in src),\n    ('theme persist', 'hiiii-theme' in src),\n    ('no opacity-0 card trap', '.card.is-hidden { opacity: 0' not in src and 'html.js .card { opacity: 0' not in src),\n]\nfor n, ok in checks:\n    print(('PASS' if ok else 'FAIL') + ' ' + n)\nprint('bytes:', len(src.encode()))\nPY"
+  ],
+  "exitCode": 0,
+  "kernelVerdict": "pass",
+  "legacyActivityVerification": "run-pass"
+ },
+ {
+  "run": "live-3-failed-run",
+  "call": 26,
+  "program": "sh",
+  "args": [
+   "-c",
+   "python3 - <<'PY'\nimport re, pathlib\nsrc = pathlib.Path('index.html').read_text()\nm = re.findall(r'<script>(.*?)</script>', src, re.S)\n# skip first small script, check the big one\nopen('/tmp/check.js','w').write(m[-1])\nprint('extracted', len(m[-1]), 'chars')\nPY\nnode --check /tmp/check.js && echo \"JS SYNTAX OK\""
+  ],
+  "exitCode": 0,
+  "kernelVerdict": "pass",
+  "legacyActivityVerification": "run-pass"
+ },
+ {
+  "run": "live-3-failed-run",
+  "call": 27,
+  "program": "sh",
+  "args": [
+   "-c",
+   "ls && python3 - <<'PY'\nimport re, pathlib\nsrc = pathlib.Path('index.html').read_text()\nfor tag in ['html','head','body','main','nav','header','section','footer','script','style','button']:\n    o=len(re.findall(rf'<{tag}[\\s>]',src)); c=len(re.findall(rf'</{tag}>',src))\n    print(tag, o, c, 'OK' if o==c else 'MISMATCH')\nprint('PASS' if '<!DOCTYPE html>' in src and 'skip-link' in src and 'aria-live' in src else 'FAIL')\nPY\npython3 - <<'PY'\nimport re, pathlib\nsrc = pathlib.Path('index.html').read_text()\nm = re.findall(r'<script>(.*?)</script>', src, re.S)\nopen('/tmp/check.js','w').write(m[-1])\nPY\nnode --check /tmp/check.js && echo \"JS SYNTAX OK\""
+  ],
+  "exitCode": 0,
+  "kernelVerdict": "pass",
+  "legacyActivityVerification": "run-pass"
+ },
+ {
+  "run": "live-3-failed-run",
+  "call": 28,
+  "program": "sh",
+  "args": [
+   "-c",
+   "ls -la; test -f package.json && (npm ci 2>&1 | tail -2; npm test 2>&1 | tail -20) || echo \"NO package.json \u2014 static single-file site, nothing to install\"; node --check <(python3 -c \"import re,pathlib;print(re.findall(r'<script>(.*?)</script>',pathlib.Path('index.html').read_text(),re.S)[-1])\") && echo \"JS OK\""
+  ],
+  "exitCode": 1,
+  "kernelVerdict": "fail",
+  "legacyActivityVerification": "fail"
+ },
+ {
+  "run": "live-3-failed-run",
+  "call": 29,
+  "program": "sh",
+  "args": [
+   "-c",
+   "python3 -c \"import re,pathlib; m=re.findall(r'<script>(.*?)</script>',pathlib.Path('index.html').read_text(),re.S); open('/tmp/check.js','w').write(m[-1]); print('extracted',len(m[-1]),'chars')\" && node --check /tmp/check.js && echo \"JS SYNTAX OK\""
+  ],
+  "exitCode": 0,
+  "kernelVerdict": "pass",
+  "legacyActivityVerification": "pass"
+ },
+ {
+  "run": "live-3-failed-run",
+  "call": 30,
+  "program": "sh",
+  "args": [
+   "-c",
+   "ls -la; test -f package.json && (npm ci 2>&1 | tail -2; npm test 2>&1 | tail -20) || echo \"NO package.json \u2014 static single-file site, nothing to install\"; node --check <(python3 -c \"import re,pathlib;print(re.findall(r'<script>(.*?)</script>',pathlib.Path('index.html').read_text(),re.S)[-1])\") && echo \"JS OK\""
+  ],
+  "exitCode": 1,
+  "kernelVerdict": "fail",
+  "legacyActivityVerification": "fail"
+ },
+ {
+  "run": "live-4-accepted-run",
+  "call": 18,
+  "program": "sh",
+  "args": [
+   "-c",
+   "python3 extract.py && node --check /tmp/hiiii-check.js && echo JS_OK; python3 -c \"from html.parser import HTMLParser; p=HTMLParser(); p.feed(open('index.html').read()); print('HTML_PARSE_OK')\""
+  ],
+  "exitCode": 0,
+  "kernelVerdict": "pass",
+  "legacyActivityVerification": "pass"
+ },
+ {
+  "run": "live-4-accepted-run",
+  "call": 19,
+  "program": "sh",
+  "args": [
+   "-c",
+   "python3 -c \"import re; h=open('index.html').read(); m=re.findall(r'<script>(.*?)</script>', h, re.S); open('/tmp/hiiii-check.js','w').write(m[0])\" && node --check /tmp/hiiii-check.js && echo JS_OK && rm /tmp/hiiii-check.js && python3 -c \"from html.parser import HTMLParser; p=HTMLParser(); p.feed(open('index.html').read()); print('HTML_PARSE_OK')\" && ls -la index.html"
+  ],
+  "exitCode": 0,
+  "kernelVerdict": "pass",
+  "legacyActivityVerification": "pass"
+ }
+]

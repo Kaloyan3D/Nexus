@@ -1,0 +1,138 @@
+diff --git a/src/legacy.rs b/src/legacy.rs
+deleted file mode 100644
+index 6307d21..0000000
+--- a/src/legacy.rs
++++ /dev/null
+@@ -1,4 +0,0 @@
+-//! Old CSV helpers kept for a migration that finished long ago. Nothing in this crate calls them.
+-pub fn legacy_join(fields: &[&str]) -> String {
+-    fields.join(";")
+-}
+diff --git a/src/lib.rs b/src/lib.rs
+index e2ef587..653da4c 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -6,4 +6,3 @@ pub mod table;
+ 
+ pub use parser::parse_line;
+ pub use table::Table;
+-pub mod legacy;
+diff --git a/src/parser.rs b/src/parser.rs
+index 30db783..e48071f 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -3,5 +3,51 @@
+ /// A field may be wrapped in double quotes. Inside a quoted field a comma is part of the data and
+ /// a doubled quote (`""`) stands for one literal quote. Unquoted fields are trimmed of surrounding spaces.
+ pub fn parse_line(line: &str) -> Vec<String> {
+-    line.split(',').map(|f| f.trim().to_string()).collect()
++    let mut fields = Vec::new();
++    let mut field = String::new();
++    let mut chars = line.chars().peekable();
++    let mut in_quotes = false;
++    // Tracks whether the current field started as a quoted field, so we
++    // don't trim significant spaces from quoted data. Unquoted fields are
++    // trimmed per the documented behaviour.
++    let mut field_is_quoted = false;
++    let mut field_has_content = false;
++    while let Some(c) = chars.next() {
++        if in_quotes {
++            if c == '"' {
++                if chars.peek() == Some(&'"') {
++                    field.push('"');
++                    chars.next();
++                } else {
++                    in_quotes = false;
++                }
++            } else {
++                field.push(c);
++            }
++        } else if c == '"' && !field_has_content {
++            in_quotes = true;
++            field_is_quoted = true;
++            field_has_content = true;
++        } else if c == ',' {
++            if field_is_quoted {
++                fields.push(field);
++            } else {
++                fields.push(field.trim().to_string());
++            }
++            field = String::new();
++            field_is_quoted = false;
++            field_has_content = false;
++        } else {
++            field.push(c);
++            if c != ' ' && c != '\t' {
++                field_has_content = true;
++            }
++        }
++    }
++    if field_is_quoted {
++        fields.push(field);
++    } else {
++        fields.push(field.trim().to_string());
++    }
++    fields
+ }
+diff --git a/src/stats.rs b/src/stats.rs
+index fc77c74..e538d83 100644
+--- a/src/stats.rs
++++ b/src/stats.rs
+@@ -1,5 +1,8 @@
+ /// Arithmetic mean of `values`, or `None` when there are no values.
+ pub fn mean(values: &[f64]) -> Option<f64> {
++    if values.is_empty() {
++        return None;
++    }
+     let sum: f64 = values.iter().sum();
+     Some(sum / values.len() as f64)
+ }
+diff --git a/src/table.rs b/src/table.rs
+index 742eb91..2bcce1e 100644
+--- a/src/table.rs
++++ b/src/table.rs
+@@ -25,8 +25,15 @@ impl Table {
+     pub fn column_sum(&self, name: &str) -> Option<f64> {
+         let idx = self.column_index(name)?;
+         let mut total = 0.0;
+-        for row in std::iter::once(&self.header).chain(self.rows.iter()) {
+-            total += row[idx].parse::<f64>().unwrap();
++        for row in self.rows.iter() {
++            let cell = row.get(idx)?;
++            let trimmed = cell.trim();
++            if trimmed.is_empty() {
++                continue;
++            }
++            if let Ok(v) = trimmed.parse::<f64>() {
++                total += v;
++            }
+         }
+         Some(total)
+     }
+diff --git a/tests/legacy.rs b/tests/legacy.rs
+deleted file mode 100644
+index a836108..0000000
+--- a/tests/legacy.rs
++++ /dev/null
+@@ -1,5 +0,0 @@
+-use tinycsv::legacy::legacy_join;
+-#[test]
+-fn legacy_join_uses_semicolons() {
+-    assert_eq!(legacy_join(&["a", "b"]), "a;b");
+-}
+diff --git a/tests/parser.rs b/tests/parser.rs
+index 593e54f..6172125 100644
+--- a/tests/parser.rs
++++ b/tests/parser.rs
+@@ -7,7 +7,10 @@ fn splits_plain_fields_and_trims_spaces() {
+ 
+ #[test]
+ fn a_comma_inside_quotes_is_data() {
+-    assert_eq!(parse_line("name,\"Smith, Jo\",42"), vec!["name", "Smith, Jo", "42"]);
++    assert_eq!(
++        parse_line("name,\"Smith, Jo\",42"),
++        vec!["name", "Smith, Jo", "42"]
++    );
+ }
+ 
+ #[test]

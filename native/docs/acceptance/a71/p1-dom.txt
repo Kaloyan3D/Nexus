@@ -1,0 +1,184 @@
+New conversation
+East India game
+Ready for your next message
+Review this repository: this is a read-only task, do not change any files. Look…
+10 findings remembered · 0 addressed
+Refer to them by number (F1, F2…) in your next message.
+You
+6m ago
+
+Review this repository: this is a read-only task, do not change any files. Look at the architecture, the game rules implementation, state handling, persistence and the tests. Report your findings as a numbered list F1, F2, F3 and so on. For each finding give the severity, the file and line numbers you actually read, why it is a problem and the fix you would make. End with what you did not inspect.
+
+Run 1
+Read-only
+Completed
+Read-only · no file changed
+
+Started from the project's files
+
+
+42 steps
+Execution evidence
+Nexus
+just now
+
+Review of the repository as found in the isolated copy. No files were changed.
+
+Architecture / rules / state / persistence review
+F1 — mortgage bypasses the turn check — free out-of-turn money
+
+Severity: High — exploitable rules violation.
+
+Location:
+
+src/game/engine.ts:967 — if (action.type !== "mortgage" && s.activePlayer !== p.id)
+src/game/engine.ts:1070-1082 — case "mortgage" has no phase check and no activePlayer check.
+
+Why it is a problem:
+Every other GameAction is gated on s.activePlayer === action.player. mortgage is explicitly exempted, presumably so a company blocked in dividend settlement can raise treasury. But the mortgage handler itself never verifies that the caller is the company that currently owes dividends (s.settlement.cursor / payDividends at src/game/engine.ts:670-687), or even that it is that player's turn. The UI in src/App.tsx:1579-1590 only renders the button for the active player, but the engine is documented as the authoritative, server-ready boundary (ARCHITECTURE.md:2-4), so a direct applyAction({type:"mortgage",player:<not-active>,count:1}) succeeds on any phase and grants floor(stockValue/2) GP. This breaks atomic turn ownership and the mortgage economy.
+
+Fix:
+Remove the blanket exemption. Require either action.player === s.activePlayer, or, during dividend settlement, action.player === s.initiative[s.settlement.cursor]. Add an engine test for out-of-turn mortgage rejection.
+
+F2 — Dividend insolvency soft-locks the game
+
+Severity: High — playable game can become unfinishable.
+
+Location:
+
+src/game/engine.ts:624-669 (closePeriod), 670-714 (payDividends), especially 680-687.
+
+Why it is a problem:
+If company.cash < total dividends owed, the engine sets activePlayer = id, logs that the rulebook "gives no insolvency procedure", and returns, expecting the player to sellShares/mortgage then re-issue endPeriod. If the company holds no sellable shares (period 5 also freezes sales per 1053), has no mortgage capacity, and has no treasury path, every subsequent endPeriod fails the p.cash < due guard at 635-638 forever. There is no fallback (bank pays, forced sale, elimination). This matches the honest log message but violates ARCHITECTURE.md:5 ("rejected actions preserve the previous state" is fine, but there is no forward progress).
+
+Fix:
+Decide and document one rule: e.g. bank covers the shortfall and records it, or presidency is forcibly mortgaged/sold, or shares auto-sell at current value. Add a regression test that drives a broke company through closePeriod.
+
+F3 — Undo-safety logic lives in two places and disagrees
+
+Severity: Medium — privacy/undo invariant is fragile.
+
+Location:
+
+src/game/engine.ts:1183-1184 — canUndo() = !lastActionRevealed && phase !== "finished".
+src/store.ts:40-41 — safe = !reveals && rng unchanged && phase unchanged && !["influence","navigation"].includes(current.phase); stored previous/canUndo.
+
+Why it is a problem:
+The engine exposes canUndo, but the store does not use it; it re-implements a stricter heuristic. The engine version would permit undo after a phase transition as long as lastActionRevealed is false, while the store correctly blocks undo across phase/RNG changes. Having two definitions invites a future caller to use the permissive one and roll back dice rolls or phase advances. The store check also keys off current.phase (pre-action phase) for the influence/navigation exclusion rather than the resulting phase, which is subtle.
+
+Fix:
+Delete one definition. Make the store call engine.canUndo(result.state) plus explicit RNG/phase-equality guards, or move the full safe predicate into the engine and unit-test it (undo blocked after chooseMarket, navigation, dice rolls; allowed after a plain agent placement).
+
+F4 — Neutral-company dock swap in loadShip can break the dock invariant
+
+Severity: Medium — latent invariant violation / dupe-dock risk.
+
+Location:
+
+src/game/engine.ts:774-784 (neutral branch of loadShip), vs. invariant src/game/engine.ts:1250-1253 (fleet size and unique docks).
+
+Why it is a problem:
+On a neutral load the ship is returned to "port" and then assigned a dock "free among port ships" (775-780), then swaps with other if one shares that dock (781-783). firstFreeDock (178-182) considers the whole fleet regardless of location, while the neutral search only considers location === "port", so a sea/Indies ship holding that dock is invisible to the search and other (which searches the whole fleet by dock) can then create a duplicate dock, or other.dock = ship.dock can orphan/duplicate. Full-game sims pass, but the code path is only exercised for the 2-player neutral company.
+
+Fix:
+Recompute firstFreeDock-style occupancy over the whole fleet (excluding the moving ship) and assign directly without the swap, then assert uniqueness. Add a 2-player test that forces a neutral load while another neutral ship is at sea/in the Indies.
+
+F5 — Final tiebreak uses unfiltered initiative containing the neutral company
+
+Severity: Low-Medium — wrong winner possible on exact ties in 2-player games.
+
+Location:
+
+src/game/engine.ts:109-124 (getScores), tiebreak line 123: s.initiative.indexOf(a) - ....
+
+Why it is a problem:
+getScores filters out neutral players (line 111), but the last tiebreaker indexes into the full s.initiative, which in 2-player games contains the neutral id (src/game/engine.ts:350). The neutral's position shifts the relative order of real players versus a "humans-only initiative order" the rules imply. Cash and own-stock tiebreaks run first, so this only bites on full ties, but it decides the winner.
+
+Fix:
+Build a filtered order = s.initiative.filter(id => !s.players[id].neutral) and tiebreak on order.indexOf(...). Add a 2-player tie test with the neutral interleaved.
+
+F6 — Persistence validator is weaker than the engine invariants it precedes
+
+Severity: Medium — malformed imports pass structural validation; defense-in-depth gap.
+
+Location: src/persistence.ts:17-56, compared with src/game/engine.ts:1186-1308 and src/store.ts:56.
+
+Examples actually read:
+
+persistence.ts:37 allows any dock 0..3 and never checks dock < 2+extensions or location !== "port" => zone != null; the engine checks both at 1265-1272.
+persistence.ts:43 allows stock.index 0..100 while the track length is 23; engine checks bounds at 1277-1287.
+persistence.ts:50-55 checks queue IDs exist but never checks share conservation, goods conservation (getReserve), warehouse capacity vs. extensions beyond the length check, salesBand sanity, or settlement.cursor consistency.
+persistence.ts:51 does not validate placements[].activated type; the engine treats anything !== false as activated (engine.ts:426,991), so a crafted "yes" counts as activated.
+Name length >80 rejected at persistence.ts:28 but createGame enforces 1–40 (engine.ts:270-275).
+
+The store does call assertInvariants after parseSave (store.ts:56), which currently closes most holes, but the comment at persistence.ts:16 claims structural validation precedes component checks, and any future importer that calls only parseSave inherits the weak checks.
+
+Fix:
+Tighten validateSnapshot to mirror assertInvariants: dock range vs. extensions, ship location/zone coupling, stock.index < STOCK_TRACK.length, available + held === (4p ? 7 : 6), activated === undefined || typeof === "boolean", orderCounter/turnCursor/stockPasses bounds, and name length 40. Add negative import tests for each.
+
+F7 — Neutral influence placements are dead weight
+
+Severity: Low-Medium — possible rules deviation, untested.
+
+Location:
+
+src/game/engine.ts:866-874 (neutralAgents pushes 3 placements with activated:false).
+src/game/engine.ts:455-460 (startInfluence includes neutral placements via p.activated !== false || neutral, but 465-467 only enqueues non-neutral players).
+
+Why it is a problem:
+Three of six neutral agent cards carry investor-influence/governor-influence (src/game/data.ts:238-269), and neutralAgents dutifully records them, yet startInfluence never creates a queue entry for the neutral company, so the abilities have no effect (no card peek/choice, no blocking of a human's choose slot). If the physical game gives the neutral company an influence voice (or denies humans the chooser slot when neutral holds it), this is a rules bug; if neutral influence is intentionally inert, the placements are misleading and the || neutral clause at line 459 is dead code.
+
+Fix:
+Clarify against the rulebook whether neutral influence should choose/consult or cede; either enqueue-and-auto-resolve neutral influence in settleAutomatic or stop recording those placements and remove the dead clause. Cover with a 2-player influence test.
+
+F8 — Seed 0 collides with seed 1; starting-cash table silently depends on shuffle order
+
+Severity: Low — reproducibility wart.
+
+Location: src/game/engine.ts:276 ((options.seed ?? Date.now()) >>> 0 || 1), 346-355.
+
+Why it is a problem:
+0 >>> 0 || 1 maps an explicit seed 0 to 1, so two distinct user-supplied seeds produce identical games, contradicting the "seeded RNG, reproducible games" claim (RULES_COVERAGE.md:16). Separately, starting cash [10,10,11,12]/[10,11,12]/[10,11] is dealt by shuffled-initiative position (351-354), which is correct per the cited rule but means the same named player gets different cash across seeds — worth documenting in the setup UI, not just code.
+
+Fix:
+Only coerce NaN/negative to a default; preserve 0 as a valid >>>0 seed (xorshift handles 0 poorly — if 0 RNG state is unacceptable, reject 0 with a clear error instead of aliasing it). Document the initiative-based cash deal.
+
+F9 — getScores presidency math and share-ledger edge cases are untested at the boundary
+
+Severity: Low — likely correct, but one boundary is implicit.
+
+Location: src/game/engine.ts:113-115 ((2 - p.presidencyMortgaged) * value), 1052-1068 (sellShares), 1079 (mortgage payout floor(value/2)).
+
+Why it is a problem:
+Wealth counts 2 - mortgaged presidency shares at full value while mortgage pays only floor(value/2) and redeem costs full value (1086). That asymmetry is presumably the intended mortgage penalty, but no test pins the full loop (mortgage → wealth drops by ceil(value/2); redeem → wealth restores minus the penalty). Presidency shares are also excluded from p.shares (good — sellShares only touches shares[]), yet nothing in assertInvariants cross-checks presidencyMortgaged + shares[id] against 2, so a crafted save could hold 2 presidency + N owned shares of its own company.
+
+Fix:
+Add the mortgage/redeem wealth round-trip test and an invariant p.shares[p.id] + (2 - p.presidencyMortgaged) <= 2 (or whatever the physical limit is).
+
+F10 — Board leaks neutral-ship positions during the "face-down" navigation phase
+
+Severity: Low — contradicts stated face-down/handoff guarantee for the neutral company.
+
+Location:
+
+src/App.tsx:429-444 (.board-ocean renders every fleet.filter(s => s.location !== "port") with owner color, under inert at 330 only while privateKey !== turnKey).
+src/game/engine.ts:888-899 (neutral navigation auto-resolves inside settleAutomatic before the human's handoff screen appears).
+
+Why it is a problem:
+ARCHITECTURE.md:12 promises face-down ship identities guarded by handoff screens. Human ships are hidden behind the Private player handoff dialog (App.tsx:524-552), but neutral ships navigate automatically and their new sea positions are rendered as colored tokens the moment any human reveals their own screen — i.e., neutral destinations are public while human destinations are secret. If neutral destinations are meant to be secret until loading, the board should also mask neutral sea ships during navigation.
+
+Fix:
+During phase === "navigation", render neutral sea ships as uncolored/generic tokens or hide positions until loading; document the intended rule.
+
+What I inspected
+ARCHITECTURE.md, README.md, RULES_COVERAGE.md, IMPLEMENTATION_REPORT.md (full).
+src/game/types.ts (full, 143 lines), src/game/engine.ts (full, 1309 lines, in 5 paged reads), src/game/data.ts (full), src/persistence.ts (full, 70 lines), src/store.ts (full, 60 lines).
+src/game/engine.test.ts (full, ~702 lines), src/persistence.test.ts (full, 30 lines), tests/game.spec.ts (full, 104 lines), package.json scripts.
+src/App.tsx — partially (setup/store wiring 118-330, board 320-465, handoff/modals 460-710, all ActionPanel branches 953-1638); Maritime.tsx, index.css, main.tsx, vite.config.ts not inspected beyond listing.
+proc_run npm run typecheck attempted: failed with tsc: command not found (exit 127) because node_modules is absent in the sandbox and installs have no network here. Unit (vitest), lint, build, and Playwright suites were therefore not re-run; test claims above cite the checked-in suites and the verification log in IMPLEMENTATION_REPORT.md:32-52, not a fresh run.
+reference/ (rulebook PDF/TXT) and tmp/rules/ photographs were not present/listed in this copy, so component-data reconstructions flagged RECONSTRUCTED in RULES_COVERAGE.md:96-121 could not be independently verified.
+Message
+Auto
+Review only
+Make changes
+Send

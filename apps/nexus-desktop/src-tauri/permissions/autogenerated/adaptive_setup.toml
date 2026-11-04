@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-adaptive-setup"
+description = "Enables the adaptive_setup command without any pre-configured scope."
+commands.allow = ["adaptive_setup"]
+
+[[permission]]
+identifier = "deny-adaptive-setup"
+description = "Denies the adaptive_setup command without any pre-configured scope."
+commands.deny = ["adaptive_setup"]

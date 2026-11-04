@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tool-events"
+description = "Enables the tool_events command without any pre-configured scope."
+commands.allow = ["tool_events"]
+
+[[permission]]
+identifier = "deny-tool-events"
+description = "Denies the tool_events command without any pre-configured scope."
+commands.deny = ["tool_events"]

@@ -1,0 +1,89 @@
+/* Nexus design tokens. Standalone: no external or legacy variable namespaces. */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --nv-bg: #09090b;
+  --nv-bg-sidebar: #0d0d10;
+  --nv-surface: #111116;
+  --nv-surface-elevated: #17171d;
+  --nv-surface-popover: #1f1f26;
+  --nv-border: #27272f;
+  --nv-border-subtle: #1c1c22;
+
+  /* Text */
+  --nv-text: #f5f5f7;
+  --nv-text-secondary: #a1a1aa;
+  --nv-text-muted: #71717a;
+
+  /* Brand */
+  --nv-purple: #7c5cff;
+  --nv-purple-hover: #9177ff;
+  --nv-purple-tint: rgba(124, 92, 255, 0.12);
+  --nv-purple-tint-strong: rgba(124, 92, 255, 0.2);
+  --nv-purple-border: rgba(124, 92, 255, 0.5);
+  --nv-on-purple: #ffffff;
+
+  /* Semantic */
+  --nv-success: #32d583;
+  --nv-warning: #f5a524;
+  --nv-error: #f04438;
+  --nv-success-tint: rgba(50, 213, 131, 0.12);
+  --nv-warning-tint: rgba(245, 165, 36, 0.12);
+  --nv-error-tint: rgba(240, 68, 56, 0.12);
+
+  /* Typography */
+  --nv-font-sans: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", "Noto Sans",
+    "DejaVu Sans", sans-serif;
+  --nv-font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Mono",
+    "DejaVu Sans Mono", monospace;
+  --nv-text-xs: 11px;
+  --nv-text-sm: 12px;
+  --nv-text-base: 13px;
+  --nv-text-md: 14px;
+  --nv-text-lg: 16px;
+  --nv-text-xl: 20px;
+  --nv-text-2xl: 28px;
+
+  /* Spacing (4px grid) */
+  --nv-s-1: 4px;
+  --nv-s-2: 8px;
+  --nv-s-3: 12px;
+  --nv-s-4: 16px;
+  --nv-s-5: 20px;
+  --nv-s-6: 24px;
+  --nv-s-8: 32px;
+
+  /* Shape */
+  --nv-radius-sm: 4px;
+  --nv-radius: 6px;
+  --nv-radius-lg: 8px;
+  --nv-radius-pill: 999px;
+
+  /* Layout */
+  --nv-sidebar-w: 244px;
+  --nv-inspector-w: 372px;
+  --nv-topbar-h: 58px;
+
+  /* Motion */
+  --nv-ease: cubic-bezier(0.2, 0, 0, 1);
+  --nv-fast: 120ms;
+  --nv-base: 180ms;
+
+  /* Elevation (overlays only) */
+  --nv-shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --nv-fast: 0ms;
+    --nv-base: 0ms;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

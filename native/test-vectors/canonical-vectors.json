@@ -1,0 +1,128 @@
+[
+  {
+    "name": "empty-object",
+    "input": {},
+    "canonical": "{}",
+    "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+  },
+  {
+    "name": "sorted-keys",
+    "input": {
+      "b": 1,
+      "a": [
+        3,
+        2,
+        {
+          "y": "q",
+          "x": 1
+        }
+      ],
+      "c": {
+        "d2": 1,
+        "d1": 2
+      }
+    },
+    "canonical": "{\"a\":[3,2,{\"x\":1,\"y\":\"q\"}],\"b\":1,\"c\":{\"d1\":2,\"d2\":1}}",
+    "sha256": "c6584d82cdbf3d3c6ea13d4e4ad1c693e975ee3b6e4763a077ea698584dec516"
+  },
+  {
+    "name": "scalars",
+    "input": {
+      "n": null,
+      "t": true,
+      "f": false,
+      "i": -2,
+      "fl": 1.5,
+      "s": "x",
+      "empty": ""
+    },
+    "canonical": "{\"empty\":\"\",\"f\":false,\"fl\":1.5,\"i\":-2,\"n\":null,\"s\":\"x\",\"t\":true}",
+    "sha256": "f63c79cdc9ed6a77320a126347a07942dabd92e02f1c2d0ffae89a2a670551ac"
+  },
+  {
+    "name": "unicode-escapes",
+    "input": {
+      "s": "hllo \"q\" backslash: \\ newline:\n ctrl:\u0001"
+    },
+    "canonical": "{\"s\":\"hllo \\\"q\\\" backslash: \\\\ newline:\\n ctrl:\\u0001\"}",
+    "sha256": "f10180180f35726d3ac1400d80a22fa5cf4ecfc22ea9ac98be2a274676212be5"
+  },
+  {
+    "name": "intent-digest-fields",
+    "input": {
+      "taskInstanceId": "t-1",
+      "attemptId": "a-1",
+      "commandId": "c-1",
+      "backend": "native",
+      "controllerRevision": 1,
+      "role": "muse_main",
+      "modeId": "engineering-v2",
+      "modeConfigRevision": 3,
+      "payloadDigest": "abababababababababababababababababababababababababababababababab"
+    },
+    "canonical": "{\"attemptId\":\"a-1\",\"backend\":\"native\",\"commandId\":\"c-1\",\"controllerRevision\":1,\"modeConfigRevision\":3,\"modeId\":\"engineering-v2\",\"payloadDigest\":\"abababababababababababababababababababababababababababababababab\",\"role\":\"muse_main\",\"taskInstanceId\":\"t-1\"}",
+    "sha256": "ac40d829a06038a1cc24feee07af013c2c705776825c60035b2e5b752a70c73d"
+  },
+  {
+    "name": "command-digest-fields",
+    "input": {
+      "intentDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "leaseEpoch": 7,
+      "snapshotDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "storeIncarnation": "incarn-1",
+      "targetDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "canonical": "{\"intentDigest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"leaseEpoch\":7,\"snapshotDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"storeIncarnation\":\"incarn-1\",\"targetDigest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}",
+    "sha256": "50c447e657d62884e8f0a7c6ebd81a2b8593384c945a8a0cc6090920c5b41853"
+  },
+  {
+    "name": "realistic-target",
+    "input": {
+      "accessType": "managed",
+      "connectionId": "conn-1",
+      "dataUseTier": "contributor",
+      "executionKind": "raw-model",
+      "logicalModelId": "model-1",
+      "modeConfigRevision": 3,
+      "modeId": "engineering-v2",
+      "orchestrationEngineId": "muse",
+      "protocolId": "https",
+      "providerId": "prov-1",
+      "reasoning": "low",
+      "remoteModelId": "rm-1",
+      "requiredCapabilities": [
+        "toolCalling"
+      ],
+      "resolutionId": "compat",
+      "roleId": "muse_main",
+      "routeId": "route-1",
+      "schemaVersion": 1,
+      "slotRequirements": {
+        "toolCalling": true
+      }
+    },
+    "canonical": "{\"accessType\":\"managed\",\"connectionId\":\"conn-1\",\"dataUseTier\":\"contributor\",\"executionKind\":\"raw-model\",\"logicalModelId\":\"model-1\",\"modeConfigRevision\":3,\"modeId\":\"engineering-v2\",\"orchestrationEngineId\":\"muse\",\"protocolId\":\"https\",\"providerId\":\"prov-1\",\"reasoning\":\"low\",\"remoteModelId\":\"rm-1\",\"requiredCapabilities\":[\"toolCalling\"],\"resolutionId\":\"compat\",\"roleId\":\"muse_main\",\"routeId\":\"route-1\",\"schemaVersion\":1,\"slotRequirements\":{\"toolCalling\":true}}",
+    "sha256": "47f8acb990de8908422870a9d129ba2f314847a9d0e59b2bb9af6c68ee128d48"
+  },
+  {
+    "name": "nested-arrays",
+    "input": {
+      "roles": [
+        "b",
+        "a"
+      ],
+      "matrix": [
+        [
+          2,
+          1
+        ],
+        [
+          0,
+          null
+        ]
+      ]
+    },
+    "canonical": "{\"matrix\":[[2,1],[0,null]],\"roles\":[\"b\",\"a\"]}",
+    "sha256": "ecfaaa9e8e1538120c5067b9c02bef28f961c6822d6d176166078b43fd08699d"
+  }
+]

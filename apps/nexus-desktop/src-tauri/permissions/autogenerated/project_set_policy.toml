@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-set-policy"
+description = "Enables the project_set_policy command without any pre-configured scope."
+commands.allow = ["project_set_policy"]
+
+[[permission]]
+identifier = "deny-project-set-policy"
+description = "Denies the project_set_policy command without any pre-configured scope."
+commands.deny = ["project_set_policy"]
