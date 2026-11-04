@@ -23,6 +23,7 @@ import type {
   ModelConversationSummary,
   ModelCatalog,
   ModelSelection,
+  PermissionMode,
   ProjectOpenReply,
   ProjectView,
   PermissionSupport,
@@ -127,7 +128,7 @@ export interface NexusState {
   /** Leave the open conversation; the next message starts a NEW one with fresh context. */
   newConversation: () => void;
   /** Send a message into a conversation (a new one when `threadId` is null) and open it. */
-  sendThread: (input: { threadId: string | null; projectId: string; content: string; mode: ThreadMode; workspace?: "continue" | "fresh"; model?: ModelSelection | null }) => Promise<ThreadSendReply | null>;
+  sendThread: (input: { threadId: string | null; projectId: string; content: string; mode: ThreadMode; workspace?: "continue" | "fresh"; model?: ModelSelection | null; permissionMode?: PermissionMode }) => Promise<ThreadSendReply | null>;
   threadSending: boolean;
   threadError: UiError | null;
   /** Phase 2: the engine new tasks use (null = not loaded / not in the shell). */
@@ -179,6 +180,9 @@ export interface NexusState {
   accessBusy: string | null;
   accessError: UiError | null;
   clearAccessError: () => void;
+  /** What the last permission action did (cancelled / done), shown so a confirmation never ends in silence. */
+  accessNotice: { tone: "info" | "success"; text: string } | null;
+  clearAccessNotice: () => void;
 }
 
 function newIdempotencyKey(): string {
@@ -574,6 +578,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
   const setupDone =
     runtimeState === null ||
     runtimeState.mode === "external" ||
+    runtimeState.phase === "unavailable" ||
     (runtimeState.phase === "ready" && runtimeState.providerConnected && runtimeState.consent.given);
   useEffect(() => {
     let alive = true;
@@ -679,17 +684,23 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
   const [accessBusy, setAccessBusy] = useState<string | null>(null);
   const [accessError, setAccessError] = useState<UiError | null>(null);
   const clearAccessError = useCallback(() => setAccessError(null), []);
+  // What the last permission action did, so a cancelled or successful confirmation is never silent.
+  const [accessNotice, setAccessNotice] = useState<{ tone: "info" | "success"; text: string } | null>(null);
+  const clearAccessNotice = useCallback(() => setAccessNotice(null), []);
   const access = useCallback(
     async (key: string, f: () => Promise<unknown>): Promise<boolean> => {
       setAccessBusy(key);
       setAccessError(null);
+      setAccessNotice(null);
       try {
         await f();
+        setAccessNotice({ tone: "success", text: "Done. The project's permissions were updated." });
         return true;
       } catch (e) {
         const u = asUiError(e);
-        // declining the native dialog is not an error
-        if (u.code !== "cancelled" && u.message !== "cancelled") setAccessError(u);
+        // declining the native dialog is not an error, but it is not silent either
+        if (u.code === "cancelled" || u.message === "cancelled") setAccessNotice({ tone: "info", text: "Cancelled. Nothing was changed." });
+        else setAccessError(u);
         return false;
       } finally {
         setAccessBusy(null);
@@ -813,7 +824,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     setPageState("workspace");
   }, [select]);
   const sendThread = useCallback(
-    async (input: { threadId: string | null; projectId: string; content: string; mode: ThreadMode; workspace?: "continue" | "fresh"; model?: ModelSelection | null }) => {
+    async (input: { threadId: string | null; projectId: string; content: string; mode: ThreadMode; workspace?: "continue" | "fresh"; model?: ModelSelection | null; permissionMode?: PermissionMode }) => {
       // One key per click: a retried call never creates a second run or message.
       const key = newIdempotencyKey();
       setThreadSending(true);
@@ -950,6 +961,8 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     allowProjectInstalls,
     accessBusy,
     accessError,
+    accessNotice,
+    clearAccessNotice,
     clearAccessError,
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

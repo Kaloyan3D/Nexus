@@ -29,7 +29,13 @@ export function useThread(threadId: string, stamp: number) {
       t.current++;
     };
   }, [load, stamp]);
-  const active = state.id === threadId && state.detail?.thread.active === true;
+  // also keep reading while a Mac project's result is still on its way to the folder, so the line
+  // "task finished, not on your Mac yet" turns into the real outcome without a manual refresh
+  const syncPending = state.id === threadId && (state.detail?.runs ?? []).some((r) => {
+    const s = r.run?.hostSync?.state;
+    return s !== undefined && !["applied", "conflict", "failed", "not-applied"].includes(s);
+  });
+  const active = state.id === threadId && (state.detail?.thread.active === true || syncPending);
   useEffect(() => {
     if (!active) return;
     const t = setInterval(load, ACTIVE_POLL_MS);

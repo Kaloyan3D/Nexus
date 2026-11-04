@@ -25,8 +25,8 @@ function RuntimePill() {
   // ledger daemon and the model list belong to the operator view and say nothing about whether Nexus works.
   if (runtimeState?.mode === "interactive") {
     const phase = runtimeState.phase;
-    const tone = phase === "ready" ? "success" : phase === "error" ? "error" : "neutral";
-    const label = runtimeState.updatePending ? "ready · update waiting" : phase === "ready" ? "ready" : phase === "error" ? "could not start" : phase === "starting" ? "starting…" : "stopped";
+    const tone = phase === "ready" ? "success" : phase === "error" ? "error" : phase === "unavailable" ? "warning" : "neutral";
+    const label = runtimeState.updatePending ? "ready · update waiting" : phase === "ready" ? "ready" : phase === "error" ? "could not start" : phase === "unavailable" ? "engine not connected" : phase === "starting" ? "starting…" : "stopped";
     return (
       <div className="nv-runtime" ref={ref}>
         <button type="button" className="nv-runtime__pill" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
@@ -36,7 +36,7 @@ function RuntimePill() {
           <div className="nv-runtime__pop" role="dialog" aria-label="Nexus status">
             <dl className="nv-kv">
               <dt>Runtime</dt>
-              <dd>{phase === "ready" ? "running on this computer" : (runtimeState.message ?? phase)}</dd>
+              <dd>{phase === "ready" && !runtimeState.message ? "running on this computer" : (runtimeState.message ?? phase)}</dd>
               <dt>OpenCode Go</dt>
               <dd>{runtimeState.providerConnected ? "connected" : "not connected yet"}</dd>
               <dt>Autonomous work</dt>

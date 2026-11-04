@@ -79,6 +79,14 @@ export function outcomeView(run: IntentRun | null | undefined): OutcomeView | nu
         detail: `The last command exited ${o.lastExitCode ?? "without a code"}, but ${n} earlier verification command${n === 1 ? "" : "s"} failed and ${n === 1 ? "was" : "were"} never re-run successfully. This is not a passing run: open the commands and read the failures.`,
       };
     }
+    case "unattested-checks": {
+      const n = o.checksUnattestedUnresolved ?? 0;
+      return {
+        label: `Not verified · ${n || "a"} check${n === 1 ? "" : "s"} ran inside a compound command`,
+        tone: "warning",
+        detail: `${n === 1 ? "A verification command" : "Verification commands"} ran together with other commands (\`;\`, \`||\`, a list or control flow), so the exit status does not show that ${n === 1 ? "the check" : "each check"} passed: a failure could be hidden. It is not counted as verified and this result will not be applied automatically, whatever your folder setting. Run the check on its own to a pass.`,
+      };
+    }
     case "verified-failed":
       return { label: `Tests failed · exit ${o.lastExitCode ?? "?"}`, tone: "error", detail: "The last executed test command failed." };
     case "blocked-by-approval":

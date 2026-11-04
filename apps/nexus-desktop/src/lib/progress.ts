@@ -73,6 +73,29 @@ function describeStepText(a: ToolActivity): Step {
     if (blocked) return { key, tone: "blocked", text: `Edit not applied (${approvalWords(a)}): ${target(a)}` };
     return { key, tone: "failed", text: `Edit not applied${a.errorCode ? ` (${a.errorCode})` : ""}: ${target(a)}${why(a.errorCode)}` };
   }
+  if (kind === "command" && (a.checkClass === "filter-status" || a.checkClass === "filter-status-joined")) {
+    // M4.7: `check | grep x` exited with the filter's "no line matched": neither a pass nor the check's failure
+    return { key, tone: "uncertain", text: `Check piped into a line filter; exit ${a.exitCode ?? "?"} is the filter's, not the check's (not counted as passed or failed): ${a.argsSummary}` };
+  }
+  if (kind === "command" && a.checkClass === "unattested-joined") {
+    return { key, tone: "uncertain", text: `Check ran inside a compound command again; same open check as before (not counted as verified): ${a.argsSummary}` };
+  }
+  if (kind === "command" && a.checkClass === "unattested-composition") {
+    return { key, tone: "uncertain", text: `Check ran inside a compound command; its exit status cannot show it passed (not counted as verified): ${a.argsSummary}` };
+  }
+  if (kind === "command" && a.verification === "pass" && (a.resolvesFailed?.length ?? 0) > 0 && (a.resolvesHazards?.length ?? 0) === 0) {
+    return { key, tone: "done", text: `Ran ${a.argsSummary} · passed · re-establishes the failed check${a.resolvesFailed!.length === 1 ? "" : "s"} of step${a.resolvesFailed!.length === 1 ? "" : "s"} ${a.resolvesFailed!.join(", ")}` };
+  }
+  if (kind === "command" && a.checkClass === "attested-recheck" && (a.resolvesHazards?.length ?? 0) > 0) {
+    return { key, tone: "done", text: `Check re-established on its own · resolves the unattested check${a.resolvesHazards!.length === 1 ? "" : "s"} of step${a.resolvesHazards!.length === 1 ? "" : "s"} ${a.resolvesHazards!.join(", ")}` };
+  }
+  if (kind === "command" && a.checkClass === "invalid-invocation") {
+    // the check failed before it looked at the project; it stays open until Nexus's own replacement passes
+    return { key, tone: "uncertain", text: `Check could not run (invalid invocation, nothing was checked): ${a.argsSummary} — still unresolved` };
+  }
+  if (kind === "command" && a.checkClass === "controller-recheck" && a.verification === "pass") {
+    return { key, tone: "done", text: `Nexus's replacement check passed · resolves the invalid check of step ${a.resolvesCheck ?? "?"}` };
+  }
   if (kind === "command") {
     if (a.status === "executed" && a.verification === "pass") {
       // a pass over files that exist only in the command's own scratch copy is not a pass of the project
@@ -80,8 +103,33 @@ function describeStepText(a: ToolActivity): Step {
       return { key, tone: un > 0 ? "uncertain" : "done", text: `Ran ${a.argsSummary} · passed · exit ${a.exitCode ?? "?"}${un > 0 ? ` · it also wrote ${un} file${un === 1 ? "" : "s"} that ${un === 1 ? "was" : "were"} NOT saved to your project` : ""}` };
     }
     if (a.status === "executed" && a.verification === "fail") return { key, tone: "failed", text: `Ran ${a.argsSummary} · failed · exit ${a.exitCode ?? "?"}` };
+    // an EXECUTED command that is not a verification check (the broker labels it `run-pass` / `run-fail`): it ran,
+    // and its exit status is what it is. It must never be worded as "not run".
+    if (a.status === "executed") {
+      if (a.processClass === "executable-not-found") {
+        return { key, tone: "uncertain", text: `Ran ${a.argsSummary} · exit ${a.exitCode ?? 127} · a program inside it does not exist in this runtime (not a permission decision)` };
+      }
+      if (a.processClass === "needs-network") {
+        return { key, tone: "uncertain", text: `Ran ${a.argsSummary} · exit ${a.exitCode ?? "?"} · it needed the network, which ordinary commands do not have (dependencies come from a direct install command that you approve)` };
+      }
+      if (a.processClass === "not-executable") {
+        return { key, tone: "uncertain", text: `Ran ${a.argsSummary} · exit ${a.exitCode ?? 126} · a program inside it cannot be executed` };
+      }
+      const code = a.exitCode;
+      return { key, tone: "done", text: `Ran ${a.argsSummary} · exit ${code ?? "?"}${code === 0 ? "" : " (not a verification check)"}` };
+    }
     if (blocked) return { key, tone: "blocked", text: `Command not run (${approvalWords(a)}): ${a.argsSummary}` };
     return { key, tone: "failed", text: `Command not run${a.errorCode ? ` (${a.errorCode})` : ""}: ${a.argsSummary}${why(a.errorCode)}` };
+  }
+  if (a.tool === "browser_inspect") {
+    // M4.1: say what the browser did, from Nexus's own measurements, and whether anyone saw the page
+    const b = a.browser;
+    if (b && a.status === "executed") {
+      const seen = b.imageDelivery === "delivered-to-vision-model" ? "screenshot shown to the model" : "screenshot NOT shown to the model";
+      return { key, tone: b.imageDelivery === "delivered-to-vision-model" && b.pageErrors === 0 ? "done" : "uncertain", text: `Opened ${b.url} in a browser (${b.viewport} ${b.viewportW}×${b.viewportH}) · ${b.pageErrors} page error(s) · ${seen}` };
+    }
+    if (b) return { key, tone: "failed", text: `Browser could not inspect ${b.url}: ${b.error ?? "no page"}` };
+    return { key, tone: "failed", text: `Browser request refused${a.errorCode ? ` (${a.errorCode})` : ""}: ${a.argsSummary}` };
   }
   if (a.tool === "muse_update_reasoning_state") {
     // A control-plane CLAIM from the model (phase, findings). It changes no file and never sets an effort: the host's
@@ -96,6 +144,8 @@ function describeStepText(a: ToolActivity): Step {
 /** What the run is doing right now, from the lifecycle state and the pending approval. */
 export function nowLine(state: string, pendingTarget: string | null): string {
   switch (state) {
+    case "permission-pending":
+      return pendingTarget ? `Waiting for your decision: ${pendingTarget}` : "Waiting for your decision";
     case "approval-pending":
       return pendingTarget ? `Waiting for your independent approval of ${pendingTarget}` : "Waiting for an independent approval";
     case "tool-running":

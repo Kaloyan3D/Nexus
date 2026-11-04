@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { COMMON_PREVIEW_PORTS, MIN_PREVIEW_PORT, accessOf, accessSentence, parsePreviewPorts } from "../../lib/access";
+import { COMMON_PREVIEW_PORTS, MIN_PREVIEW_PORT, accessOf, accessSentence, parsePreviewPorts, syncPolicySentence } from "../../lib/access";
 import type { ProjectView } from "../../lib/contracts";
 import { Alert, Badge, Button } from "../../components/ui/primitives";
 import { useNexus } from "../../state/NexusContext";
@@ -69,7 +69,7 @@ function PreviewPorts({ p, onDone }: { p: ProjectView; onDone: () => void }) {
  * network destinations, expiry and Full Access live under Advanced permissions on the Projects page.
  */
 export function ProjectAccess({ p, onAdvanced }: { p: ProjectView; onAdvanced?: () => void }) {
-  const { allowProjectWork, allowProjectInstalls, revokeProjectPreviews, switchToAutomaticApproval, setProjectEditMode, permissionSupport, accessBusy, accessError, clearAccessError } = useNexus();
+  const { allowProjectWork, allowProjectInstalls, revokeProjectPreviews, switchToAutomaticApproval, setProjectEditMode, permissionSupport, accessBusy, accessError, clearAccessError, accessNotice, clearAccessNotice } = useNexus();
   const [choosingPorts, setChoosingPorts] = useState(false);
   const a = accessOf(p);
   const id = p.projectId;
@@ -80,6 +80,21 @@ export function ProjectAccess({ p, onAdvanced }: { p: ProjectView; onAdvanced?: 
   const needsWork = !a.previewsPossible;
   return (
     <div className="nv-access" role="group" aria-label={`What Nexus may do in ${p.label}`}>
+      {a.mac && p.sync && (
+        <section className="nv-access__group" aria-label={`Updating your Mac folder for ${p.label}`}>
+          <h3 className="nv-access__heading">Updating your Mac folder</h3>
+          <ul className="nv-access__list">
+            <Row
+              title="Automatic updates"
+              state={p.sync.consent ? (p.sync.applyUnverified ? "verified and untestable results" : "verified results only") : "not allowed"}
+              tone={p.sync.consent ? "success" : "warning"}
+            >
+              {p.sync.consent ? syncPolicySentence(p.sync.applyUnverified) : "Nexus has no permission to change this folder; nothing will be applied."} Granted once, when you opened the folder; choose the folder again on the Projects page to review it. These permissions are about your Mac folder only.
+            </Row>
+          </ul>
+        </section>
+      )}
+      {a.mac && <h3 className="nv-access__heading">What Nexus may do in its Linux engine</h3>}
       <p className="nv-note nv-access__summary">{accessSentence(a)}</p>
       {a.ended && (
         <Alert tone="warning" title={`This project's permissions were ${a.ended}`}>
@@ -103,21 +118,25 @@ export function ProjectAccess({ p, onAdvanced }: { p: ProjectView; onAdvanced?: 
       <ul className="nv-access__list">
         <Row
           title="Edit files"
-          state={a.editsDirectly ? "in your folder" : "on a copy"}
-          tone={a.editsDirectly ? "success" : "neutral"}
+          state={a.mac ? "in the engine's copy" : a.editsDirectly ? "in your folder" : "on a copy"}
+          tone={a.mac || a.editsDirectly ? "success" : "neutral"}
           action={
-            <Button size="sm" disabled={!idle} onClick={() => void setProjectEditMode(id, a.editsDirectly ? "isolated" : "direct")} aria-label={a.editsDirectly ? `Work on a copy of ${p.label} instead` : `Let Nexus edit ${p.label} directly`}>
-              {a.editsDirectly ? "Use a copy instead" : "Edit my folder…"}
-            </Button>
+            a.mac ? null : (
+              <Button size="sm" disabled={!idle} onClick={() => void setProjectEditMode(id, a.editsDirectly ? "isolated" : "direct")} aria-label={a.editsDirectly ? `Work on a copy of ${p.label} instead` : `Let Nexus edit ${p.label} directly`}>
+                {a.editsDirectly ? "Use a copy instead" : "Edit my folder…"}
+              </Button>
+            )
           }
         >
-          {a.editsDirectly
+          {a.mac
+            ? "Nexus edits a working copy of the project inside its Linux engine. Your Mac folder changes only through the automatic update above, and never over a file you changed in the meantime."
+            : a.editsDirectly
             ? "Each change is saved in your project folder as it is made. Nexus keeps the original of every file it changes (30 days) and never touches secrets or .git. You can restore its changes from a run's details; files you changed since are left alone."
             : "Nexus changes a throw-away copy. You review the changes and apply them to your folder yourself."}
         </Row>
         <Row
           title="Run commands"
-          state={a.commands === "project" ? "in the project" : a.commands === "full" ? "full access" : "temporary copy"}
+          state={a.commands === "project" ? (a.mac ? "in the project copy" : "in the project") : a.commands === "full" ? "full access" : "temporary copy"}
           tone={a.commands === "project" ? "success" : a.commands === "full" ? "warning" : "neutral"}
           action={
             needsWork && !fullAccess ? (
@@ -130,7 +149,9 @@ export function ProjectAccess({ p, onAdvanced }: { p: ProjectView; onAdvanced?: 
           {inPlaceBlocked
             ? `Not available on this computer: ${inPlaceWhy}. Tests and builds still run, in a temporary copy.`
             : a.commands === "project"
-              ? "Tests, builds, installs and servers run inside the project folder, in a sandbox."
+              ? a.mac
+                ? "Tests, builds, installs and servers run inside the project copy in the engine, in a sandbox."
+                : "Tests, builds, installs and servers run inside the project folder, in a sandbox."
               : "Tests and builds run in a temporary copy, so files they create (dependencies, build output) are not kept and servers cannot be shown. Allow this to build and preview a project."}
         </Row>
         <Row
@@ -176,11 +197,21 @@ export function ProjectAccess({ p, onAdvanced }: { p: ProjectView; onAdvanced?: 
           }
         >
           {a.previewsPossible
-            ? "Lets Nexus start your site's development server and show it on this computer only. A server stops when you stop it or revoke this."
+            ? a.mac
+              ? "Lets Nexus start your site's development server inside the engine on these ports, so it can open the page in its own browser. It is not published on your Mac. A server stops when you stop it or revoke this."
+              : "Lets Nexus start your site's development server and show it on this computer only. A server stops when you stop it or revoke this."
             : "Needs Nexus to run commands in the project folder first. When you ask for a website, Nexus will ask for the port it needs."}
         </Row>
       </ul>
       {choosingPorts && <PreviewPorts p={p} onDone={() => setChoosingPorts(false)} />}
+      {accessNotice && !accessError && (
+        <Alert tone="info" title={accessNotice.tone === "success" ? "Updated" : "Cancelled"}>
+          {accessNotice.text}{" "}
+          <button type="button" className="nv-linkbtn" onClick={clearAccessNotice}>
+            Dismiss
+          </button>
+        </Alert>
+      )}
       {accessError && (
         <Alert tone="warning" title="That did not change anything">
           {humanAccessError(accessError.message)}{" "}

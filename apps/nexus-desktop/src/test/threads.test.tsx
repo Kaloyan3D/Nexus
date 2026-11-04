@@ -143,8 +143,8 @@ describe("Persistent conversations (A7.1)", () => {
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
     const sent = send.mock.calls[0]![0];
     expect(sent).toMatchObject({ threadId: T1, projectId: "east-india", content: "Now explain exactly why F2 is a problem. Don't change any files.", mode: "auto", workspace: "continue" });
-    // nothing but text, identity and choices goes along: no path, tool, limit or approval
-    expect(Object.keys(sent).sort()).toEqual(["content", "idempotencyKey", "mode", "projectId", "threadId", "workspace"]);
+    // nothing but text, identity and choices goes along (the permission MODE is a choice, not a grant): no path, tool, limit or approval
+    expect(Object.keys(sent).sort()).toEqual(["content", "idempotencyKey", "mode", "permissionMode", "projectId", "threadId", "workspace"]);
     await waitFor(() => expect(box).toHaveValue(""));
   });
 

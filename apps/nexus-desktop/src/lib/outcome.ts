@@ -92,6 +92,15 @@ export function runResult(r: ThreadRunView): ResultView | null {
       detail: run.completionNote ?? "Verification commands failed and were never re-run successfully; the change is blocked or unverified, not passed.",
     };
   }
+  if (run.completion === "unattested-checks") {
+    const n = run.unresolvedUnattestedChecks ?? run.codingOutcome?.checksUnattestedUnresolved ?? 0;
+    return {
+      category: "unverified",
+      label: `Changes made · ${n || "a"} check${n === 1 ? "" : "s"} could not be attested, not verified`,
+      tone: "warning",
+      detail: run.completionNote ?? "A verification command ran inside a compound shell command, so its exit status does not show it passed. Not applied automatically.",
+    };
+  }
   if (run.completion === "unexecuted-claims") {
     return { category: "unverified", label: "Not verified · a command did not run", tone: "warning", detail: run.completionNote ?? "A command in this run was refused, failed or never executed, so its claimed result is not evidence. Passing checks elsewhere in the run do not cover it." };
   }

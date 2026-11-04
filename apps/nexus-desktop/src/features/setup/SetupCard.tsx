@@ -46,6 +46,17 @@ export function SetupCard() {
   const { runtimeState: rt, setupBusy, setupError, connectProvider, giveConsent, retryRuntime, engineChoice, setupAdaptive, adaptiveBusy, adaptiveError, openProject } = useNexus();
   const hasProject = useHasProject();
   if (!rt || rt.mode !== "interactive") return null;
+  if (rt.phase === "unavailable") {
+    return (
+      <section className="nv-setup" aria-label="Nexus engine">
+        <h1 className="nv-hero">Nexus engine not connected</h1>
+        <Alert tone="warning" title="This Mac is not running the Nexus engine">
+          {rt.message ?? "The Nexus engineering engine is not available on this computer."}
+        </Alert>
+        <p className="nv-note">You can look around every page. Tasks, project access and model requests stay unavailable until the engine is connected.</p>
+      </section>
+    );
+  }
   const ready = rt.phase === "ready";
   const connected = rt.providerConnected;
   const consented = rt.consent.given;

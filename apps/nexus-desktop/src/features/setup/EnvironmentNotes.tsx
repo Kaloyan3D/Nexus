@@ -7,6 +7,8 @@ import { useNexus } from "../../state/NexusContext";
 export function environmentFindings(env: EnvCheck | null, inPlace: { available: boolean | undefined; reason: string | null | undefined }, bundledNode = false): Array<{ id: string; tone: "error" | "warning" | "info"; title: string; body: string }> {
   const out: Array<{ id: string; tone: "error" | "warning" | "info"; title: string; body: string }> = [];
   if (!env) return out;
+  // macOS runs the interface only; the engine (sandbox, toolchains, previews) belongs to Linux and is reported as "engine not connected".
+  if (env.platform === "macos") return out;
   if (env.platform !== "linux") {
     out.push({
       id: "platform",

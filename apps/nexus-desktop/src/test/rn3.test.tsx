@@ -205,7 +205,7 @@ describe("R-NATIVE-3 composer: what is actually sent", () => {
     await user.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
     const sent = send.mock.calls[0]![0];
-    expect(Object.keys(sent).sort()).toEqual(["content", "idempotencyKey", "mode", "projectId", "threadId", "workspace"]);
+    expect(Object.keys(sent).sort()).toEqual(["content", "idempotencyKey", "mode", "permissionMode", "projectId", "threadId", "workspace"]);
     expect("model" in sent).toBe(false);
   });
 
@@ -219,7 +219,7 @@ describe("R-NATIVE-3 composer: what is actually sent", () => {
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
     const sent = send.mock.calls[0]![0];
     expect(sent.model).toEqual({ providerId: "acme", remoteModelId: "acme-medium-1", logicalModelId: "acme/medium", routeId: "acme/medium" });
-    expect(Object.keys(sent).sort()).toEqual(["content", "idempotencyKey", "mode", "model", "projectId", "threadId", "workspace"]);
+    expect(Object.keys(sent).sort()).toEqual(["content", "idempotencyKey", "mode", "model", "permissionMode", "projectId", "threadId", "workspace"]);
     expect(hasSecretField(sent)).toBe(false);
   });
 

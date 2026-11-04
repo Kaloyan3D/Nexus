@@ -68,16 +68,21 @@ export function SettingsPage() {
               { label: "Model", value: runtimeState.consent.remoteModelId ?? "—", mono: true },
             ]}
           />
+          {runtimeState.phase === "unavailable" && (
+            <Alert tone="warning" title="Engine not connected">
+              {runtimeState.message}
+            </Alert>
+          )}
           <div className="nv-heading__meta" style={{ marginTop: 12 }}>
-            <Button size="sm" onClick={() => void connectProvider()} disabled={setupBusy !== null}>
+            <Button size="sm" onClick={() => void connectProvider()} disabled={setupBusy !== null || runtimeState.phase === "unavailable"}>
               {runtimeState.providerConnected ? "Replace API key…" : "Connect OpenCode Go…"}
             </Button>
             {runtimeState.consent.given ? (
-              <Button size="sm" onClick={() => void revokeConsent()} disabled={setupBusy !== null}>
+              <Button size="sm" onClick={() => void revokeConsent()} disabled={setupBusy !== null || runtimeState.phase === "unavailable"}>
                 Revoke autonomous work…
               </Button>
             ) : (
-              <Button size="sm" onClick={() => void giveConsent()} disabled={setupBusy !== null || !runtimeState.providerConnected}>
+              <Button size="sm" onClick={() => void giveConsent()} disabled={setupBusy !== null || !runtimeState.providerConnected || runtimeState.phase === "unavailable"}>
                 Allow autonomous work…
               </Button>
             )}
@@ -105,6 +110,7 @@ export function SettingsPage() {
                 { label: "Data folder", value: runtimeState.home ?? "—", mono: true },
                 { label: "Your run limits", value: intentCodeLimits ? (ownLimits(intentCodeLimits) ?? "none (Nexus applies no limit of its own)") : "—" },
                 { label: "Message", value: runtimeState.message ?? "—" },
+                ...(runtimeState.diagnostics ?? []).map((d, i) => ({ label: i === 0 ? "Engine connection" : " ", value: d })),
               ]}
             />
           </details>

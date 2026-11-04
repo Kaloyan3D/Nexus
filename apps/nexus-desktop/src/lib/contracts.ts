@@ -408,6 +408,16 @@ export interface IntentRun {
   // ---- A5.6 repo-code progress (absent for other run types) ----
   /** A6.1.1: verified outcome of a coding run (absent for other run types and for older brokers). */
   codingOutcome?: CodingOutcome | null;
+  /** M4.1: the request asked for the website to be looked at. */
+  visualRequested?: boolean;
+  /** M4.1: `no-browser` | `model-cannot-see` when that could not be offered. */
+  visualUnavailable?: string | null;
+  /** M4.1: the answer claimed to have seen the page though no screenshot reached a model. */
+  visualClaimUnsupported?: boolean;
+  /** Statements in the final answer that contradict the run's receipts and survived the restatement. */
+  answerConflicts?: string[];
+  /** Compound verification commands whose exit 0 attested nothing and that were never re-established. */
+  unresolvedUnattestedChecks?: number;
   /** Edits applied so far (a count, never a quota). */
   editsUsed?: number;
   /** Commands run so far (a count, never a quota). */
@@ -426,6 +436,11 @@ export interface IntentRun {
   lastTestVerification?: string | null;
   /** The operation currently waiting for an INDEPENDENT approver. */
   pendingApproval?: PendingApproval | null;
+  /** M4.5: how much the run may do without asking; the audit trail of its decisions; what it installed. */
+  permissionMode?: PermissionMode;
+  pendingPermission?: PendingPermission | null;
+  permissionEvents?: PermissionEvent[];
+  dependencies?: DependencyRecord[];
   /** Commit the isolated working copy was created from. */
   worktreeCommit?: string | null;
   changedFiles?: ChangedFile[];
@@ -440,10 +455,12 @@ export interface IntentRun {
   /** `direct` when this run edited the project's real folder in place (fixed at submission); absent = an isolated copy. */
   workspaceKind?: "direct" | null;
   workspaceNote?: string | null;
+  /** macOS projects: where this run's result is on its way to the Mac folder (set by the Mac host, never by the engine). */
+  hostSync?: HostSync | null;
   /** The earlier run whose working copy this run started from. */
   seedFrom?: string | null;
   /** Derived from the request and the receipts: fulfilled | no-change-verified | no-change-reported | incomplete. */
-  /** fulfilled | no-change-verified | no-change-reported | incomplete | failing-checks | unexecuted-claims */
+  /** fulfilled | no-change-verified | no-change-reported | incomplete | failing-checks | unattested-checks | unexecuted-claims */
   completion?: string | null;
   completionNote?: string | null;
   /** Verification commands whose latest result is a failure (counted over the whole run). */
@@ -473,6 +490,189 @@ export interface CodingOutcome {
   checksUnverified?: number;
   /** Files the last passing check wrote only into its own throw-away copy (not saved to the project). */
   lastCheckUnsavedFiles?: number;
+  /** M4.1: static checks, browser run, visual observation and visual assessment, kept apart. */
+  evidence?: EvidenceLevels;
+  /** Invalid-invocation checks still unresolved (also counted in `checksFailedUnresolved`) / resolved by Nexus's replacement. */
+  checksInvalidUnresolved?: number;
+  checksInvalidResolved?: number;
+  /** Compound-command checks whose exit 0 attested nothing and that nothing re-established: block automatic writeback under every policy. */
+  checksUnattestedUnresolved?: number;
+  checksUnattestedResolved?: number;
+}
+
+/** One screenshot Nexus captured; `sha256` is of the stored bytes, which are what a vision model was shown. */
+export interface ScreenshotRef {
+  name: string;
+  file: string;
+  sha256: string;
+  bytes: number;
+  mediaType: string;
+  viewportW: number;
+  viewportH: number;
+  takenAt: string;
+  /** `delivered` | `not-delivered` */
+  delivery: string;
+}
+
+export interface BrowserStepResult {
+  do: string;
+  ok: boolean;
+  error?: string | null;
+}
+
+/** M4.1: what Nexus itself measured and captured in one browser inspection (never what the page said). */
+export interface BrowserEvidence {
+  evidenceId: string;
+  runId: string;
+  url: string;
+  viewport: string;
+  viewportW: number;
+  viewportH: number;
+  startedAt: string;
+  launched: boolean;
+  loaded: boolean;
+  httpStatus?: number | null;
+  title?: string | null;
+  steps: BrowserStepResult[];
+  consoleErrors: number;
+  consoleWarnings: number;
+  pageErrors: number;
+  failedRequests: number;
+  blockedRequests: number;
+  horizontalOverflow?: boolean | null;
+  screenshots: ScreenshotRef[];
+  /** delivered-to-vision-model | not-delivered-text-only-model | not-delivered-unknown-model | not-delivered-too-large | no-screenshot */
+  imageDelivery: string;
+  durationMs: number;
+  error?: string | null;
+}
+
+/** Four different kinds of evidence; never merged. */
+export interface EvidenceLevels {
+  /** none | passed | failed | unverified */
+  staticChecks: string;
+  /** none | passed | failed */
+  browserRuntime: string;
+  /** none | captured-not-seen | seen-by-model */
+  visualObservation: string;
+  /** none | model-stated (a judgement, never "verified") */
+  visualAssessment: string;
+  visualBasis: string[];
+  visualRequested: boolean;
+  /** not-requested | met | unmet-no-browser | unmet-model-cannot-see | unmet-browser-failed | unmet-not-attempted | unmet-stale-after-edit */
+  visualRequirement: string;
+  browserRuns: number;
+  inspectedAfterLastEdit: boolean;
+  unsupportedVisualClaim: boolean;
+}
+
+/** One stored screenshot (base64 of the exact stored bytes). */
+export interface BrowserArtifact {
+  mediaType: string;
+  bytes: number;
+  sha256: string;
+  dataB64: string;
+}
+
+/** M4.6: execution analytics of one run (derived by the engine from the run's own records). Every metric the run could
+ *  not measure is `null` and listed in `missing` with the reason; null is never shown as zero. */
+export interface RunAnalytics {
+  schemaVersion: number;
+  runId: string;
+  source: { perRequestRecord: boolean; perToolRecord: boolean; runRecord: boolean; toolActivity: boolean };
+  identity: { engine?: { modeId?: string | null; engineId?: string | null; defaultEffort?: string | null; effort?: unknown } | null; permissionMode: PermissionMode | null; host?: { engineOs?: string; engineArch?: string; hostPlatform?: string | null; appVersion?: string | null }; controllerVersion?: string };
+  runtime: {
+    startedAtMs: number;
+    endedAtMs: number | null;
+    wallMs: number | null;
+    state: string;
+    terminal: boolean;
+    categoriesExclusive: { modelRequestMs: number | null; toolExecutionMs: number | null; approvalWaitMs: number | null; controllerMs: number | null };
+    overlapping: { timeToFirstTokenMs: { avg: number | null; min: number | null; max: number | null; samples: number }; buildAndTestMs: number | null };
+    requests: { count: number; avgLatencyMs: number | null; minLatencyMs: number | null; maxLatencyMs: number | null; latenciesMs: number[] };
+    outputTokensPerSecond: number | null;
+    recordCapped: boolean;
+  };
+  tokens: {
+    source: "per-request" | "run-record-cumulative" | "none";
+    input: number | null;
+    output: number | null;
+    total: number | null;
+    cachedInput: number | null;
+    cacheWrite: number | null;
+    noncachedInput: number | null;
+    reasoning: number | null;
+    cacheHitRate: number | null;
+    byAttempt: Array<{ ordinal: number; turn: number; model: string; effort: string; phase: string; outcome: string; inputTokens: number | null; outputTokens: number | null; cachedInputTokens: number | null; reasoningTokens: number | null; latencyMs: number; ttftMs: number | null }>;
+    byModel: Array<{ model: string; requests: number; inputTokens: number; outputTokens: number; cachedInputTokens: number | null; reasoningTokens: number | null; latencyMs: number; cacheHitRate: number | null }>;
+    byPhase: Array<{ phase: string; requests: number; inputTokens: number; outputTokens: number; cachedInputTokens: number | null; reasoningTokens: number | null; latencyMs: number; cacheHitRate: number | null }>;
+  };
+  routing: {
+    configured: { provider?: string | null; model?: string | null; logicalModel?: string | null; route?: string | null };
+    requests: Array<{ ordinal: number; provider: string; model: string; actualModel?: string | null; effort: string; phase: string; outcome: string; routedAsConfigured: boolean | null }>;
+    attemptsPerModel: Array<{ model: string; attempts: number }>;
+    attemptsPerEffort: Record<string, number>;
+    modelSwitches: number;
+    phaseTransitions: Array<{ atMs: number; phase: string; detail: string }>;
+  };
+  tools: {
+    modelRequested: number | null;
+    recordedCalls: number;
+    succeeded: number;
+    failed: number;
+    refusedOrDenied: number;
+    byTool: Array<{ tool: string; calls: number; succeeded: number; failed: number; refusedOrDenied: number }>;
+    executionMs: number | null;
+    approvalWaitMs: number | null;
+    buildAndTestMs: number | null;
+    fileEdits: { proposed: number; applied: number; conflicts: number };
+    commands: Array<{ index: number; command: string; status: string; exitCode: number | null; verification: string | null; execMs: number | null; waitMs: number | null }>;
+    dependencyInstalls: { requests: number; approved: number; denied: number; automatic: number };
+    permissionPrompts: number;
+  };
+  verification: { cycles: number; failedAttempts: number; recoveryCycles: number | null; providerRecoveries?: number | null; finalVerification: string | null; completion?: string | null; evidence: Array<{ callIndex: number; command: string; exitCode: number | null; verification: string | null }> };
+  cost: { providerListPrice?: { usd: number | null }; actual: { usd: number | null; requestsReporting: number; requestsTotal: number }; estimated: { usd: number | null }; display: "actual" | "estimated" | "unknown" };
+  missing: Array<{ metric: string; reason: string }>;
+}
+
+/** M4.5: the three permission modes. */
+export type PermissionMode = "ask" | "auto-safe" | "full";
+
+/** M4.5: an operation waiting for the person's decision (made in a native confirmation, never in the page). */
+export interface PendingPermission {
+  requestId: string;
+  /** `dependency-install` | `delete` | `bulk-delete` */
+  kind: string;
+  digest: string;
+  program: string;
+  args: string[];
+  cwd: string;
+  plan?: { manager: string; verb: string; packages: Array<{ name: string; constraint: string }>; options: string[]; fromManifest: boolean } | null;
+  purpose: string;
+  mode: PermissionMode;
+  createdAtMs: number;
+  expiresAtMs: number;
+}
+
+export interface PermissionEvent {
+  atMs: number;
+  kind: string;
+  mode: PermissionMode;
+  requestId?: string;
+  digest?: string;
+  detail?: string;
+}
+
+export interface DependencyRecord {
+  atMs: number;
+  manager: string;
+  verb: string;
+  packages: string[];
+  command: string;
+  mode: PermissionMode;
+  decision: string;
+  outcome: string;
+  exitCode?: number | null;
 }
 
 /** An operation waiting for an independent approval (A5.6). Desktop only shows it. */
@@ -546,9 +746,12 @@ export interface AllowedCodeSource {
 export interface RuntimeState {
   /** `interactive`: this app runs the runtime. `external`: an operator-run broker (strict profile). */
   mode: "interactive" | "external";
-  phase: "starting" | "ready" | "error" | "stopped";
+  /** `unavailable`: this platform has no engine connected (macOS desktop-only mode); nothing was started. */
+  phase: "starting" | "ready" | "error" | "stopped" | "unavailable";
   message: string | null;
   home: string | null;
+  /** Connection facts for Settings → Diagnostics (never shown in the main panels). */
+  diagnostics?: string[];
   providerConnected: boolean;
   consent: { given: boolean; providerId: string | null; remoteModelId: string | null; text: string | null };
   /** The broker can open project folders (interactive profile). */
@@ -636,8 +839,38 @@ export interface JobView {
   logTruncated: boolean;
 }
 
+/** macOS projects: synchronization of one run's result with the Mac folder. */
+export interface HostSync {
+  state: "staging" | "running" | "exporting" | "prepared" | "applying" | "applied" | "conflict" | "failed" | "not-applied";
+  /** Plain-language status, written by the Mac host. */
+  label: string;
+  changed: { path: string; kind: "add" | "modify" | "delete" }[];
+  conflicts: { path: string; reason: string }[];
+  verification?: string | null;
+  appliedMs?: number | null;
+  message?: string | null;
+  /** Where Nexus's result is kept when it could not be applied. */
+  savedResult?: string | null;
+}
+
+/** macOS projects: synchronization status of the folder. */
+export interface ProjectSync {
+  state: "staging" | "running" | "exporting" | "prepared" | "applying" | "conflict" | "failed" | "synced";
+  generation: number;
+  lastSyncMs?: number | null;
+  consent: boolean;
+  /** The person chose to also apply results that could not be verified (projects without tests). */
+  applyUnverified?: boolean;
+  files: number;
+  skippedTotal: number;
+  conflicts: { path: string; reason: string }[];
+}
+
 export interface ProjectView {
   projectId: string;
+  /** macOS projects: the folder on the Mac (the engine's own copy is never shown). */
+  macPath?: string;
+  sync?: ProjectSync;
   label: string;
   managed: boolean;
   kinds: ProjectKindView[];
@@ -681,6 +914,10 @@ export interface DiffReply {
 
 /** One model-proposed read-only tool call and what became of it (A5.5). */
 export interface ToolActivity {
+  /** M4.5: the mode in force when the command was decided, its class and how it was decided. */
+  permissionMode?: PermissionMode | null;
+  opClass?: string | null;
+  permissionDecision?: string | null;
   /** Process: files the command created/changed/deleted in its throw-away copy that were NOT saved to the project. */
   unsavedFiles?: number;
   index: number;
@@ -711,6 +948,22 @@ export interface ToolActivity {
   verification?: string | null;
   /** `job_start` only: the development-server ports the model asked to show. A request, never an authorization. */
   requestedPorts?: number[] | null;
+  /** M4.1: `browser_inspect` only. */
+  browser?: BrowserEvidence | null;
+  /** `invalid-invocation` (a check that never examined the project; stays unresolved) | `controller-recheck` (Nexus's own replacement). */
+  checkClass?: string | null;
+  /** On a passing `controller-recheck`: the call index of the invalid check it resolves. */
+  resolvesCheck?: number | null;
+  /** `executable-not-found` (exit 127) | `not-executable` (exit 126): the process says a program named inside the command is missing or not executable. Not a permission decision. */
+  processClass?: string | null;
+  /** The Core's own assessment of a verification command (kept apart from `verification`, the Kernel's verdict): `unverified` when its exit status cannot attest every check in it. */
+  assessment?: string | null;
+  /** `attested` | `unattested` | `unanalyzable`, with the reason after a colon. */
+  composition?: string | null;
+  /** On an `attested-recheck`: the call indices of the unattested checks it re-established. */
+  resolvesHazards?: number[];
+  /** M4.7: on an attested pass, the steps of earlier failed compound checks it re-established. */
+  resolvesFailed?: number[];
 }
 
 /** An operator-approved read-only workspace, by identity only (never a path). */
@@ -1148,6 +1401,8 @@ export interface ThreadSendInput {
   /** `fresh` starts from the project's current files instead of the conversation's workspace. */
   workspace: "continue" | "fresh";
   idempotencyKey: string;
+  /** M4.5: how much the run may do without asking. Absent = Ask for Approval. */
+  permissionMode?: PermissionMode;
   /** R-NATIVE-3: optional identities-only selection. Absent = broker default. */
   model?: ModelSelection | null;
   /** Phase 2: the engine for a NEW conversation (ignored for an existing one, which keeps its own). */

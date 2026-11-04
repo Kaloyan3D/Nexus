@@ -26,6 +26,8 @@ export function modelStateView(state: string): { label: string; tone: RunTone; p
       return { label: "Streaming", tone: "purple", pulse: true };
     case "tool-running":
       return { label: "Running read-only tools", tone: "purple", pulse: true };
+    case "permission-pending":
+      return { label: "Waiting for your decision", tone: "warning", pulse: true };
     case "approval-pending":
       return { label: "Waiting for an independent approver", tone: "warning", pulse: true };
     case "incomplete":

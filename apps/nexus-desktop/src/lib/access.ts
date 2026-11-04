@@ -28,6 +28,8 @@ export interface AccessSummary {
   asksFirst: boolean;
   /** Nexus can run previews: the project edits its folder and its commands run in it. */
   previewsPossible: boolean;
+  /** A folder on this Mac that Nexus works on inside its Linux engine (the permissions above are the ENGINE'S; the Mac folder is updated by the separate automatic synchronization). */
+  mac: boolean;
 }
 
 export function accessOf(p: ProjectView): AccessSummary {
@@ -46,15 +48,17 @@ export function accessOf(p: ProjectView): AccessSummary {
     ended: g && g.status !== "active" ? (g.status === "revoked" ? "revoked" : "expired") : null,
     asksFirst: active?.approval === "ask",
     previewsPossible: direct && commands === "project",
+    mac: p.sync !== undefined,
   };
 }
 
 /** One honest sentence about what Nexus may do in a project right now. */
 export function accessSentence(a: AccessSummary): string {
   const parts: string[] = [];
-  parts.push(a.editsDirectly ? "Nexus edits the files in your folder directly" : "Nexus works on a copy and you apply its changes");
+  if (a.mac) parts.push("Nexus works in a project copy inside its Linux engine");
+  else parts.push(a.editsDirectly ? "Nexus edits the files in your folder directly" : "Nexus works on a copy and you apply its changes");
   if (a.commands === "full") parts.push("commands run as you with Full Access");
-  else if (a.commands === "project") parts.push("it can run commands in the project");
+  else if (a.commands === "project") parts.push(a.mac ? "it can run commands there, in a sandbox" : "it can run commands in the project");
   else parts.push("commands run in a temporary copy");
   if (a.downloads === "dependencies") parts.push("dependency downloads are on");
   else if (a.downloads === "listed") parts.push("downloads only from the sites you listed");
@@ -120,4 +124,11 @@ export function needsOf(run: IntentRun | null | undefined, project: ProjectView 
     }
   });
   return out;
+}
+
+/** The Mac-side synchronization policy, in one plain sentence (a different thing from the engine permissions above). */
+export function syncPolicySentence(applyUnverified: boolean | undefined): string {
+  return applyUnverified
+    ? "Your Mac folder is updated after a task whose checks passed, and also after a task that could not be checked (a project without tests). Never after failed checks, a cancelled task or an error."
+    : "Your Mac folder is updated only after a task whose checks passed. A task that could not be verified is not applied.";
 }

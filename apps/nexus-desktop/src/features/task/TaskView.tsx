@@ -13,6 +13,9 @@ import { ConversationPanel } from "../conversation/ConversationPanel";
 import { useConversation } from "../conversation/useConversation";
 import { CancelModelRunButton, InspectRunSection, ModelRunPanel, ToolCallsTable, useModelRunStatus } from "../conversation/ModelRunPanel";
 import { ApprovalBanner } from "./ApprovalBanner";
+import { PermissionPanel } from "../permissions/PermissionControls";
+import { RunAnalytics } from "../analytics/RunAnalytics";
+import { VisualEvidence } from "./VisualEvidence";
 import { turnLabel } from "../../lib/limits";
 
 const STEP_ICON: Record<StepTone, typeof CheckCircle2> = {
@@ -133,6 +136,32 @@ function OutcomeCard({ run }: { run: IntentRun }) {
         <p className="nv-note">A passing validation command is evidence that the command succeeded in the sandbox; it does not prove the whole task is correct. Review the changes.</p>
       )}
       {o?.verification !== "verified-passed" && <p className="nv-note">{v.detail}</p>}
+      {(run.answerConflicts?.length ?? 0) > 0 && (
+        <p className="nv-visual__req nv-visual__req--bad" role="alert">
+          <strong>The answer contradicts the record.</strong> {run.answerConflicts!.join("; ")}. The recorded facts, from the tool receipts, are what happened.
+        </p>
+      )}
+      {(o?.checksInvalidUnresolved ?? 0) > 0 && (
+        <p className="nv-note">
+          {o!.checksInvalidUnresolved} check{o!.checksInvalidUnresolved === 1 ? "" : "s"} could not run (invalid invocation) and stay{o!.checksInvalidUnresolved === 1 ? "s" : ""} unresolved: nothing was checked, so the result is not verified and will not be applied automatically.
+        </p>
+      )}
+      {(o?.checksUnattestedUnresolved ?? 0) > 0 && (
+        <p className="nv-visual__req nv-visual__req--bad" role="alert">
+          <strong>{o!.checksUnattestedUnresolved} check{o!.checksUnattestedUnresolved === 1 ? "" : "s"} could not be attested.</strong> It ran inside a compound command (<code>;</code>, <code>||</code>, a list), so its exit status does not show it passed. This result is not counted as verified and will not be applied to your Mac folder automatically, even with “apply unverified” on.
+        </p>
+      )}
+      {(o?.checksUnattestedResolved ?? 0) > 0 && (o?.checksUnattestedUnresolved ?? 0) === 0 && (
+        <p className="nv-note">
+          {o!.checksUnattestedResolved} check{o!.checksUnattestedResolved === 1 ? "" : "s"} that ran inside a compound command {o!.checksUnattestedResolved === 1 ? "was" : "were"} re-established on {o!.checksUnattestedResolved === 1 ? "its" : "their"} own and passed. The original receipts stay in the tool calls.
+        </p>
+      )}
+      {(o?.checksInvalidResolved ?? 0) > 0 && (o?.checksInvalidUnresolved ?? 0) === 0 && (
+        <p className="nv-note">
+          {o!.checksInvalidResolved} check{o!.checksInvalidResolved === 1 ? "" : "s"} could not run as written; Nexus's own replacement then passed. The original failure stays in the tool calls.
+        </p>
+      )}
+      <VisualEvidence run={run} />
       <div className="nv-outcome__actions">
         {hasDiff && (
           <Button size="sm" onClick={() => openPanel("diff")}>
@@ -150,7 +179,7 @@ function OutcomeCard({ run }: { run: IntentRun }) {
         <Button size="sm" variant="ghost" onClick={() => openPanel("source")}>
           Source
         </Button>
-        {hasDiff && o?.change === "applied" && run.workspaceKind !== "direct" && <AdoptButton run={run} />}
+        {hasDiff && o?.change === "applied" && run.workspaceKind !== "direct" && !run.hostSync && <AdoptButton run={run} />}
       </div>
     </section>
   );
@@ -297,6 +326,8 @@ export function TaskView({ summary }: { summary: ModelConversationSummary }) {
       <Header summary={summary} record={record} status={status} reload={reload} interactiveHeader={interactive} />
       {error && <Alert tone="warning" title="Run status unavailable">{error}</Alert>}
       {pending && <ApprovalBanner approval={pending} />}
+      {record && !record.terminal && <PermissionPanel run={record} live />}
+      {record && kind === "code" && <RunAnalytics runId={record.runId} live={!record.terminal} />}
       {!terminal && (
         <section className="nv-runprogress" aria-label="Run progress" aria-live="polite">
           <div className="nv-runprogress__now">

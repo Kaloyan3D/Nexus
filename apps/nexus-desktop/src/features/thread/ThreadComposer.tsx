@@ -1,6 +1,7 @@
 import { ArrowUp, Loader2, Square } from "lucide-react";
 import { useRef, useState } from "react";
-import type { ModelSelection, ThreadDetail, ThreadMode } from "../../lib/contracts";
+import type { ModelSelection, PermissionMode, ThreadDetail, ThreadMode } from "../../lib/contracts";
+import { PermissionModeSwitch } from "../permissions/PermissionControls";
 import { Alert, Button } from "../../components/ui/primitives";
 import { useNexus } from "../../state/NexusContext";
 import { engineLabelForMode } from "../engine/EngineChoice";
@@ -39,6 +40,8 @@ export function ThreadComposer({ detail, onSent }: { detail: ThreadDetail; onSen
   const { sendThread, threadSending, threadError, clearThreadError, api, runtimeState, intentTargets } = useNexus();
   const [text, setText] = useState("");
   const [mode, setMode] = useState<ThreadMode>("auto");
+  // M4.5: how much this run may do without asking (the default asks before installing or deleting)
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>("ask");
   // R-NATIVE-3: null = broker default (sends NO selection); a choice sends identities only.
   // Never reset on refusal: the user's choice stays visible (no silent fallback).
   const [model, setModel] = useState<ModelSelection | null>(null);
@@ -58,7 +61,7 @@ export function ThreadComposer({ detail, onSent }: { detail: ThreadDetail; onSen
 
   const send = async () => {
     if (!canSend) return;
-    const reply = await sendThread({ threadId: t.threadId, projectId: t.projectId, content: text, mode, workspace: fresh ? "fresh" : "continue", model });
+    const reply = await sendThread({ threadId: t.threadId, projectId: t.projectId, content: text, mode, workspace: fresh ? "fresh" : "continue", model, permissionMode });
     if (reply) {
       setText("");
       setFresh(false);
@@ -118,6 +121,7 @@ export function ThreadComposer({ detail, onSent }: { detail: ThreadDetail; onSen
           <ModelPicker targets={intentTargets} value={model} bound={t.target ?? null} disabled={busy} onChange={setModel} />
         )}
         <ModeSwitch value={mode} onChange={setMode} />
+        <PermissionModeSwitch value={permissionMode} onChange={setPermissionMode} disabled={busy} label="Permissions for the next run" />
         {fresh && <span className="nv-note">Next message starts from your project's current files.</span>}
         <span className="nv-composer__spacer" />
         {busy ? (

@@ -41,6 +41,11 @@ const INFO: Record<string, RefusalInfo> = {
   conflict: { source: "nexus", why: "the file changed since it was read (or the edit did not match)", canContinue: true, action: "Nothing to do; the model reads it again." },
   "not-found": { source: "nexus", why: "the file or folder does not exist", canContinue: true, action: "Nothing to do." },
   "too-many-refused-tool-calls": { source: "nexus", why: "the model kept repeating a call that is refused every time, so it was going in circles", canContinue: true, action: "Send a message saying what to do differently; the work so far is kept." },
+  "command-refused": { source: "nexus", why: "the command policy does not allow this command or its arguments (a rule about WHAT may run, not about what is installed)", canContinue: true, action: "Nothing to do; the model is told which rule applied and uses an allowed form." },
+  "permission-denied": { source: "permission", why: "you denied this operation, so it was not run", canContinue: true, action: "Nothing to do; the model is told and continues without it." },
+  "permission-expired": { source: "permission", why: "no decision was made in time, so the operation was not run", canContinue: true, action: "Ask Nexus again if you still want it." },
+  "permission-withdrawn": { source: "nexus", why: "the permission request was withdrawn before a decision, so the operation was not run", canContinue: true, action: "Nothing to do." },
+  "executable-not-found": { source: "sandbox", why: "that program is not installed in the Linux runtime, so nothing was run (this is not a permission decision)", canContinue: true, action: "Use an installed program, put the tool into the project, or provide a runtime that has it (for Rust: a runtime with cargo and rustc)." },
   "approval-denied": { source: "permission", why: "the operation was not approved", canContinue: true, action: "Allow it, or tell the model to do it another way." },
 };
 

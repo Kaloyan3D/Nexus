@@ -6,6 +6,7 @@ import { Alert, Badge, Button, EmptyState } from "../../components/ui/primitives
 import { ProjectAccess } from "../access/ProjectAccess";
 import { PreviewsPanel } from "../jobs/PreviewsPanel";
 import { limitsLine } from "../../lib/limits";
+import { ProjectSyncLine } from "../sync/HostSyncNote";
 
 /**
  * Read-only: the projects the operator has authorized. Registering a project (a path, a
@@ -247,11 +248,12 @@ function OpenedProjects() {
                   Remove
                 </Button>
               </header>
-              <p className="nv-note nv-project__snap">
+              {p.sync && <ProjectSyncLine p={p} />}
+              {!p.sync && <p className="nv-note nv-project__snap">
                 Snapshot {new Date(p.snapshotAtMs).toLocaleString()}
                 {p.changedSinceSnapshot === true ? " · folder changed since (new tasks refresh automatically)" : ""}
                 {p.originDirty ? " · had uncommitted changes" : ""}
-              </p>
+              </p>}
               <ProjectAccess p={p} />
               <PreviewsPanel projectId={p.projectId} heading="Running now" />
               <AdvancedSettings p={p} />

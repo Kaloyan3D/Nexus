@@ -18,6 +18,7 @@ import type {
   CopyInfo,
   DesktopCodeLimits,
   ActivityPage,
+  BrowserArtifact,
   DiffReply,
   IntentCancelReply,
   IntentRun,
@@ -31,6 +32,8 @@ import type {
   RegistryTarget,
   ThreadDetail,
   ThreadSendInput,
+  RunAnalytics,
+  PermissionMode,
   ThreadSendReply,
   ThreadSummary,
   RuntimeState,
@@ -97,6 +100,8 @@ export interface NativeApi {
   intentDiff(runId: string): Promise<DiffReply>;
   /** One page of EVERY tool call of a run (the run view carries only the latest). */
   runActivity(runId: string, offset: number, limit: number): Promise<ActivityPage>;
+  /** M4.1: one stored browser screenshot of a run (the exact bytes a vision model was shown). */
+  browserArtifact(runId: string, evidenceId: string, file: string): Promise<BrowserArtifact>;
   intentCopy(runId: string): Promise<CopyInfo>;
   /** A6.1.4: the native runtime's state (interactive profile) or `external`. */
   runtimeState(): Promise<RuntimeState>;
@@ -169,6 +174,14 @@ export interface NativeApi {
   intentStatus(runId: string): Promise<IntentRun>;
   intentResult(runId: string): Promise<string>;
   intentCancel(runId: string): Promise<IntentCancelReply>;
+  /** M4.6: the run's execution analytics (read-only), the versioned benchmark document, and saving it to Downloads. */
+  runAnalytics(runId: string): Promise<RunAnalytics>;
+  runAnalyticsExport(runId: string): Promise<unknown>;
+  runAnalyticsSave(runId: string): Promise<{ path: string }>;
+  /** M4.5: the decision is made in a native confirmation shown by the app (approve) or recorded at once (deny). */
+  permissionDecide(runId: string, requestId: string, digest: string, decision: "approve" | "deny"): Promise<unknown>;
+  /** M4.5: a more autonomous mode is confirmed in a native dialog; a less autonomous one applies at once. */
+  permissionSetMode(runId: string, mode: PermissionMode): Promise<unknown>;
   intentList(): Promise<IntentRun[]>;
   /** A5.1: recorded user-initiated model-only runs (read-only). */
   listModelConversations(): Promise<ModelConversationSummary[]>;
@@ -238,6 +251,7 @@ export const tauriApi: NativeApi = {
     invoke<IntentSubmitReply>("intent_code_submit", { prompt, sourceId, idempotencyKey }),
   intentDiff: (runId) => invoke<DiffReply>("intent_diff", { runId }),
   runActivity: (runId, offset, limit) => invoke<ActivityPage>("intent_activity", { runId, offset, limit }),
+  browserArtifact: (runId, evidenceId, file) => invoke<BrowserArtifact>("intent_browser_artifact", { runId, evidenceId, file }),
   intentCopy: (runId) => invoke<CopyInfo>("intent_copy", { runId }),
   runtimeState: () => invoke<RuntimeState>("runtime_state"),
   runtimeStart: () => invoke<void>("runtime_start"),
@@ -283,6 +297,7 @@ export const tauriApi: NativeApi = {
       routeId: i.model?.routeId ?? null,
       idempotencyKey: i.idempotencyKey,
       engine: i.engine ?? null,
+      permissionMode: i.permissionMode ?? null,
     }),
   engineChoice: () => invoke<EngineChoiceView>("engine_choice"),
   enginePrefer: (engine) => invoke<EngineKind>("engine_prefer", { engine }),
@@ -295,6 +310,11 @@ export const tauriApi: NativeApi = {
   intentStatus: (runId) => invoke<IntentRun>("intent_status", { runId }),
   intentResult: (runId) => invoke<string>("intent_result", { runId }),
   intentCancel: (runId) => invoke<IntentCancelReply>("intent_cancel", { runId }),
+  runAnalytics: (runId) => invoke<RunAnalytics>("run_analytics", { runId }),
+  runAnalyticsExport: (runId) => invoke<unknown>("run_analytics_export", { runId }),
+  runAnalyticsSave: (runId) => invoke<{ path: string }>("run_analytics_save", { runId }),
+  permissionDecide: (runId, requestId, digest, decision) => invoke<unknown>("permission_decide", { runId, requestId, digest, decision }),
+  permissionSetMode: (runId, mode) => invoke<unknown>("permission_set_mode", { runId, mode }),
   intentList: () => invoke<IntentRun[]>("intent_list"),
   listModelConversations: () => invoke<ModelConversationSummary[]>("list_model_conversations"),
   modelRunStatus: (conversationId) => invoke<ModelRunStatus>("model_run_status", { conversationId }),
@@ -357,6 +377,7 @@ export const unavailableApi: NativeApi = {
   intentCodeSubmit: () => Promise.reject(notInShell),
   intentDiff: () => Promise.reject(notInShell),
   runActivity: () => Promise.reject(notInShell),
+  browserArtifact: () => Promise.reject(notInShell),
   intentCopy: () => Promise.reject(notInShell),
   runtimeState: () => Promise.reject(notInShell),
   runtimeStart: () => Promise.reject(notInShell),
@@ -401,6 +422,11 @@ export const unavailableApi: NativeApi = {
   intentStatus: () => Promise.reject(notInShell),
   intentResult: () => Promise.reject(notInShell),
   intentCancel: () => Promise.reject(notInShell),
+  runAnalytics: () => Promise.reject(notInShell),
+  runAnalyticsExport: () => Promise.reject(notInShell),
+  runAnalyticsSave: () => Promise.reject(notInShell),
+  permissionDecide: () => Promise.reject(notInShell),
+  permissionSetMode: () => Promise.reject(notInShell),
   intentList: () => Promise.resolve([]),
   listModelConversations: () => Promise.resolve([]),
   modelRunStatus: () => Promise.reject(notInShell),

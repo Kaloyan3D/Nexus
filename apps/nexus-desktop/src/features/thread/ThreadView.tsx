@@ -12,12 +12,15 @@ import { stickToBottom, useNow } from "../../lib/useViewport";
 import { Alert, Badge, Button, Loading, StatusDot } from "../../components/ui/primitives";
 import { useNexus } from "../../state/NexusContext";
 import { AdoptButton } from "../task/TaskView";
+import { HostSyncNote } from "../sync/HostSyncNote";
 import { ThreadComposer } from "./ThreadComposer";
 import { RunNeeds } from "../access/RunNeeds";
 import { PreviewsPanel } from "../jobs/PreviewsPanel";
 import { useThread } from "./useThread";
 import { turnLabel } from "../../lib/limits";
 import { stopNote } from "../../lib/refusal";
+import { PermissionPanel } from "../permissions/PermissionControls";
+import { RunAnalytics } from "../analytics/RunAnalytics";
 
 const STEP_ICON: Record<StepTone, typeof CheckCircle2> = {
   done: CheckCircle2,
@@ -126,6 +129,7 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
         )}
         {elapsed != null && <span className="nv-note">{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")}</span>}
       </div>
+      {run?.hostSync && <HostSyncNote hs={run.hostSync} taskDone={run.terminal} />}
       {run?.completion === "failing-checks" && ev && (
         <p className="nv-note" role="note">
           {ev.detail}
@@ -144,6 +148,8 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
       )}
       {isLast && !live && run && run.state !== "completed" && <ResumeControl runId={run.runId} />}
       {run && <EngineActivity runId={run.runId} live={live} />}
+      {run && !live && <PermissionPanel run={run} live={false} />}
+      {run && <RunAnalytics runId={run.runId} live={live} />}
       {live && run && (
         <section className="nv-runprogress" aria-label="Run progress" aria-live="polite">
           <div className="nv-runprogress__now">
@@ -152,6 +158,7 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
               {turnLabel(run.turn, run.maxTurns)}
             </span>
           </div>
+          <PermissionPanel run={run} live />
           {run.workspaceKind === "direct" && <p className="nv-note">Editing your project folder directly: every change below is already saved in your files.</p>}
           <Steps run={run} limit={6} />
           <p className="nv-note">
@@ -195,7 +202,7 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
           <Button size="sm" onClick={() => openPanel("evidence", run)}>
             Execution evidence
           </Button>
-          {isLatestWithChanges(detail, r) && run.codingOutcome?.change === "applied" && run.workspaceKind !== "direct" && <AdoptButton run={run} />}
+          {isLatestWithChanges(detail, r) && run.codingOutcome?.change === "applied" && run.workspaceKind !== "direct" && !run.hostSync && <AdoptButton run={run} />}
         </div>
       )}
       {!live && run && r.readOnly && (

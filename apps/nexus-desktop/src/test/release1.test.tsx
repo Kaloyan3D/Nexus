@@ -523,7 +523,9 @@ describe("What this computer lacks, and what to do about it", () => {
   it("every gap gets a plain title and a way forward", () => {
     const f = (e: EnvCheck, p = ok) => environmentFindings(e, p).map((x) => [x.id, x.tone]);
     expect(f(env({ dialogTool: null }))).toEqual([["dialog", "error"]]);
-    expect(f(env({ platform: "macos" }))).toEqual([["platform", "warning"]]);
+    expect(f(env({ platform: "windows" }))).toEqual([["platform", "warning"]]);
+    // macOS is a desktop-only host: the missing engine is reported by the runtime state, not as a host-tool gap
+    expect(f(env({ platform: "macos", opener: "open", toolchains: [] }))).toEqual([]);
     expect(f(env(), { available: false, reason: "no Landlock" })).toEqual([["sandbox", "warning"]]);
     expect(f(env({ toolchains: [["git", true], ["node", false], ["npm", false], ["python3", false], ["cargo", false]] }))).toEqual([["toolchains", "warning"]]);
     // with Nexus's own Node.js, a machine without Node is not missing build tools for a website
