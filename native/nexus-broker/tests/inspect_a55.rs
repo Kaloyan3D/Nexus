@@ -646,6 +646,8 @@ impl Fx {
             context_budget_bytes: None,
             request_budget_bytes: None,
             verification_shadow: true,
+            browse_script: None,
+            vision_models: Vec::new(),
             verification_feedback: Default::default(),
         }
     }

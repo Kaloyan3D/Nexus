@@ -34,6 +34,7 @@ fn size(it: &InputItem) -> usize {
             arguments, name, ..
         } => arguments.len() + name.len() + 40,
         InputItem::FunctionCallOutput { output, .. } => output.len() + 40,
+        InputItem::UserImage { text, data_b64, .. } => text.len() + data_b64.len() + 80,
     }
 }
 
@@ -179,6 +180,7 @@ pub fn compact(items: &mut Vec<InputItem>, receipts: &str, budget: usize) -> boo
             }
             InputItem::Message { .. }
             | InputItem::AssistantPhase { .. }
+            | InputItem::UserImage { .. }
             | InputItem::Reasoning { .. } => {}
         }
         changed = true;

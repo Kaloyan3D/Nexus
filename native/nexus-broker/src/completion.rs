@@ -357,6 +357,10 @@ pub enum Completion {
     /// Files were changed, but verification commands failed and were never re-run successfully.
     /// Not a success: the receipts, not the model's closing text, say the work is unverified.
     FailingChecks,
+    /// Files were changed and a verification command's exit 0 could not attest every check in it (a compound
+    /// command such as `check; echo done`), and no attested command re-established them. A suspected masked
+    /// failure: not a success, and never applied automatically, whatever the person's policy.
+    UnattestedChecks,
     /// A command the run proposed was refused, failed or never executed and was
     /// never re-run successfully. Its claimed result is not evidence, whatever
     /// the model's closing text (or an unrelated passing check) says.
@@ -371,6 +375,7 @@ impl Completion {
             Self::NoChangeReported => "no-change-reported",
             Self::Incomplete => "incomplete",
             Self::FailingChecks => "failing-checks",
+            Self::UnattestedChecks => "unattested-checks",
             Self::Unexecuted => "unexecuted-claims",
         }
     }
@@ -436,6 +441,47 @@ pub fn decide_run(
     c
 }
 
+/// `decide_run`, then the M4.2 rule: an implementation whose verification rests on compound commands that attested
+/// nothing (and were never re-established by an attested command) is not `Fulfilled`.
+pub fn decide_run_attested(
+    expects_change: bool,
+    applied_edits: u32,
+    last_test: Option<&str>,
+    final_text: &str,
+    unresolved_failed_checks: u32,
+    unresolved_unexecuted: u32,
+    unresolved_unattested: u32,
+) -> Completion {
+    let c = decide_run(
+        expects_change,
+        applied_edits,
+        last_test,
+        final_text,
+        unresolved_failed_checks,
+        unresolved_unexecuted,
+    );
+    if unresolved_unattested > 0
+        && expects_change
+        && matches!(c, Completion::Fulfilled | Completion::NoChangeVerified)
+    {
+        return Completion::UnattestedChecks;
+    }
+    c
+}
+
+/// Why an `unattested-checks` run is not accepted as done, in plain words.
+pub fn unattested_checks_note(n: u32) -> String {
+    format!(
+        "{n} verification command{} ran inside a compound shell command (`;`, `||`, a list or control flow), so its exit status {} attest that the check{} passed. {} not counted as verification and the result is not applied automatically. Run the check{} on {} own (or as a plain `&&` chain) to a pass before relying on this change.",
+        if n == 1 { "" } else { "s" },
+        if n == 1 { "does not" } else { "do not" },
+        if n == 1 { "" } else { "s" },
+        if n == 1 { "It is" } else { "They are" },
+        if n == 1 { "" } else { "s" },
+        if n == 1 { "its" } else { "their" },
+    )
+}
+
 /// Why an `unexecuted-claims` run is not accepted as done, in plain words.
 pub fn unexecuted_note(n: u32, first: &str) -> String {
     if n == 1 {
@@ -447,6 +493,38 @@ pub fn unexecuted_note(n: u32, first: &str) -> String {
             "{n} commands in this run were refused, failed or never executed (first: {first}), so their claimed results are not execution evidence. Re-run them in an allowed form before relying on them. Successful checks elsewhere in the run do not cover them."
         )
     }
+}
+
+/// As [`unexecuted_note`], but keeping apart the two different things the claim list mixes: commands that were
+/// REFUSED or do not exist in this runtime (nothing ran) and commands that RAN and exited with an error.
+pub fn unexecuted_note_split(
+    refused: u32,
+    ran_failed: u32,
+    first_refused: Option<&str>,
+    first_failed: Option<&str>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if refused > 0 {
+        parts.push(format!(
+            "{refused} command{} {} refused or {} not exist in this runtime, so {} never executed: nothing ran (first: {})",
+            if refused == 1 { "" } else { "s" },
+            if refused == 1 { "was" } else { "were" },
+            if refused == 1 { "does" } else { "do" },
+            if refused == 1 { "it was" } else { "they were" },
+            first_refused.unwrap_or("unknown command")
+        ));
+    }
+    if ran_failed > 0 {
+        parts.push(format!(
+            "{ran_failed} command{} ran and exited with an error (first: {})",
+            if ran_failed == 1 { "" } else { "s" },
+            first_failed.unwrap_or("unknown command")
+        ));
+    }
+    format!(
+        "In this run {}: their claimed results are not execution evidence. Re-run them in an allowed form, or report plainly that they could not run, before relying on them. Successful checks elsewhere in the run do not cover them.",
+        parts.join("; and ")
+    )
 }
 
 /// Why a `failing-checks` run is not accepted as done. Plain words for the Desktop; blocked or
@@ -679,6 +757,7 @@ mod tests {
             Completion::NoChangeVerified
         );
         assert_eq!(Completion::FailingChecks.as_str(), "failing-checks");
+        assert_eq!(Completion::UnattestedChecks.as_str(), "unattested-checks");
     }
 
     #[test]

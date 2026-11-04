@@ -35,7 +35,8 @@ use nexus_model::prepare::responses_input_item_bytes;
 use nexus_model::request::InputItem;
 
 /// Version of this budget contract.
-pub const REQUEST_BUDGET_VERSION: u32 = 1;
+/// v2 (M4.7): replayed images and reasoning are reduced with hysteresis (`HYSTERESIS_DIVISOR`).
+pub const REQUEST_BUDGET_VERSION: u32 = 2;
 
 /// EM-04C2 S10 (SEC-3): the largest request-size budget an engine that REQUIRES a sealed budget may
 /// run under - the A614 acceptance guard (450,000 B). The Registry's own range is wider (65,536 to
@@ -72,11 +73,17 @@ pub struct BudgetReport {
     pub reasoning_dropped: u32,
     pub outputs_stubbed: u32,
     pub messages_shortened: u32,
+    /// M4.1: older screenshots replaced by their caption (the stored evidence is untouched).
+    pub images_dropped: u32,
 }
 
 impl BudgetReport {
     pub fn changed(&self) -> bool {
-        self.reasoning_dropped + self.outputs_stubbed + self.messages_shortened > 0
+        self.reasoning_dropped
+            + self.outputs_stubbed
+            + self.messages_shortened
+            + self.images_dropped
+            > 0
     }
 }
 
@@ -123,7 +130,7 @@ pub fn latest_step_start(items: &[InputItem]) -> usize {
 
 fn is_result_or_user(it: &InputItem) -> bool {
     match it {
-        InputItem::FunctionCallOutput { .. } => true,
+        InputItem::FunctionCallOutput { .. } | InputItem::UserImage { .. } => true,
         InputItem::Message { role, .. } => role == "user",
         _ => false,
     }
@@ -136,13 +143,16 @@ fn is_model_item(it: &InputItem) -> bool {
         | InputItem::AssistantPhase { .. }
         | InputItem::Reasoning { .. } => true,
         InputItem::Message { role, .. } => role == "assistant",
-        InputItem::FunctionCallOutput { .. } => false,
+        InputItem::FunctionCallOutput { .. } | InputItem::UserImage { .. } => false,
     }
 }
 
 /// Bring the conversation under `limit` given the exact length of its prepared request. Returns
 /// the report (with the predicted exact length, which the caller re-checks by preparing again) or
 /// `BudgetExceeded` with the conversation unchanged.
+/// M4.7: when replayed images or reasoning must go, they go down to `limit - limit / 8`.
+pub const HYSTERESIS_DIVISOR: usize = 8;
+
 pub fn fit(
     items: &mut Vec<InputItem>,
     request_bytes: usize,
@@ -159,11 +169,33 @@ pub fn fit(
     }
     let fixed = fixed_overhead(items, request_bytes);
     report.fixed_overhead_bytes = Some(fixed);
+    // M4.7 hysteresis: replayed images and reasoning are dropped down to `target`, below the limit, so the next turns
+    // fit without another reduction. Reducing exactly to the limit removed one more item from the MIDDLE of the
+    // prompt on nearly every later turn, and each removal ends the provider's cached prefix there (found live: 60%
+    // of a run's uncached input). Older tool results and messages are still reduced only as far as the limit.
+    let target = limit.saturating_sub(limit / HYSTERESIS_DIVISOR);
     let mut work = items.clone();
     let mut total = request_bytes;
+    // 0. older screenshots: the image goes, the Nexus caption (which names the stored evidence) stays
+    let keep_from = latest_step_start(&work);
+    for i in 1..keep_from.min(work.len()) {
+        if total <= target {
+            break;
+        }
+        if let InputItem::UserImage { text, .. } = &work[i] {
+            let before = responses_input_item_bytes(&work[i]);
+            let note = InputItem::Message {
+                role: "user".into(),
+                content: format!("{text} [image omitted from this request to keep it small; the screenshot is stored as evidence]"),
+            };
+            total = total - before + responses_input_item_bytes(&note);
+            work[i] = note;
+            report.images_dropped += 1;
+        }
+    }
     // 1. older replayed reasoning, whole items, oldest first
     let mut i = 1;
-    while total > limit && i < latest_step_start(&work) {
+    while total > target && i < latest_step_start(&work) {
         if matches!(work[i], InputItem::Reasoning { .. }) {
             total -= responses_input_item_bytes(&work[i]) + 1;
             work.remove(i);
@@ -336,18 +368,45 @@ mod tests {
             "nothing measured when it fits"
         );
         assert_eq!(fixed_overhead(&v, total), overhead);
-        // one byte over: the smallest reduction that fits, and the prediction is exact
+        // one byte over: reduced (v2: replayed reasoning toward the hysteresis target), and the prediction is exact
         let r = fit(&mut v, total, total - 1).unwrap();
         assert!(r.changed());
         assert_eq!(r.fixed_overhead_bytes, Some(overhead));
         assert_eq!(r.request_bytes_after, wire(&v, overhead));
         assert!(r.request_bytes_after < total);
-        // one old reasoning item (the oldest) was enough
-        assert_eq!(r.reasoning_dropped, 1);
+        // only old reasoning went (oldest first); no tool result was touched, since that already fit
+        assert!(r.reasoning_dropped >= 1);
         assert_eq!(r.outputs_stubbed, 0);
         assert!(!v
             .iter()
             .any(|i| matches!(i, InputItem::Reasoning { item } if item.contains("rs_0\""))));
+    }
+
+    /// M4.7 (v2): after a reduction, the next turn's ordinary growth fits without another one, so the prompt prefix
+    /// is not rewritten on every later turn.
+    #[test]
+    fn a_reduction_leaves_room_so_the_next_turns_need_none() {
+        let mut v = vec![user("TASK")];
+        for n in 0..40 {
+            v.push(reasoning(n, 4_000));
+            v.push(call(n));
+            v.push(out(n, "ok"));
+        }
+        let overhead = 3_000;
+        let limit = wire(&v, overhead) - 100;
+        let bytes = wire(&v, overhead);
+        let r = fit(&mut v, bytes, limit).unwrap();
+        assert!(r.reasoning_dropped > 1);
+        assert!(r.request_bytes_after <= limit - limit / HYSTERESIS_DIVISOR);
+        // three more ordinary turns (a reasoning item, a call and a short result each) fit untouched
+        for n in 40..43 {
+            v.push(reasoning(n, 4_000));
+            v.push(call(n));
+            v.push(out(n, "ok"));
+            let bytes = wire(&v, overhead);
+            let again = fit(&mut v, bytes, limit).unwrap();
+            assert!(!again.changed(), "turn {n} needed another reduction");
+        }
     }
 
     #[test]

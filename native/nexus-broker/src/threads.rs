@@ -506,7 +506,7 @@ const REVIEW_STARTS: &[&str] = &[
     "can",
 ];
 
-fn negated_change(clause: &[String]) -> bool {
+fn negated_change(clause: &[String], raw: &str) -> bool {
     for i in 0..clause.len() {
         let t = clause[i].as_str();
         // where the negation phrase ends
@@ -577,7 +577,21 @@ fn negated_change(clause: &[String]) -> bool {
             "any", "anything", "the", "a", "an", "all", "please", "this", "that", "these", "those",
             "my", "your", "our", "their", "its", "no", "some",
         ];
-        let obj = match window.iter().position(|w| OBJECTS.contains(&w.as_str())) {
+        let obj_at = window.iter().position(|w| OBJECTS.contains(&w.as_str()));
+        // M4.7: "do not modify anything under `test/`": the object is narrowed by a location that names a
+        // SPECIFIC path (it has a `/` or a `.`), so the negation covers that path only. A generic place ("in this
+        // repository", "in the code") keeps it global.
+        if let Some(j) = obj_at {
+            let loc = rest.get(j + 1).map(String::as_str).unwrap_or("");
+            if matches!(
+                loc,
+                "under" | "in" | "inside" | "within" | "below" | "beneath"
+            ) && scoped_to_path(raw, loc)
+            {
+                continue;
+            }
+        }
+        let obj = match obj_at {
             Some(0) => true,
             Some(j) => !rest[..j].iter().any(|w| !FILLER.contains(&w.as_str())),
             None => false,
@@ -594,6 +608,33 @@ fn negated_change(clause: &[String]) -> bool {
         }
     }
     false
+}
+
+/// M4.7: in the raw clause, the first non-filler word after the locative `loc` names a specific path (`test/`,
+/// `src/lib.rs`, `.github`): it contains a `/` or a `.` once quotes and backticks are removed.
+fn scoped_to_path(raw: &str, loc: &str) -> bool {
+    let words: Vec<String> = raw
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| matches!(c, '`' | '"' | '\'' | ',' | ';'))
+                .to_lowercase()
+        })
+        .collect();
+    let Some(i) = words.iter().position(|w| w == loc) else {
+        return false;
+    };
+    words
+        .iter()
+        .skip(i + 1)
+        .find(|w| {
+            !matches!(
+                w.as_str(),
+                "the" | "a" | "an" | "this" | "that" | "any" | "my" | "your" | "our"
+            )
+        })
+        .is_some_and(|w| {
+            w.trim_end_matches('.').contains('/') || w.trim_end_matches('.').contains('.')
+        })
 }
 
 /// Does the text carry an explicit instruction not to change anything?
@@ -694,7 +735,7 @@ pub fn explicit_read_only(text: &str) -> bool {
     // negated change instructions, clause by clause
     for clause in clauses(text) {
         let toks = tokens(&clause);
-        if negated_change(&toks) {
+        if negated_change(&toks, &clause) {
             return true;
         }
     }
@@ -959,7 +1000,7 @@ pub fn digest_of(run: &IntentRun, activity: &[ToolActivity]) -> RunDigest {
                 summary: clip(&a.args_summary, 160),
                 status: a.status.clone(),
                 verdict: if cmd && a.status == "executed" {
-                    a.verification.clone()
+                    a.assessed().map(str::to_owned)
                 } else {
                     None
                 },
@@ -1532,6 +1573,10 @@ pub struct ThreadLink {
     pub relation_hint: Option<String>,
     /// R-NATIVE-2: resolved target for this run (already refused pre-run).
     pub resolved: Option<crate::resolution::ResolvedTarget>,
+    /// M4.5: the permission mode the run starts in (`ask` when absent).
+    pub permission_mode: Option<String>,
+    /// M4.7: reasoning replay policy for the run (validated); `None` = the broker's default.
+    pub reasoning_replay: Option<String>,
 }
 
 fn owned_thread(b: &Broker, client: &str, tid: &str) -> Result<Thread, (&'static str, String)> {
@@ -1841,6 +1886,16 @@ pub fn send(b: &Arc<Broker>, client: &str, params: &Value) -> CmdResult {
         seed_from,
         relation_hint,
         resolved: Some(resolved.clone()),
+        permission_mode: match s("permissionMode").as_str() {
+            "" => None,
+            m if nexus_tools::permission::PermissionMode::parse(m).is_some() => Some(m.to_owned()),
+            _ => return Err(("bad-request", "unknown permission mode".into())),
+        },
+        reasoning_replay: match s("reasoningReplay").as_str() {
+            "" => None,
+            m if crate::inspect::ReasoningReplay::parse(m).is_some() => Some(m.to_owned()),
+            _ => return Err(("bad-request", "unknown reasoning replay policy".into())),
+        },
     };
     let out = b.submit_linked(
         client,
@@ -2391,8 +2446,19 @@ mod tests {
             "You must not touch any file",
             "just review the diff",
             "Do not modify files, only report.",
+            // M4.7: a generic place keeps the prohibition global
+            "Don't change anything in this repository.",
+            "Do not modify anything in the code",
         ] {
             assert!(explicit_read_only(t), "{t}");
+        }
+        // M4.7: a negation narrowed to a specific path (found live: an M4.7 experiment prompt went read-only)
+        for t in [
+            "Fix the bugs in `src/` so that `node --test` passes. Do not modify anything under `test/`.",
+            "Do not edit anything in src/generated, fix the parser",
+            "Don't change anything inside vendor/lib.js",
+        ] {
+            assert!(!explicit_read_only(t), "{t}");
         }
         for t in [
             "Fix finding F1 and add regression tests.",

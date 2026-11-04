@@ -153,6 +153,12 @@ pub struct BrokerConfig {
     /// Verification Engine shadow evidence recorder. `true` in production; `false` only lets a
     /// differential test (or an operator) prove the recorder changes nothing.
     pub verification_shadow: bool,
+    /// M4.1: the `nexus-browse` helper of this engine (headless Chromium on demand). `None` = no
+    /// browser: the browser tool is not offered and a visual request is reported as unmet.
+    pub browse_script: Option<PathBuf>,
+    /// M4.1: remote model ids the OPERATOR declares to take images, in addition to the built-in table
+    /// (`NEXUS_VISION_MODELS`, comma-separated). A model not in either list is never shown an image.
+    pub vision_models: Vec<String>,
     /// Verification feedback to the same model at the final-response boundary (Phase 05).
     /// `Observe` (the default) only records what would have been eligible; `Active` delivers it.
     /// Broker-owned: nothing the model, a tool or an Engineering Mode says can change it.

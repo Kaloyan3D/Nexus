@@ -494,6 +494,8 @@ impl Fx {
             context_budget_bytes: None,
             request_budget_bytes: None,
             verification_shadow: true,
+            browse_script: None,
+            vision_models: Vec::new(),
             verification_feedback: Default::default(),
         }
     }
@@ -1472,6 +1474,8 @@ fn broker_child_entry() {
         context_budget_bytes: None,
         request_budget_bytes: None,
         verification_shadow: true,
+        browse_script: None,
+        vision_models: Vec::new(),
         verification_feedback: Default::default(),
     };
     let _h = nexus_broker::start(cfg).expect("child broker");

@@ -509,6 +509,17 @@ fn run() -> i32 {
             // EM-04A: no request budget in production (EM-04B activates it per mode)
             request_budget_bytes: None,
             verification_shadow: true,
+            browse_script: std::env::var_os("NEXUS_BROWSE_BIN")
+                .map(PathBuf::from)
+                .filter(|p| p.is_file()),
+            vision_models: std::env::var("NEXUS_VISION_MODELS")
+                .map(|v| {
+                    v.split(',')
+                        .map(|m| m.trim().to_owned())
+                        .filter(|m| !m.is_empty() && m.len() <= 120)
+                        .collect()
+                })
+                .unwrap_or_default(),
             verification_feedback: std::env::var("NEXUS_VERIFICATION_FEEDBACK")
                 .ok()
                 .and_then(|v| nexus_broker::verification::feedback::FeedbackPolicy::parse(&v))

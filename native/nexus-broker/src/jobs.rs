@@ -136,7 +136,7 @@ pub fn job_start(
             args: args.clone(),
             cwd: cwd.clone(),
         })
-        .map_err(|e| bad("command-refused", e.message))?;
+        .map_err(|e| bad(e.code.as_str(), e.message))?;
     if cmd.install {
         return Err(bad(
             "command-refused",

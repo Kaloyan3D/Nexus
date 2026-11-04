@@ -1,0 +1,2279 @@
+{
+ "run": "run_faf5b5f83191930c9ed1b07707702790",
+ "source": "M4.6 build: conversation transcript (tool inputs, rendered results the model saw) + tool activity",
+ "steps": [
+  {
+   "index": 1,
+   "tool": "fs_list",
+   "status": "executed",
+   "args": {
+    "path": "."
+   }
+  },
+  {
+   "index": 2,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "--version"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "cargo 1.99.1 (5f94df478 2026-08-27) (Fedora 1.99.1-2.fc44)\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 3,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "--version"
+    ],
+    "program": "rustc"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "rustc 1.99.1 (58cf8f9c3 2026-10-13) (Fedora 1.99.1-2.fc44)\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 4,
+   "tool": "muse_update_reasoning_state",
+   "status": "executed",
+   "args": {}
+  },
+  {
+   "index": 5,
+   "tool": "fs_write",
+   "status": "executed",
+   "args": {
+    "path": "Cargo.toml"
+   },
+   "output": {
+    "path": "Cargo.toml",
+    "postSha256": "2306e614cc7dcba0a0fe9d34f2e854be3b59a745e95cdd7b46f0ef39c9a1b41a",
+    "operation": "create"
+   }
+  },
+  {
+   "index": 6,
+   "tool": "fs_write",
+   "status": "executed",
+   "args": {
+    "path": "src/lib.rs"
+   },
+   "output": {
+    "path": "src/lib.rs",
+    "postSha256": "44e3c49992e3512a33e4085656fa89cc4bed106164595272e7e1803796743237",
+    "operation": "create"
+   }
+  },
+  {
+   "index": 7,
+   "tool": "fs_write",
+   "status": "executed",
+   "args": {},
+   "output": {
+    "path": "src/models.rs",
+    "postSha256": "5d82381fd33d5719d806b3174f71b8ac44ec2bac6ae57616d360374f67c8ccfa",
+    "operation": "create"
+   }
+  },
+  {
+   "index": 8,
+   "tool": "fs_write",
+   "status": "executed",
+   "args": {},
+   "output": {
+    "path": "src/db.rs",
+    "postSha256": "4208f4f8749df54c688dc95e514f736b3965036bbd1ee525974fc747e04b4fa4",
+    "operation": "create"
+   }
+  },
+  {
+   "index": 9,
+   "tool": "fs_write",
+   "status": "refused",
+   "args": {}
+  },
+  {
+   "index": 10,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "src/db.rs"
+   }
+  },
+  {
+   "index": 11,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "wc -c src/db.rs && head -c 2000 src/db.rs"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "17863 src/db.rs\n//! SQLite persistence layer with transactional state updates.\nuse crate::models::*;\nuse rusqlite::{params, Connection, OptionalExtension};\nuse std::path::Path;\nuse std::time::Duration;\nuse uuid::Uuid;\n\npub struct Db {\n    path: String,\n}\n\nimpl Db {\n    pub fn new<P: AsRef<Path>>(path: P) -> Self {\n        Self {\n            path: path.as_ref().to_string_lossy().to_string(),\n        }\n    }\n\n    pub fn path(&self) -> &str {\n        &self.path\n    }\n\n    pub fn connect(&self) -> rusqlite::Result<Connection> {\n        let conn = Connection::open(&self.path)?;\n        conn.busy_ti"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 12,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "sed -n '60,400p' src/db.rs"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": null,
+    "stderr": "",
+    "stdout": "",
+    "truncatedInTranscript": true
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 13,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "ls -la src/ tests/ 2>&1; echo ---; sed -n '400,600p' src/db.rs"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "ls: cannot access 'tests/': No such file or directory\nsrc/:\ntotal 36\ndrwx------ 2 1000 1000  4096 Nov  3 16:54 .\ndrwx------ 3 1000 1000  4096 Nov  3 16:53 ..\n-rw-r--r-- 1 1000 1000 17863 Nov  3 16:54 db.rs\n-rw-r--r-- 1 1000 1000   260 Nov  3 16:53 lib.rs\n-rw-r--r-- 1 1000 1000  2723 Nov  3 16:54 models.rs\n---\n        }\n        v\n    };\n    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();\n    while let Some(node) = stack.pop() {\n        if node == start {\n            return Ok(true);\n        }\n        if !visited.insert(node.clone()) {\n            continue;"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 14,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "sed -n '38,140p' src/db.rs"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "    fn init_schema(&self, conn: &Connection) -> rusqlite::Result<()> {\n        conn.execute_batch(\n            \"\n            CREATE TABLE IF NOT EXISTS jobs (\n                id TEXT PRIMARY KEY,\n                name TEXT NOT NULL,\n                command TEXT NOT NULL,\n                priority INTEGER NOT NULL DEFAULT 0,\n                max_retries INTEGER NOT NULL DEFAULT 0,\n                base_backoff_secs REAL NOT NULL DEFAULT 1.0,\n                timeout_secs REAL NOT NULL DEFAULT 30.0,\n                status TEXT NOT NULL DEFAULT 'pending',\n                attempts INTEGER NOT NULL DEFA"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 15,
+   "tool": "fs_write",
+   "status": "executed",
+   "args": {},
+   "output": {
+    "path": "src/scheduler.rs",
+    "postSha256": "df707925a148586b290be2cd4f8b179737463509b66696e1b0a1640d13ae9501",
+    "operation": "create"
+   }
+  },
+  {
+   "index": 16,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "wc -l src/scheduler.rs && grep -n 'pub fn' src/scheduler.rs | head -30"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "applied",
+    "stderr": "\n",
+    "stdout": "727 src/scheduler.rs\n36:    pub fn new(db: Db, config: SchedulerConfig) -> Self {\n48:    pub fn shutdown_flag(&self) -> Arc<AtomicBool> {\n52:    pub fn request_shutdown(&self) {\n58:    pub fn cancel_job(&self, id: &str) -> Result<bool, String> {\n74:    pub fn run(&self) -> Result<(), String> {\n93:    pub fn run_until_idle(&self, timeout: Duration) -> Result<bool, String> {\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 17,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   }
+  },
+  {
+   "index": 18,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   }
+  },
+  {
+   "index": 19,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   }
+  },
+  {
+   "index": 20,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "which kill; ls /usr/bin/kill 2>&1; echo ---; ls ~/.cargo/registry 2>/dev/null | head"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 2,
+    "verification": "fail",
+    "pipefail": "applied",
+    "stderr": "/usr/bin/sh: line 2: which: command not found\n",
+    "stdout": "/usr/bin/kill\n---\n"
+   },
+   "recorded": {
+    "verification": "run-fail",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 2,
+    "assessment": null
+   }
+  },
+  {
+   "index": 21,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {},
+   "output": {
+    "path": "src/scheduler.rs",
+    "postSha256": "533f3dc03e58fe4f8a67594709a0de7c25e540e52ecb715d116a28ab4b36311f",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 22,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {},
+   "output": {
+    "path": "src/scheduler.rs",
+    "postSha256": "28fd0bb4b0ae6dce0045705e6ae7b35c8b8f30a5eb22ed8c6cc038b4854b71b9",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 23,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   },
+   "output": {
+    "path": "src/scheduler.rs",
+    "postSha256": "59485a68eb1e56b29a6b37b4205bdeed826c568f7cae60c5521c7173951b76b7",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 24,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "Cargo.toml"
+   }
+  },
+  {
+   "index": 25,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "Cargo.toml"
+   },
+   "output": {
+    "path": "Cargo.toml",
+    "postSha256": "67a1a48d0e4112282f5d772872e24fa5bfe760679be88d8cabbd5603adbf7ed4",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 26,
+   "tool": "fs_write",
+   "status": "executed",
+   "args": {},
+   "output": {
+    "path": "src/main.rs",
+    "postSha256": "cb267bd3de31b37fd1d3165ad096575fff834ec44f06e9ac70fad841e3cdb81c",
+    "operation": "create"
+   }
+  },
+  {
+   "index": 27,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "grep -n 'pub fn' src/main.rs | head -20; echo ---; cargo build --offline 2>&1 | tail -5"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 101,
+    "verification": "fail",
+    "pipefail": "applied",
+    "stderr": "\n",
+    "stdout": "---\nerror: no matching package named `chrono` found\nlocation searched: crates.io index\nrequired by package `job-scheduler v0.1.0 (/work/src)`\nnote: offline mode (via `--offline`) can sometimes cause surprising resolution failures\nhelp: if this error is too confusing you may wish to retry without `--offline`\n"
+   },
+   "recorded": {
+    "verification": "fail",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 101,
+    "assessment": null
+   }
+  },
+  {
+   "index": 28,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "fetch"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "    Updating crates.io index\n     Locking 75 packages to highest compatible versions\n      Adding rusqlite v0.31.0 (available: v0.41.1)\n Downloading crates ...\n  Downloaded iana-time-zone-haiku v0.1.2\n  Downloaded errno v0.3.14\n  Downloaded wasm-bindgen-shared v0.2.130\n  Downloaded once_cell_polyfill v1.70.2\n  Downloaded android_system_properties v0.1.6\n  Downloaded futures-core v0.3.34\n  Downloaded windows-result v0.4.1\n  Downloaded windows-strings v0.5.1\n  Downloaded cfg-if v1.0.5\n  Downloaded is_terminal_polyfill v1.70.2\n  Downloaded utf8parse v0.2.2\n  Downloaded clap_lex v1.1.1\n  Downloade",
+    "stdout": "\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 29,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "build"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 101,
+    "verification": "fail",
+    "pipefail": "not-applicable",
+    "stderr": "   Compiling cfg-if v1.0.5\n   Compiling version_check v0.9.5\n   Compiling proc-macro2 v1.0.107\n   Compiling zerocopy v0.8.63\n   Compiling shlex v2.0.1\n   Compiling quote v1.0.47\n   Compiling ahash v0.8.12\n   Compiling unicode-ident v1.0.27\n   Compiling find-msvc-tools v0.1.15\n   Compiling utf8parse v0.2.2\n   Compiling cc v1.11.0\n   Compiling once_cell v1.21.4\n   Compiling vcpkg v0.2.15\n   Compiling autocfg v1.5.1\n   Compiling libc v0.2.191\n   Compiling pkg-config v0.3.34\n   Compiling num-traits v0.2.19\n   Compiling anstyle-parse v1.0.0\n   Compiling colorchoice v1.0.5\n   Compiling anstyle v1.0.",
+    "stdout": "\n"
+   },
+   "recorded": {
+    "verification": "fail",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 101,
+    "assessment": null
+   }
+  },
+  {
+   "index": 30,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "grep -n 'flatten\\|optional' src/scheduler.rs src/db.rs"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "applied",
+    "stderr": "\n",
+    "stdout": "src/scheduler.rs:199:                .optional()\nsrc/scheduler.rs:201:                .flatten();\nsrc/scheduler.rs:323:            .optional()\nsrc/scheduler.rs:325:            .flatten();\nsrc/scheduler.rs:548:        .optional()\nsrc/scheduler.rs:550:        .flatten();\nsrc/db.rs:102:                .optional()\nsrc/db.rs:198:            .optional()\nsrc/db.rs:337:                .optional()\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 31,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "sed -n '95,110p;195,205p;330,345p' src/db.rs"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "        let conn = self.connect().map_err(|e| e.to_string())?;\n        // Validate deps exist.\n        for dep in &p.depends_on {\n            let exists: Option<String> = conn\n                .query_row(\"SELECT id FROM jobs WHERE id = ?1\", params![dep], |r| {\n                    r.get(0)\n                })\n                .optional()\n                .map_err(|e| e.to_string())?;\n            if exists.is_none() {\n                return Err(format!(\"dependency job not found: {}\", dep));\n            }\n        }\n        let id = Uuid::new_v4().to_string();\n        if p.depends_on.contains(&id) {\n "
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 32,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   },
+   "output": {
+    "path": "src/scheduler.rs",
+    "postSha256": "379a107bdfdf6ba16d5d82365faa9e10eb4cd6b259dda3a6488f10a9b92bac8a",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 33,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "build"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "   Compiling job-scheduler v0.1.0 (/work/src)\nwarning: direct cast of function item into an integer\n   --> src/main.rs:330:50\n    |\n330 |         libc::signal(libc::SIGINT, handle_sigint as libc::sighandler_t);\n    |                                                  ^^^^^^^^^^^^^^^^^^^^^\n    |\n    = note: `#[warn(function_casts_as_integer)]` on by default\nhelp: first cast to a pointer `as *const ()`\n    |\n330 |         libc::signal(libc::SIGINT, handle_sigint as *const () as libc::sighandler_t);\n    |                                                  ++++++++++++\n\nwarning: direct cast of functio",
+    "stdout": "\n"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 34,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "src/main.rs"
+   },
+   "output": {
+    "path": "src/main.rs",
+    "postSha256": "5c2044a650ecb5da7e183374c70ff0a72ad142a13a013f733ddad86a97fb8799",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 35,
+   "tool": "muse_update_reasoning_state",
+   "status": "executed",
+   "args": {}
+  },
+  {
+   "index": 36,
+   "tool": "fs_edit",
+   "status": "refused",
+   "args": {
+    "path": "src/main.rs"
+   }
+  },
+  {
+   "index": 37,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "grep -n 'Run' src/main.rs | head; grep -n 'Duration' src/main.rs | head"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "applied",
+    "stderr": "\n",
+    "stdout": "71:    Run {\n78:        /// Run until all jobs are done, then exit (instead of running forever).\n151:        Command::Run {\n4:use std::time::Duration;\n301:        match sched.run_until_idle(Duration::from_secs(timeout_secs.max(1))) {\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 38,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "src/main.rs"
+   }
+  },
+  {
+   "index": 39,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "src/main.rs"
+   }
+  },
+  {
+   "index": 40,
+   "tool": "fs_write",
+   "status": "executed",
+   "args": {},
+   "output": {
+    "path": "tests/integration.rs",
+    "postSha256": "219f5c42ebf4bb0aecf01da35533eb6335a4a15a7292fc24a1589aee43384cd0",
+    "operation": "create"
+   }
+  },
+  {
+   "index": 41,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test",
+     "--test",
+     "integration",
+     "circular_dependency_rejected"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "   Compiling once_cell v1.21.4\n   Compiling bitflags v2.13.2\n   Compiling rustix v1.1.6\n   Compiling linux-raw-sys v0.12.1\n   Compiling ahash v0.8.12\n   Compiling fastrand v2.5.0\n   Compiling hashbrown v0.14.5\n   Compiling hashlink v0.9.1\n   Compiling rusqlite v0.31.0\n   Compiling job-scheduler v0.1.0 (/work/src)\n   Compiling tempfile v3.27.0\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.06s\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n",
+    "stdout": "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s\n\n"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 42,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test",
+     "--test",
+     "integration",
+     "--",
+     "--list"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n",
+    "stdout": "circular_dependency_rejection: test\ncli_smoke_test: test\ndatabase_error_handling: test\ndependency_failure_propagation: test\ndependency_ordering: test\ngraceful_shutdown_on_sigterm: test\njob_cancellation: test\nnormal_job_execution: test\npersistence_after_restart: test\npriority_scheduling: test\nrecovery_after_forced_termination: test\nretry_behavior: test\nsimultaneous_job_completion: test\ntimeout_enforcement: test\nworker_concurrency_limits: test\nworker_failures: test\n\n16 tests, 0 benchmarks\n"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 43,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 101,
+    "verification": "fail",
+    "pipefail": "not-applicable",
+    "stderr": "   Compiling job-scheduler v0.1.0 (/work/src)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s\n     Running unittests src/lib.rs (/work/env/target/debug/deps/job_scheduler-3a46fa49633b3b85)\n     Running unittests src/main.rs (/work/env/target/debug/deps/scheduler-bec21b0de94eda5c)\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\nerror: test failed, to rerun pass `--test integration`\n",
+    "stdout": "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 16 tests\ntest database_error_handling ... ok\ntest circular_dependency_rejection ... ok\ntest dependency_failure_propagation ... ok\ntest cli_smoke_test ... ok\ntest normal_job_execution ... ok\ntest persistence_after_restart ... ok\ntest priority_scheduling ... ok\ntest dependency_ordering ... ok\ntest retry_behavior ... ok\ntest graceful_shutdown_on_sigterm ... ok\ntest "
+   },
+   "recorded": {
+    "verification": "fail",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 101,
+    "assessment": null
+   }
+  },
+  {
+   "index": 44,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test",
+     "--test",
+     "integration",
+     "simultaneous_job_completion",
+     "--",
+     "--nocapture",
+     "--test-threads=1"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 101,
+    "verification": "fail",
+    "pipefail": "not-applicable",
+    "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n\nthread 'simultaneous_job_completion' (6) panicked at tests/integration.rs:560:5:\nassertion failed: drain(Path::new(db.path()), 10, Duration::from_secs(30))\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nerror: test failed, to rerun pass `--test integration`\n",
+    "stdout": "\nrunning 1 test\ntest simultaneous_job_completion ... FAILED\n\nfailures:\n\nfailures:\n    simultaneous_job_completion\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 15 filtered out; finished in 30.01s\n\n"
+   },
+   "recorded": {
+    "verification": "fail",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 101,
+    "assessment": null
+   }
+  },
+  {
+   "index": 45,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "export PATH=\"$PWD/target/debug:$PATH\"; rm -f /tmp/sim.db; for i in 1 2 3 4 5 6 7 8 9 10; do ./target/debug/scheduler --db /tmp/sim.db add --name j$i --command true --backoff 0.01 >/dev/null; done; time ./target/debug/scheduler --db /tmp/sim.db run --workers 10 --until-idle --timeout-secs 15; echo \"exit=$?\""
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "/usr/bin/sh: line 1: ./target/debug/scheduler: No such file or directory\n/usr/bin/sh: line 1: ./target/debug/scheduler: No such file or directory\n/usr/bin/sh: line 1: ./target/debug/scheduler: No such file or directory\n/usr/bin/sh: line 1: ./target/debug/scheduler: No such file or directory\n/usr/bin/sh: line 1: ./target/debug/scheduler: No such file or directory\n/usr/bin/sh: line 1: ./target/debug/scheduler: No such file or directory\n/usr/bin/sh: line 1: ./target/debug/scheduler: No such file or directory\n/usr/bin/sh: line 1: ./target/debug/scheduler: No such file or directory\n/usr/bin/sh: lin",
+    "stdout": "exit=127\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 46,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "pwd; ls; find / -name scheduler -type f -path '*debug*' 2>/dev/null | head"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 1,
+    "verification": "fail",
+    "pipefail": "applied",
+    "stderr": "\n",
+    "stdout": "/work/src\nCargo.lock\nCargo.toml\nsrc\ntests\n"
+   },
+   "recorded": {
+    "verification": "run-fail",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 1,
+    "assessment": null
+   }
+  },
+  {
+   "index": 47,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "ls /work/env/target/debug/scheduler && BIN=/work/env/target/debug/scheduler; rm -f /tmp/sim.db*; for i in 1 2 3 4 5 6 7 8 9 10; do $BIN --db /tmp/sim.db add --name j$i --command true --backoff 0.01 >/dev/null; done; time $BIN --db /tmp/sim.db run --workers 10 --until-idle --timeout-secs 15; echo \"exit=$?\""
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "timeout: jobs did not drain in time\n\nreal\t0m15.055s\nuser\t0m0.815s\nsys\t0m0.257s\n",
+    "stdout": "/work/env/target/debug/scheduler\nexit=1\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 48,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "BIN=/work/env/target/debug/scheduler; $BIN --db /tmp/sim.db list; echo ---; $BIN --db /tmp/sim.db stats"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "ID       STATUS     PRIO ATTEMPTS RETRIES  NAME\n---\ntotal:     0\npending:   0\nrunning:   0\nsucceeded: 0\nfailed:    0\ncancelled: 0\nattempts:  0\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 49,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "BIN=/work/env/target/debug/scheduler; rm -f /tmp/t2.db*; $BIN --db /tmp/t2.db add --name j1 --command true --backoff 0.01; echo \"exit=$?\"; ls -la /tmp/t2.db* 2>&1; $BIN --db /tmp/t2.db list; echo \"list-exit=$?\""
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "44863070-5761-4d40-aded-9e2ec48d5eae\nexit=0\n-rw------- 1 1000 1000 40960 Nov  3 17:09 /tmp/t2.db\nID       STATUS     PRIO ATTEMPTS RETRIES  NAME\n44863070 pending 0    0        0        j1\nlist-exit=0\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 50,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "BIN=/work/env/target/debug/scheduler; rm -f /tmp/sim.db*; ls /tmp/sim.db* 2>&1; $BIN --db /tmp/sim.db add --name j1 --command true --backoff 0.01; echo \"exit=$?\"; $BIN --db /tmp/sim.db list"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "ls: cannot access '/tmp/sim.db*': No such file or directory\nce929c84-5b1f-44ac-b132-cb12775f34a3\nexit=0\nID       STATUS     PRIO ATTEMPTS RETRIES  NAME\nce929c84 pending 0    0        0        j1\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 51,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "BIN=/work/env/target/debug/scheduler; rm -f /tmp/sim.db*; for i in 1 2 3; do echo \"adding $i\"; $BIN --db /tmp/sim.db add --name j$i --command true --backoff 0.01; echo \"add-exit=$?\"; done; ls -la /tmp/sim.db*; $BIN --db /tmp/sim.db list"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "adding 1\n08ae7ce6-d0b3-4bc4-aade-ef4edd731185\nadd-exit=0\nadding 2\n17058aa0-69c7-4620-b95d-3b28c8fa2417\nadd-exit=0\nadding 3\n77d58249-0f9a-428b-a95c-2846e3a74787\nadd-exit=0\n-rw------- 1 1000 1000 40960 Nov  3 17:10 /tmp/sim.db\nID       STATUS     PRIO ATTEMPTS RETRIES  NAME\n08ae7ce6 pending 0    0        0        j1\n17058aa0 pending 0    0        0        j2\n77d58249 pending 0    0        0        j3\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 52,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "BIN=/work/env/target/debug/scheduler; rm -f /tmp/sim.db*; for i in 1 2 3 4 5 6 7 8 9 10; do $BIN --db /tmp/sim.db add --name j$i --command true --backoff 0.01 >/dev/null; done; $BIN --db /tmp/sim.db list | head -4; timeout 12 $BIN --db /tmp/sim.db run --workers 10 --until-idle --timeout-secs 10; echo \"exit=$?\"; $BIN --db /tmp/sim.db stats"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "applied",
+    "stderr": "timeout: jobs did not drain in time\n",
+    "stdout": "ID       STATUS     PRIO ATTEMPTS RETRIES  NAME\n9e869f4b pending 0    0        0        j1\n0972bec2 pending 0    0        0        j2\ne8dcc965 pending 0    0        0        j3\nexit=1\ntotal:     10\npending:   0\nrunning:   2\nsucceeded: 8\nfailed:    0\ncancelled: 0\nattempts:  8\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 53,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   }
+  },
+  {
+   "index": 54,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   },
+   "output": {
+    "path": "src/scheduler.rs",
+    "postSha256": "f4d9d54a2d77619c7a9a52537b33252718c100e7a806c79430972cf90b8fc011",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 55,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   }
+  },
+  {
+   "index": 56,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {},
+   "output": {
+    "path": "src/scheduler.rs",
+    "postSha256": "6745b0a6be7bbb5c3bf42c9e7ce248ae79d664fe98c2741bbeb5de93806ca5dd",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 57,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   }
+  },
+  {
+   "index": 58,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   }
+  },
+  {
+   "index": 59,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   },
+   "output": {
+    "path": "src/scheduler.rs",
+    "postSha256": "2d0c36c94e84b21e4b2995f7530fdcdca62f3e15dc92e2baa6f055bc53ee8ae8",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 60,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   }
+  },
+  {
+   "index": 61,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   },
+   "output": {
+    "path": "src/scheduler.rs",
+    "postSha256": "31a0741f99e5f3c509afe40be5194f07397cc7c500d5b0577389978b41fbd570",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 62,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "grep -n 'no cancelled record' -B 12 tests/integration.rs | head -30"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "applied",
+    "stderr": "\n",
+    "stdout": "411-    let handle = std::thread::spawn(move || {\n412-        let _ = sched.run_until_idle(Duration::from_secs(60));\n413-    });\n414-    wait_for(&db, &running, JobStatus::Running, Duration::from_secs(15));\n415-    assert!(db.cancel_job(&running).unwrap());\n416-    // Give the worker a moment to observe cancellation.\n417-    let t0 = Instant::now();\n418-    loop {\n419-        let h = db.get_history(&running).unwrap();\n420-        if h.iter().any(|e| e.result == \"cancelled\") {\n421-            break;\n422-        }\n423:        assert!(t0.elapsed() < Duration::from_secs(15), \"no cancelled record\")"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 63,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "src/db.rs"
+   },
+   "output": {
+    "path": "src/db.rs",
+    "postSha256": "c832dd4a3b1678f5c0dc3e6a328c088c685895fd0981bece9e91e7964cfb6855",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 64,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "src/models.rs"
+   },
+   "output": {
+    "path": "src/models.rs",
+    "postSha256": "870cbd5e0507e9e17c7481ff64e53fc3712afb2e90a127edb98072cb7776aff8",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 65,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "grep -n 'SELECT id,name,command' src/db.rs; grep -n 'r.get(13)' src/db.rs"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "197:                \"SELECT id,name,command,priority,max_retries,base_backoff_secs,timeout_secs,status,attempts,next_retry_at_ms,exit_code,error,created_at_ms,updated_at_ms FROM jobs WHERE id=?1\",\n212:                    .prepare(\"SELECT id,name,command,priority,max_retries,base_backoff_secs,timeout_secs,status,attempts,next_retry_at_ms,exit_code,error,created_at_ms,updated_at_ms FROM jobs WHERE status=?1 ORDER BY priority DESC, created_at_ms ASC\")\n223:                    .prepare(\"SELECT id,name,command,priority,max_retries,base_backoff_secs,timeout_secs,status,attempts,next_retry_at_ms,exit_"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 66,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "sed -n '250,300p;380,400p' src/db.rs"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "        let conn = self.connect().map_err(|e| e.to_string())?;\n        let now = now_ms();\n        let n = conn\n            .execute(\n                \"UPDATE jobs SET status='cancelled', error='cancelled by user', updated_at_ms=?1 WHERE id=?2 AND status IN ('pending','running')\",\n                params![now, id],\n            )\n            .map_err(|e| e.to_string())?;\n        Ok(n == 1)\n    }\n\n    pub fn get_history(&self, job_id: &str) -> Result<Vec<HistoryEntry>, String> {\n        let conn = self.connect().map_err(|e| e.to_string())?;\n        let mut stmt = conn\n            .prepare(\"SELECT "
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 67,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {},
+   "output": {
+    "path": "src/db.rs",
+    "postSha256": "634be2e481e0fd9004037b5aefad98c64b8d2da399cf50f24c5ee22317fb820f",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 68,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "src/db.rs"
+   },
+   "output": {
+    "path": "src/db.rs",
+    "postSha256": "3cd8f93fa6b9302b7368282b2f2c92c71275bba8069d4795b18c28530c7a752c",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 69,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "grep -n 'Detect whether the graph' src/db.rs; tail -5 src/db.rs"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "            stack.push(r?);\n        }\n    }\n    Ok(false)\n}\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 70,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "src/db.rs"
+   },
+   "output": {
+    "path": "src/db.rs",
+    "postSha256": "f394317046efdb91530bcce85ff4924f469cc864f0cd08db410b42ac4c48bd66",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 71,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "grep -n 'libc' src/db.rs src/models.rs Cargo.toml | head; grep -n 'recover_interrupted' -A 8 src/db.rs | head -20"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "applied",
+    "stderr": "\n",
+    "stdout": "src/db.rs:431:        libc::kill(pid as libc::pid_t, libc::SIGKILL);\nCargo.toml:21:libc = \"0.2\"\n350:    pub fn recover_interrupted(&self) -> Result<usize, String> {\n351-        let conn = self.connect().map_err(|e| e.to_string())?;\n352-        let running: Vec<(String, i64, i64, f64)> = {\n353-            let mut stmt = conn\n354-                .prepare(\"SELECT id, attempts, max_retries, base_backoff_secs FROM jobs WHERE status='running'\")\n355-                .map_err(|e| e.to_string())?;\n356-            let rows = stmt\n357-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?,"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 72,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "sed -n '360,415p' src/db.rs"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "            for r in rows {\n                v.push(r.map_err(|e| e.to_string())?);\n            }\n            v\n        };\n        let now = now_ms();\n        let mut n = 0;\n        for (id, attempts, max_retries, base) in running {\n            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;\n            // Re-check status inside txn\n            let st: Option<String> = tx\n                .query_row(\"SELECT status FROM jobs WHERE id=?1\", params![id], |r| {\n                    r.get(0)\n                })\n                .optional()\n                .map_err(|e| e.to_string())?;\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 73,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "src/db.rs"
+   },
+   "output": {
+    "path": "src/db.rs",
+    "postSha256": "da0508dc17e6d17b5ff7419e5f401fe7ab6fa1e1870d411e8d8f902e335d268f",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 74,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   }
+  },
+  {
+   "index": 75,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   },
+   "output": {
+    "path": "src/scheduler.rs",
+    "postSha256": "edf35ca36c0136bcbcf6fea64d292c0533f3f0d3498c5cc90d00fe2abef9d3b5",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 76,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "grep -n 'UPDATE jobs SET' src/scheduler.rs"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "230:                    \"UPDATE jobs SET status='failed', error=?1, updated_at_ms=?2 WHERE id=?3 AND status='pending'\",\n305:                    \"UPDATE jobs SET status='running', attempts=attempts+1, next_retry_at_ms=NULL, updated_at_ms=?1 \\\n365:            \"UPDATE jobs SET status='pending', next_retry_at_ms=?1, error=?2, updated_at_ms=?3 WHERE id=?4\",\n371:            \"UPDATE jobs SET status='failed', error=?1, updated_at_ms=?2 WHERE id=?3\",\n658:                \"UPDATE jobs SET status='succeeded', exit_code=?1, error=NULL, updated_at_ms=?2 WHERE id=?3\",\n676:                    \"UPDATE jobs SET"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 77,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   }
+  },
+  {
+   "index": 78,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {},
+   "output": {
+    "path": "src/scheduler.rs",
+    "postSha256": "bfbd48ce3b179d67b7656133f660531985ea662156a6966355ea6740cb6fc8db",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 79,
+   "tool": "fs_read",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   }
+  },
+  {
+   "index": 80,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "src/scheduler.rs"
+   },
+   "output": {
+    "path": "src/scheduler.rs",
+    "postSha256": "d10882bfd534637a5166943b8ad46f0089ca20a6f243c4ed4d79e906c2d17207",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 81,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "build"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "   Compiling job-scheduler v0.1.0 (/work/src)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.12s\n",
+    "stdout": "\n"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 82,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "BIN=/work/env/target/debug/scheduler; rm -f /tmp/sim.db*; for i in 1 2 3 4 5 6 7 8 9 10; do $BIN --db /tmp/sim.db add --name j$i --command true --backoff 0.01 >/dev/null; done; time $BIN --db /tmp/sim.db run --workers 10 --until-idle --timeout-secs 15; echo \"exit=$?\"; $BIN --db /tmp/sim.db stats"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\nreal\t0m0.163s\nuser\t0m0.016s\nsys\t0m0.017s\n",
+    "stdout": "exit=0\ntotal:     10\npending:   0\nrunning:   0\nsucceeded: 10\nfailed:    0\ncancelled: 0\nattempts:  10\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 83,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "BIN=/work/env/target/debug/scheduler; rm -f /tmp/c.db*; ID=$($BIN --db /tmp/c.db add --name long --command 'sleep 30' --backoff 0.01); echo \"id=$ID\"; $BIN --db /tmp/c.db run --workers 1 & SRV=$!; sleep 1; $BIN --db /tmp/c.db list; $BIN --db /tmp/c.db cancel $ID; echo \"cancel-exit=$?\"; sleep 2; $BIN --db /tmp/c.db list; $BIN --db /tmp/c.db history $ID; kill $SRV 2>/dev/null; wait $SRV 2>/dev/null; echo done"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "id=b3a5af61-6a09-4c3b-b347-76fcf14110e5\nID       STATUS     PRIO ATTEMPTS RETRIES  NAME\nb3a5af61 running 0    1        0        long\ncancelled b3a5af61\ncancel-exit=0\nID       STATUS     PRIO ATTEMPTS RETRIES  NAME\nb3a5af61 cancelled 0    1        0        long\nattempt 1 | 1793726071111 | cancelled | exit=None\ndone\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 84,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "   Compiling job-scheduler v0.1.0 (/work/src)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.23s\n     Running unittests src/lib.rs (/work/env/target/debug/deps/job_scheduler-3a46fa49633b3b85)\n     Running unittests src/main.rs (/work/env/target/debug/deps/scheduler-bec21b0de94eda5c)\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n   Doc-tests job_scheduler\n",
+    "stdout": "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 16 tests\ntest database_error_handling ... ok\ntest circular_dependency_rejection ... ok\ntest dependency_failure_propagation ... ok\ntest job_cancellation ... ok\ntest cli_smoke_test ... ok\ntest normal_job_execution ... ok\ntest persistence_after_restart ... ok\ntest priority_scheduling ... ok\ntest dependency_ordering ... ok\ntest retry_behavior ... ok\ntest simultaneous"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 85,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test",
+     "--test",
+     "integration"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 101,
+    "verification": "fail",
+    "pipefail": "not-applicable",
+    "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\nerror: test failed, to rerun pass `--test integration`\n",
+    "stdout": "\nrunning 16 tests\ntest database_error_handling ... ok\ntest circular_dependency_rejection ... ok\ntest dependency_failure_propagation ... ok\ntest cli_smoke_test ... ok\ntest job_cancellation ... ok\ntest normal_job_execution ... ok\ntest persistence_after_restart ... ok\ntest priority_scheduling ... ok\ntest dependency_ordering ... ok\ntest retry_behavior ... ok\ntest simultaneous_job_completion ... ok\ntest graceful_shutdown_on_sigterm ... ok\ntest timeout_enforcement ... ok\ntest worker_failures ... ok\ntest worker_concurrency_limits ... ok\ntest recovery_after_forced_termination ... FAILED\n\nfailures:\n\n--"
+   },
+   "recorded": {
+    "verification": "fail",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 101,
+    "assessment": null
+   }
+  },
+  {
+   "index": 86,
+   "tool": "fs_edit",
+   "status": "refused",
+   "args": {
+    "path": "tests/integration.rs"
+   }
+  },
+  {
+   "index": 87,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "grep -n 'mid' tests/integration.rs | head"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "applied",
+    "stderr": "\n",
+    "stdout": "223:    mk(\"mid\", 5);\n229:    assert_eq!(lines, vec![\"high\", \"mid\", \"low\"]);\n485:    // Quick job proves the scheduler is up; long job is interrupted mid-run.\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 88,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "sed -n '480,560p' tests/integration.rs"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "            .args(args)\n            .output()\n            .expect(\"spawn cli\")\n    };\n\n    // Quick job proves the scheduler is up; long job is interrupted mid-run.\n    let quick_out = run_cli(&[\"add\", \"--name\", \"quick\", \"--command\", \"echo quick\"]);\n    assert!(quick_out.status.success());\n    let long_out = run_cli(&[\n        \"add\",\n        \"--name\",\n        \"long\",\n        \"--command\",\n        \"sleep 8\",\n        \"--timeout\",\n        \"30\",\n        \"--max-retries\",\n        \"2\",\n        \"--backoff\",\n        \"0.1\",\n    ]);\n    assert!(long_out.status.success());\n    let long_id = String::from_ut"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 89,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "BIN=/work/env/target/debug/scheduler; rm -f /tmp/k.db*; $BIN --db /tmp/k.db add --name quick --command 'echo quick' >/dev/null; LID=$($BIN --db /tmp/k.db add --name long --command 'sleep 8' --timeout 30 --max-retries 2 --backoff 0.1); echo \"long=$LID\"; $BIN --db /tmp/k.db run --workers 2 & SRV=$!; sleep 2; $BIN --db /tmp/k.db list; kill -9 $SRV; wait $SRV 2>/dev/null; echo \"killed\"; $BIN --db /tmp/k.db list; time $BIN --db /tmp/k.db run --workers 2 --until-idle --timeout-secs 60; echo \"restart-exit=$?\"; $BIN --db /tmp/k.db list; $BIN --db /tmp/k.db history $LID"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\nreal\t0m8.153s\nuser\t0m0.500s\nsys\t0m0.171s\n",
+    "stdout": "long=62ee92de-e35e-4f50-8f3d-de9dc8365aef\nID       STATUS     PRIO ATTEMPTS RETRIES  NAME\n5827e18e succeeded 0    1        0        quick\n62ee92de running 0    1        2        long\nkilled\nID       STATUS     PRIO ATTEMPTS RETRIES  NAME\n5827e18e succeeded 0    1        0        quick\n62ee92de running 0    1        2        long\nrestart-exit=0\nID       STATUS     PRIO ATTEMPTS RETRIES  NAME\n5827e18e succeeded 0    1        0        quick\n62ee92de succeeded 0    2        2        long\nattempt 1 | 1793726152739 | interrupted | exit=None\n  output: scheduler terminated while running\nattempt 2 | 17"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 90,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "sed -n '535,555p' tests/integration.rs"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "    assert!(\n        hist.iter().any(|h| h.result == \"interrupted\"),\n        \"missing interrupted record: {:?}\",\n        hist.iter().map(|h| &h.result).collect::<Vec<_>>()\n    );\n    assert!(hist.iter().any(|h| h.result == \"success\"));\n    let quick = db\n        .list_jobs(None)\n        .unwrap()\n        .into_iter()\n        .find(|j| j.name == \"quick\")\n        .unwrap();\n    assert_eq!(quick.status, JobStatus::Succeeded);\n}\n\n// ---------------------------------------------------------------------------\n// 11. Simultaneous job completion\n// -----------------------------------------------------"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 91,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "awk 'NR>=505 && NR<=535 {printf \"%d: %s\\n\", NR, $0}' tests/integration.rs"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "505:         .arg(\"--db\")\n506:         .arg(&db_file)\n507:         .arg(\"run\")\n508:         .arg(\"--workers\")\n509:         .arg(\"2\")\n510:         .spawn()\n511:         .expect(\"spawn scheduler\");\n512: \n513:     // Wait until the long job is actually running, then SIGKILL the scheduler.\n514:     let db = Db::open(&db_file).unwrap();\n515:     wait_for(&db, &long_id, JobStatus::Running, Duration::from_secs(20));\n516:     child.kill().expect(\"SIGKILL scheduler\");\n517:     let _ = child.wait();\n518: \n519:     // The kill left the job stuck in `running` with no live worker.\n520:     assert_eq!(statu"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 92,
+   "tool": "fs_edit",
+   "status": "executed",
+   "args": {
+    "path": "tests/integration.rs"
+   },
+   "output": {
+    "path": "tests/integration.rs",
+    "postSha256": "e141d4b72a6d94e96709c4d02de83722cd14f699e5de965d2128bbabae71eb4a",
+    "operation": "edit"
+   }
+  },
+  {
+   "index": 93,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test",
+     "--test",
+     "integration"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "   Compiling job-scheduler v0.1.0 (/work/src)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.67s\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n",
+    "stdout": "\nrunning 16 tests\ntest database_error_handling ... ok\ntest circular_dependency_rejection ... ok\ntest dependency_failure_propagation ... ok\ntest job_cancellation ... ok\ntest cli_smoke_test ... ok\ntest normal_job_execution ... ok\ntest persistence_after_restart ... ok\ntest priority_scheduling ... ok\ntest dependency_ordering ... ok\ntest retry_behavior ... ok\ntest simultaneous_job_completion ... ok\ntest graceful_shutdown_on_sigterm ... ok\ntest timeout_enforcement ... ok\ntest worker_failures ... ok\ntest worker_concurrency_limits ... ok\ntest recovery_after_forced_termination ... ok\n\ntest result: ok. "
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 94,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test",
+     "--test",
+     "integration"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n",
+    "stdout": "\nrunning 16 tests\ntest database_error_handling ... ok\ntest circular_dependency_rejection ... ok\ntest dependency_failure_propagation ... ok\ntest cli_smoke_test ... ok\ntest job_cancellation ... ok\ntest normal_job_execution ... ok\ntest persistence_after_restart ... ok\ntest priority_scheduling ... ok\ntest dependency_ordering ... ok\ntest retry_behavior ... ok\ntest simultaneous_job_completion ... ok\ntest graceful_shutdown_on_sigterm ... ok\ntest timeout_enforcement ... ok\ntest worker_failures ... ok\ntest worker_concurrency_limits ... ok\ntest recovery_after_forced_termination ... ok\n\ntest result: ok. "
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 95,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test",
+     "--test",
+     "integration"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n",
+    "stdout": "\nrunning 16 tests\ntest database_error_handling ... ok\ntest circular_dependency_rejection ... ok\ntest dependency_failure_propagation ... ok\ntest cli_smoke_test ... ok\ntest job_cancellation ... ok\ntest normal_job_execution ... ok\ntest persistence_after_restart ... ok\ntest priority_scheduling ... ok\ntest dependency_ordering ... ok\ntest retry_behavior ... ok\ntest simultaneous_job_completion ... ok\ntest graceful_shutdown_on_sigterm ... ok\ntest timeout_enforcement ... ok\ntest worker_failures ... ok\ntest worker_concurrency_limits ... ok\ntest recovery_after_forced_termination ... ok\n\ntest result: ok. "
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 96,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "for i in 1 2 3; do /work/env/target/debug/deps/integration-cc879318e7f2097d recovery_after_forced_termination simultaneous_job_completion worker_concurrency_limits job_cancellation --test-threads=4 2>&1 | tail -1; done"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "applied",
+    "stderr": "\n",
+    "stdout": "\n\n\n"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "unanalyzable:control-flow",
+    "checkClass": "unattested-composition",
+    "exitCode": 0,
+    "assessment": "unverified"
+   }
+  },
+  {
+   "index": 97,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test",
+     "--test",
+     "integration",
+     "--",
+     "--test-threads=4"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n",
+    "stdout": "\nrunning 16 tests\ntest database_error_handling ... ok\ntest circular_dependency_rejection ... ok\ntest dependency_failure_propagation ... ok\ntest cli_smoke_test ... ok\ntest job_cancellation ... ok\ntest normal_job_execution ... ok\ntest persistence_after_restart ... ok\ntest priority_scheduling ... ok\ntest dependency_ordering ... ok\ntest retry_behavior ... ok\ntest simultaneous_job_completion ... ok\ntest graceful_shutdown_on_sigterm ... ok\ntest timeout_enforcement ... ok\ntest worker_failures ... ok\ntest worker_concurrency_limits ... ok\ntest recovery_after_forced_termination ... ok\n\ntest result: ok. "
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 98,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "cat /work/src/.gitignore 2>/dev/null; echo ---; ls /work/src"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "\n",
+    "stdout": "target/\n*.db\n*.db-wal\n*.db-shm\n*.db-journal\n\n\n# Added by cargo\n\n/target\n---\nCargo.lock\nCargo.toml\nsrc\ntests\n"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 99,
+   "tool": "fs_write",
+   "status": "executed",
+   "args": {},
+   "output": {
+    "path": "README.md",
+    "postSha256": "9744a4d202baaed727e8b675bcb3296eb5cd64f2da0792fbe27ef79bc5968b92",
+    "operation": "create"
+   }
+  },
+  {
+   "index": 100,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "build",
+     "--release"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "   Compiling zerocopy v0.8.63\n   Compiling version_check v0.9.5\n   Compiling proc-macro2 v1.0.107\n   Compiling cfg-if v1.0.5\n   Compiling unicode-ident v1.0.27\n   Compiling find-msvc-tools v0.1.15\n   Compiling ahash v0.8.12\n   Compiling shlex v2.0.1\n   Compiling quote v1.0.47\n   Compiling cc v1.11.0\n   Compiling once_cell v1.21.4\n   Compiling autocfg v1.5.1\n   Compiling vcpkg v0.2.15\n   Compiling libc v0.2.191\n   Compiling utf8parse v0.2.2\n   Compiling pkg-config v0.3.34\n   Compiling anstyle-parse v1.0.0\n   Compiling num-traits v0.2.19\n   Compiling libsqlite3-sys v0.28.0\n   Compiling getrandom",
+    "stdout": "\n"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 101,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "BIN=/work/env/target/release/scheduler; rm -f /tmp/final.db*; A=$($BIN --db /tmp/final.db add --name extract --command 'echo rows > /tmp/final.out; echo ok' --priority 10); B=$($BIN --db /tmp/final.db add --name load --command 'cat /tmp/final.out' --priority 1 --depends-on $A); C=$($BIN --db /tmp/final.db add --name flaky --command 'exit 1' --max-retries 1 --backoff 0.05 --timeout 5); $BIN --db /tmp/final.db depend --job $B --on $A; echo \"depend-exit=$? (expect 1: duplicate edge... or 0 idempotent)\"; $BIN --db /tmp/final.db depend --job $A --on $B; echo \"cycle-exit=$? (expect 1)\"; $BIN --db /tmp/final.db list; $BIN --db /tmp/final.db run --workers 2 --until-idle --timeout-secs 60; echo \"run-exit=$?\"; $BIN --db /tmp/final.db list; $BIN --db /tmp/final.db show $B; $BIN --db /tmp/final.db history $C; $BIN --db /tmp/final.db stats; $BIN --db /tmp/final.db cancel $A; echo \"cancel-finished-exit=$? (expect 1)\""
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "error: circular dependency detected\njob not found or already finished: f43dc6b5\n",
+    "stdout": "7a7c66de now depends on f43dc6b5\ndepend-exit=0 (expect 1: duplicate edge... or 0 idempotent)\ncycle-exit=1 (expect 1)\nID       STATUS     PRIO ATTEMPTS RETRIES  NAME\nf43dc6b5 pending 10   0        0        extract\n7a7c66de pending 1    0        0        load\ncef2d529 pending 0    0        1        flaky\nrun-exit=0\nID       STATUS     PRIO ATTEMPTS RETRIES  NAME\nf43dc6b5 succeeded 10   1        0        extract\n7a7c66de succeeded 1    1        0        load\ncef2d529 failed 0    2        1        flaky\nid:         7a7c66de-84b1-4a6e-a169-1988b09df92c\nname:       load\ncommand:    cat /tmp/final.ou"
+   },
+   "recorded": {
+    "verification": "run-pass",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 102,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "touch src/lib.rs src/main.rs && cargo build 2>&1 | grep -i 'warn' ; echo \"warnings-above(empty=none)\"; ls -R /work/src --ignore=target | head -20"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "applied",
+    "stderr": "\n",
+    "stdout": "warnings-above(empty=none)\n/work/src:\nCargo.lock\nCargo.toml\nREADME.md\nsrc\ntests\n\n/work/src/src:\ndb.rs\nlib.rs\nmain.rs\nmodels.rs\nscheduler.rs\n\n/work/src/tests:\nintegration.rs\n"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "unattested:command-list",
+    "checkClass": "unattested-composition",
+    "exitCode": 0,
+    "assessment": "unverified"
+   }
+  },
+  {
+   "index": 103,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "   Compiling job-scheduler v0.1.0 (/work/src)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.97s\n     Running unittests src/lib.rs (/work/env/target/debug/deps/job_scheduler-3a46fa49633b3b85)\n     Running unittests src/main.rs (/work/env/target/debug/deps/scheduler-bec21b0de94eda5c)\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n   Doc-tests job_scheduler\n",
+    "stdout": "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 16 tests\ntest database_error_handling ... ok\ntest circular_dependency_rejection ... ok\ntest dependency_failure_propagation ... ok\ntest cli_smoke_test ... ok\ntest job_cancellation ... ok\ntest persistence_after_restart ... ok\ntest normal_job_execution ... ok\ntest priority_scheduling ... ok\ntest dependency_ordering ... ok\ntest retry_behavior ... ok\ntest simultaneous"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 104,
+   "tool": "muse_update_reasoning_state",
+   "status": "executed",
+   "args": {}
+  },
+  {
+   "boundary": "A check ran inside a compound command that cannot attest it; giving the model the way to re-establish it.",
+   "afterIndex": 104
+  },
+  {
+   "index": 105,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "touch src/lib.rs src/main.rs src/db.rs src/models.rs src/scheduler.rs && cargo build"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "   Compiling job-scheduler v0.1.0 (/work/src)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.77s\n",
+    "stdout": "\n"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:and-chain",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 106,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test",
+     "--test",
+     "integration",
+     "recovery_after_forced_termination"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "   Compiling job-scheduler v0.1.0 (/work/src)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.04s\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n",
+    "stdout": "\nrunning 1 test\ntest recovery_after_forced_termination ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 8.19s\n\n"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 107,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test",
+     "--test",
+     "integration",
+     "simultaneous_job_completion"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n",
+    "stdout": "\nrunning 1 test\ntest simultaneous_job_completion ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.56s\n\n"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 108,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test",
+     "--test",
+     "integration",
+     "worker_concurrency_limits"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n",
+    "stdout": "\nrunning 1 test\ntest worker_concurrency_limits ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 2.05s\n\n"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 109,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test",
+     "--test",
+     "integration",
+     "job_cancellation"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n",
+    "stdout": "\nrunning 1 test\ntest job_cancellation ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.05s\n\n"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "index": 110,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "test"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "   Compiling job-scheduler v0.1.0 (/work/src)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.29s\n     Running unittests src/lib.rs (/work/env/target/debug/deps/job_scheduler-3a46fa49633b3b85)\n     Running unittests src/main.rs (/work/env/target/debug/deps/scheduler-bec21b0de94eda5c)\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n   Doc-tests job_scheduler\n",
+    "stdout": "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 16 tests\ntest database_error_handling ... ok\ntest circular_dependency_rejection ... ok\ntest dependency_failure_propagation ... ok\ntest cli_smoke_test ... ok\ntest job_cancellation ... ok\ntest normal_job_execution ... ok\ntest persistence_after_restart ... ok\ntest priority_scheduling ... ok\ntest dependency_ordering ... ok\ntest retry_behavior ... ok\ntest simultaneous"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "boundary": "A check ran inside a compound command that cannot attest it; giving the model the way to re-establish it.",
+   "afterIndex": 110
+  },
+  {
+   "index": 111,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "touch src/lib.rs src/main.rs && cargo build 2>&1 | grep -i 'warn'"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 1,
+    "verification": "fail",
+    "pipefail": "applied",
+    "stderr": "\n",
+    "stdout": "\n"
+   },
+   "recorded": {
+    "verification": "fail",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 1,
+    "assessment": null
+   }
+  },
+  {
+   "index": 112,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "build"
+    ],
+    "program": "cargo"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s\n",
+    "stdout": "\n"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:direct",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "boundary": "A check ran inside a compound command that cannot attest it; giving the model the way to re-establish it.",
+   "afterIndex": 112
+  },
+  {
+   "index": 113,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "touch src/lib.rs src/main.rs src/db.rs src/models.rs src/scheduler.rs tests/integration.rs && cargo test"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 0,
+    "verification": "pass",
+    "pipefail": "not-applicable",
+    "stderr": "   Compiling job-scheduler v0.1.0 (/work/src)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.92s\n     Running unittests src/lib.rs (/work/env/target/debug/deps/job_scheduler-3a46fa49633b3b85)\n     Running unittests src/main.rs (/work/env/target/debug/deps/scheduler-bec21b0de94eda5c)\n     Running tests/integration.rs (/work/env/target/debug/deps/integration-cc879318e7f2097d)\n   Doc-tests job_scheduler\n",
+    "stdout": "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 16 tests\ntest database_error_handling ... ok\ntest circular_dependency_rejection ... ok\ntest dependency_failure_propagation ... ok\ntest cli_smoke_test ... ok\ntest job_cancellation ... ok\ntest normal_job_execution ... ok\ntest persistence_after_restart ... ok\ntest priority_scheduling ... ok\ntest dependency_ordering ... ok\ntest retry_behavior ... ok\ntest simultaneous"
+   },
+   "recorded": {
+    "verification": "pass",
+    "composition": "attested:and-chain",
+    "checkClass": null,
+    "exitCode": 0,
+    "assessment": null
+   }
+  },
+  {
+   "boundary": "A check ran inside a compound command that cannot attest it; giving the model the way to re-establish it.",
+   "afterIndex": 113
+  },
+  {
+   "index": 114,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "touch src/lib.rs src/main.rs && cargo build 2>&1 | grep -i 'warn'"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 1,
+    "verification": "fail",
+    "pipefail": "applied",
+    "stderr": "\n",
+    "stdout": "\n"
+   },
+   "recorded": {
+    "verification": "fail",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 1,
+    "assessment": null
+   }
+  },
+  {
+   "boundary": "A check ran inside a compound command that cannot attest it; giving the model the way to re-establish it.",
+   "afterIndex": 114
+  },
+  {
+   "index": 115,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "touch src/lib.rs src/main.rs && cargo build 2>&1 | grep -i 'warn'"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 1,
+    "verification": "fail",
+    "pipefail": "applied",
+    "stderr": "\n",
+    "stdout": "\n"
+   },
+   "recorded": {
+    "verification": "fail",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 1,
+    "assessment": null
+   }
+  },
+  {
+   "boundary": "A check ran inside a compound command that cannot attest it; giving the model the way to re-establish it.",
+   "afterIndex": 115
+  },
+  {
+   "index": 116,
+   "tool": "proc_run",
+   "status": "executed",
+   "args": {
+    "args": [
+     "-c",
+     "touch src/lib.rs src/main.rs && cargo build 2>&1 | grep -i 'warn'"
+    ],
+    "program": "sh"
+   },
+   "output": {
+    "exitCode": 1,
+    "verification": "fail",
+    "pipefail": "applied",
+    "stderr": "\n",
+    "stdout": "\n"
+   },
+   "recorded": {
+    "verification": "fail",
+    "composition": null,
+    "checkClass": null,
+    "exitCode": 1,
+    "assessment": null
+   }
+  },
+  {
+   "boundary": "The model stopped early; asking it to continue (1): last verification failed",
+   "afterIndex": 116
+  },
+  {
+   "boundary": "The model stopped early; asking it to continue (2): last verification failed",
+   "afterIndex": 116
+  }
+ ]
+}

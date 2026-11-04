@@ -698,7 +698,7 @@ impl Broker {
                     run: run_id.clone(),
                 });
             }
-            let run = IntentRun {
+            let mut run = IntentRun {
                 run_id: run_id.clone(),
                 request_id: intent.request_id.clone(),
                 client_id: client.to_owned(),
@@ -726,6 +726,24 @@ impl Broker {
                 output_limit_tokens: Some(resolved.output_limit_tokens),
                 ..Default::default()
             };
+            crate::permissions::init_mode(
+                &mut run,
+                link.as_ref()
+                    .and_then(|l| l.permission_mode.as_deref())
+                    .or_else(|| params.get("permissionMode").and_then(|v| v.as_str()))
+                    .and_then(nexus_tools::permission::PermissionMode::parse),
+            );
+            run.reasoning_replay = link
+                .as_ref()
+                .and_then(|l| l.reasoning_replay.clone())
+                .or_else(|| {
+                    params
+                        .get("reasoningReplay")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                })
+                .filter(|m| crate::inspect::ReasoningReplay::parse(m).is_some())
+                .unwrap_or_default();
             let rec = RunRecord {
                 run,
                 payload_digest: digest,
@@ -939,6 +957,14 @@ impl Broker {
             seed_from: None,
             relation_hint: None,
             resolved: None,
+            // a continuation never inherits Full Access: that was the person's confirmation for the old run
+            permission_mode: match r.permission_mode.as_str() {
+                "" => None,
+                "auto-safe" => Some("auto-safe".to_owned()),
+                _ => Some("ask".to_owned()),
+            },
+            // the replay policy is a measurement setting, not an authority: a continuation keeps it
+            reasoning_replay: (!r.reasoning_replay.is_empty()).then(|| r.reasoning_replay.clone()),
         });
         let out = self.submit_linked(&r.client_id.clone(), &params, Some(old_id), link)?;
         if let Some(new_id) = out.pointer("/run/runId").and_then(|v| v.as_str()) {
@@ -1715,10 +1741,109 @@ impl Broker {
                         "the run has not finished; follow it or poll status".into(),
                     ));
                 }
+                // M4.1: a contradiction between the answer and the receipts that survived the restatement
+                // is answered by the record, beneath the model's words
+                let text = if run.answer_conflicts.is_empty() {
+                    text
+                } else {
+                    let o = run.coding_outcome.clone().unwrap_or_default();
+                    let facts = crate::claims::Facts {
+                        edits_applied: o.edits_applied,
+                        edited_paths: run
+                            .changed_files
+                            .iter()
+                            .take(8)
+                            .map(|c| c.path.clone())
+                            .collect(),
+                        checks_run: o.tests_executed,
+                        checks_failing: o.checks_failed_unresolved,
+                        checks_unattested: o.checks_unattested_unresolved,
+                        browser_runs: o.evidence.browser_runs,
+                        seen_by_model: o.evidence.visual_observation == "seen-by-model",
+                    };
+                    format!(
+                        "{text}{}",
+                        crate::claims::footer(&run.answer_conflicts, &facts)
+                    )
+                };
                 Ok(json!({ "run": run, "text": text }))
             }
             "intent-follow" => self.follow(client, params),
             "intent-cancel" => self.cancel(client, run_id),
+            "intent-permission-decide" => {
+                self.owned(client, run_id)?;
+                let s = |k: &str| {
+                    params
+                        .get(k)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned()
+                };
+                crate::permissions::decide(
+                    self,
+                    run_id,
+                    &s("requestId"),
+                    &s("digest"),
+                    &s("decision"),
+                )
+            }
+            "intent-permission-prepare" => {
+                self.owned(client, run_id)?;
+                let to = params.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+                crate::permissions::prepare_upgrade(self, run_id, to)
+            }
+            "intent-analytics" | "intent-analytics-export" => {
+                let rec = self.owned(client, run_id)?;
+                let (run, _) = self.view(&rec);
+                // every recorded call (the run view only carries the latest ones)
+                let mut acts = Vec::new();
+                let mut off = 0u64;
+                loop {
+                    let (total, page) =
+                        crate::inspect::read_activity(&self.cfg.state_dir, &run.run_id, off, 200);
+                    if page.is_empty() {
+                        break;
+                    }
+                    off += page.len() as u64;
+                    acts.extend(page);
+                    if off >= total {
+                        break;
+                    }
+                }
+                let (evs, capped) = crate::telemetry::load(&self.cfg.state_dir, &run.run_id);
+                let prices = crate::telemetry::load_prices(&self.cfg.state_dir);
+                let host = json!({
+                    "engineOs": std::env::consts::OS, "engineArch": std::env::consts::ARCH,
+                    "hostPlatform": params.get("hostPlatform").and_then(|v| v.as_str()).map(|s| s.chars().take(64).collect::<String>()),
+                    "appVersion": params.get("appVersion").and_then(|v| v.as_str()).map(|s| s.chars().take(32).collect::<String>()),
+                });
+                let acts: Vec<nexus_client::intent_client::ToolActivity> = acts
+                    .into_iter()
+                    .filter_map(|v| serde_json::from_value(v).ok())
+                    .collect();
+                // the engine this run was bound to (summary fields only)
+                let engine = self
+                    .engine_summary(client, run_id)
+                    .ok()
+                    .map(|s| {
+                        let pick = |k: &str| s.get(k).cloned().unwrap_or(Value::Null);
+                        json!({"modeId": pick("modeId"), "engineId": pick("engineId"), "defaultEffort": pick("defaultEffort"), "effort": pick("effort")})
+                    })
+                    .unwrap_or(Value::Null);
+                let a =
+                    crate::telemetry::analyze(&run, &acts, &evs, capped, &prices, &host, &engine);
+                if cmd == "intent-analytics-export" {
+                    Ok(crate::telemetry::export_document(&a, &run))
+                } else {
+                    Ok(serde_json::to_value(&a).unwrap_or_default())
+                }
+            }
+            "intent-permission-mode" => {
+                self.owned(client, run_id)?;
+                let to = params.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+                let tok = params.get("upgradeToken").and_then(|v| v.as_str());
+                crate::permissions::set_mode(self, run_id, to, tok)
+            }
             "intent-list" => {
                 let limit = params
                     .get("limit")
@@ -1811,6 +1936,30 @@ impl Broker {
                 let (total, page) =
                     crate::inspect::read_activity(&self.cfg.state_dir, &rec.run.run_id, off, lim);
                 Ok(json!({ "total": total, "offset": off, "activity": page }))
+            }
+            "intent-browser-artifact" => {
+                // M4.1: one stored screenshot of one of THIS client's runs, by evidence id and file name
+                // the evidence itself lists - never a path.
+                let rec = self.owned(client, run_id)?;
+                let ev_id = params
+                    .get("evidenceId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let file = params.get("file").and_then(|v| v.as_str()).unwrap_or("");
+                let bytes = crate::browser::read_artifact(
+                    &self.cfg.state_dir,
+                    &rec.run.run_id,
+                    ev_id,
+                    file,
+                )?;
+                use sha2::{Digest, Sha256};
+                let digest = hex::encode(Sha256::digest(&bytes));
+                Ok(json!({
+                    "mediaType": "image/jpeg",
+                    "bytes": bytes.len(),
+                    "sha256": digest,
+                    "dataB64": crate::browser::b64(&bytes),
+                }))
             }
             "intent-copy" => self.copy_info(client, run_id),
             "intent-engine" => self.engine_summary(client, run_id),
