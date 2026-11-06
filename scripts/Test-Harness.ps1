@@ -33,6 +33,7 @@ $suites = @(
     [ordered]@{ name='ContextRestrictedProjectionV2'; script='tests/ContextRestrictedProjectionV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextRestrictedDshCompaction'; script='tests/ContextRestrictedDshCompaction.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
     [ordered]@{ name='SetupUpgrade'; script='tests/SetupUpgrade.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='CredentialsCompat'; script='tests/CredentialsCompat.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='UpdateRootResolution'; script='tests/UpdateRootResolution.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='SourceCredentialGuard'; script='tests/SourceCredentialGuard.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Harness'; script='tests/Harness.Tests.ps1'; executable=$powershell; kind='powershell' },

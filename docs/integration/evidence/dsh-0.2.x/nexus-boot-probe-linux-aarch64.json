@@ -1,0 +1,62 @@
+{
+  "dshVersion": "0.2.2-rc.1",
+  "node": "v24.18.1",
+  "platform": "linux",
+  "defaultPreset": "aih-engineering",
+  "roster": [
+    {
+      "id": "aih-engineering",
+      "broken": null,
+      "name": "Normal Engineering"
+    },
+    {
+      "id": "aih-deepseek",
+      "broken": null,
+      "name": "DeepSeek Only"
+    },
+    {
+      "id": "aih-muse",
+      "broken": null,
+      "name": "Muse Agent Plane"
+    }
+  ],
+  "planes": {
+    "aih-engineering": "mounted",
+    "aih-deepseek": "mounted",
+    "aih-muse": "mounted"
+  },
+  "stockPresetsPresent": [],
+  "compositions": [
+    {
+      "preset": "aih-muse",
+      "keys": [
+        "id",
+        "modules",
+        "leakedServices"
+      ],
+      "modules": 24,
+      "leakedServices": []
+    },
+    {
+      "preset": "aih-engineering",
+      "keys": [
+        "id",
+        "modules",
+        "leakedServices"
+      ],
+      "modules": 28,
+      "leakedServices": []
+    },
+    {
+      "preset": "aih-deepseek",
+      "keys": [
+        "id",
+        "modules",
+        "leakedServices"
+      ],
+      "modules": 28,
+      "leakedServices": []
+    }
+  ],
+  "ok": true
+}

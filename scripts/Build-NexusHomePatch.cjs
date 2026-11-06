@@ -116,64 +116,35 @@ function personaItem(plane) {
   ]
 }
 
-function delegationItem(plane) {
-  const lines = [
-    '- id: delegation',
-    '  name: cordis:group',
-    '  group: true',
-    '  isolate:',
-    '    workflowEngine: true',
-    '  config:',
-    '    - id: tool-subagent-control',
-    "      name: '@deepseek-ai/dsh-tool-subagent-control'",
-    '    - id: deepseek-normal-worker',
-    "      name: '@deepseek-ai/dsh-tool-subagent'",
-    '      config:',
-    '        provider: spawn',
-    '        toolName: deepseek_normal',
-    '        maxDepth: 1',
-    '        agentOptions:',
-    '          provider: flash-high-direct',
-    '          model: deepseek-v4-flash',
-    '          reasoningEffort: high',
-    '    - id: deepseek-deep-worker',
-    "      name: '@deepseek-ai/dsh-tool-subagent'",
-    '      config:',
-    '        provider: spawn',
-    '        toolName: deepseek_deep',
-    '        maxDepth: 1',
-    '        agentOptions:',
-    '          provider: flash-max-direct',
-    '          model: deepseek-v4-flash',
-    '          reasoningEffort: max',
-  ]
-  if (plane.codexSubagent) {
-    lines.push(
-      '    - id: tool-subagent-codex',
-      "      name: '@deepseek-ai/dsh-tool-subagent'",
-      '      disabled: true',
-      '      config:',
-      '        provider: codex',
-      '        toolName: subagent_codex',
-      '        maxDepth: provider-managed',
-    )
+/**
+ * The Nexus delegation group, read from config/delegation-block.yml (the single
+ * source). The disabled codex row is removed structurally for planes without it.
+ */
+function delegationItem(plane, configDir) {
+  const text = fs.readFileSync(path.join(configDir, 'delegation-block.yml'), 'utf8').replace(/\r\n/g, '\n')
+  const lines = text.split('\n')
+  const start = lines.findIndex((line) => line === '- id: delegation')
+  if (start < 0) fail('delegation-shape', 'config/delegation-block.yml has no top-level delegation item')
+  const body = lines.slice(start).filter((line) => !/^\s*#/.test(line))
+  while (body.length && body[body.length - 1].trim() === '') body.pop()
+  const out = []
+  let skipping = false
+  for (const line of body) {
+    if (/^ {4}- id: /.test(line)) skipping = !plane.codexSubagent && line === '    - id: tool-subagent-codex'
+    if (skipping) continue
+    out.push(line)
   }
-  lines.push(
-    '    - id: workflow-ptc',
-    "      name: '@deepseek-ai/dsh-workflow-ptc'",
-    '      config:',
-    '        provider: spawn',
-    '    - id: tool-workflow',
-    "      name: '@deepseek-ai/dsh-tool-workflow'",
-  )
-  return lines
+  const joined = out.filter((line, index) => !(line.trim() === '' && (out[index + 1] === undefined || out[index + 1].trim() === '')))
+  if (plane.codexSubagent && !joined.includes('    - id: tool-subagent-codex')) fail('delegation-shape', 'the engineering plane needs the disabled codex row')
+  if (!plane.codexSubagent && joined.includes('    - id: tool-subagent-codex')) fail('delegation-shape', 'the codex row must be absent outside the engineering plane')
+  return joined
 }
 
-function presetRow(presetId, plane, items, metadata, closureRoot) {
+function presetRow(presetId, plane, items, metadata, closureRoot, configDir) {
   const out = []
   for (const item of items) {
     if (item.id === 'persona') out.push(...personaItem(plane))
-    else if (item.id === 'delegation') { if (plane.delegation === 'nexus') out.push(...delegationItem(plane)) }
+    else if (item.id === 'delegation') { if (plane.delegation === 'nexus') out.push(...delegationItem(plane, configDir)) }
     else out.push(...dedent(item, 10))
   }
   // Relative plugin names do not start inside an in-memory preset tree (DSH 0.2.x
@@ -226,7 +197,7 @@ function build(installRoot, options = {}) {
   rows.push('- id: llm-pi-ai', '  config:', indentBlock(yaml.dump({ providers: piAi.providers }, { lineWidth: -1, noRefs: true }).trimEnd(), 4))
   rows.push('- insert:')
   for (const presetId of Object.keys(PLANES)) {
-    rows.push(presetRow(presetId, PLANES[presetId], items, readMetadata(path.join(configDir, PLANES[presetId].metadata)), path.join(root, 'data', '.agent-presets')))
+    rows.push(presetRow(presetId, PLANES[presetId], items, readMetadata(path.join(configDir, PLANES[presetId].metadata)), path.join(root, 'data', '.agent-presets'), configDir))
   }
   rows.push(END)
   const output = staticPatch + '\n\n' + rows.join('\n') + '\n'

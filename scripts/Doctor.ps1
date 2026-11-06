@@ -30,8 +30,11 @@ Add-Check 'portable Node' (Test-Path -LiteralPath $layout.Node) $versions.NodeVe
 Add-Check 'DeepSeek Harness' (Test-Path -LiteralPath $layout.Dsh) $versions.HarnessVersion
 Add-Check 'openai-oauth (optional review)' $true $(if (Test-Path -LiteralPath $layout.OAuth) { "installed $($versions.OpenAiOAuthVersion); not required for ordinary tasks" } else { 'not installed; bounded Codex review unavailable' })
 Add-Check 'settings' (Test-Path -LiteralPath $layout.Settings) $layout.Settings
-Add-Check 'Normal preset' (Test-Path -LiteralPath (Join-Path $layout.Data '.agent-presets/aih-engineering/agent.cordis.yml')) 'aih-engineering / Normal Engineering'
-Add-Check 'DeepSeek-only preset' (Test-Path -LiteralPath (Join-Path $layout.Data '.agent-presets/aih-deepseek/agent.cordis.yml')) 'aih-deepseek / DeepSeek Only'
+# DSH 0.2.x: planes are preset rows in data/cordis.patch.yml (verified below) -- not .agent-presets/<name>/agent.cordis.yml files.
+$doctorHomePatch = Join-Path $layout.Data 'cordis.patch.yml'
+$doctorHomePatchText = if (Test-Path -LiteralPath $doctorHomePatch) { Get-Content -Raw -Encoding UTF8 -LiteralPath $doctorHomePatch } else { '' }
+Add-Check 'Normal preset' $doctorHomePatchText.Contains('id: preset-aih-engineering') 'aih-engineering / Normal Engineering'
+Add-Check 'DeepSeek-only preset' $doctorHomePatchText.Contains('id: preset-aih-deepseek') 'aih-deepseek / DeepSeek Only'
 Add-Check 'active preset' $true "$($resolvedPreset.Id) / $($resolvedPreset.Config.displayName)"
 $routingPolicyValid = $false
 $routingPolicyDetail = ''

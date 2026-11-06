@@ -1,247 +1,229 @@
 # Nexus DSH 0.2.x migration report
 
-Branch: `feature/dsh-migration` (tracks `origin/feature/dsh-migration` at
-`3b90bdd4bdbb39519ba5b4870de753db8d8ccea7`). Repository: `Kaloyan3D/Nexus`
-(Nexus-only; the ArthurLabs-Ecosystem monorepo was deliberately not used).
-Report date: 2026-11-06. Nothing was pushed, merged, opened as a PR or deployed.
+Repository: `Arthur-Labs-AI/ArthurLabs-Ecosystem`, system `systems/nexus/`.
+Branch: `feature/nexus-dsh-0.2-migration` (from `main` at `217b3143`). Local commits
+only: nothing was pushed, merged, deployed or applied to a production install.
+The earlier audit (`Kaloyan3D/Nexus` `feature/dsh-migration`) was not merged; its
+evidence files were carried over unchanged under `docs/integration/evidence/dsh-0.2.x/`.
+No other system (Nexus Native, Sentry, A.R.T.H.U.R., website) was modified.
 
-## Final recommendation
+## Verdict
 
-**MIGRATION BLOCKED — the production pin is unchanged at `0.1.1-rc.2`.**
-This is a feasibility and compatibility audit with reproducible evidence, not a
-completed migration. The upgrade requires ports (below) that are engineering work,
-not security impossibilities, except for CCv2 durable writers, which stay disabled.
-No production dependency, config, installer or vendor file was modified, so the
-installed Nexus DSH keeps its exact previous behavior and rollback is trivial.
+**PARTIALLY MIGRATED — the Nexus DSH backend runs on `dsh-v0.2.2-rc.1` and passes its
+verification on native Linux; the UI is only partly restored and several named
+features/tests remain unported.** It is not READY FOR REVIEW as a full migration.
+Windows is UNVERIFIED. CCv2 durable writers remain disabled (unchanged policy).
 
-Files added by this work (all additive):
+What is genuinely working, each verified by the evidence in section D:
 
-| File | Purpose |
-| --- | --- |
-| `docs/integration/dsh-0.2.x-migration-report.md` | this report |
-| `docs/integration/evidence/dsh-0.2.x/ownership-probe-darwin.json` | raw CCv2 ownership probe output |
-| `docs/integration/evidence/dsh-0.2.x/suites-*-darwin.json` | per-suite status for baseline and 0.2.2-rc.1 probe |
-| `tests/diagnostics/Dsh02OwnershipProbe.mjs` | real-handle writer-ownership probe (feasibility, not a safety test) |
-| `tests/diagnostics/RunNodeSuites.cjs` | runs every `tests/*.Tests.cjs` against an installed tree |
+- strict dependency install (`npm ci`, no `--legacy-peer-deps`) on the pinned Node 24.18.1 / npm 11.16 toolchain;
+- clean install and upgrade-in-place of the installer on Linux (aarch64, see limits);
+- real DSH startup through Nexus's own launcher, token-authenticated Web UI, `READY`, stop and restart;
+- the three Nexus agent planes (`aih-engineering`, `aih-deepseek`, `aih-muse`) mount on the real DSH composition, stock presets cannot be selected;
+- controller-owned route selection on the real DSH agent loop (route, provider/model/effort, fail-closed guards);
+- OpenCode Go header, provider-substrate routes, credentials and settings preservation, admission-gated Nexus web routes.
+
+What is not done is listed precisely in section F.
 
 ## A. Version migration
 
 | Item | Value |
 | --- | --- |
-| Currently pinned | `@deepseek-ai/dsh` and 20 sibling packages `0.1.1-rc.2`; `@deepseek-ai/dsh-agent@0.1.1-rc.2-nexus.1` (patched tarball); `cordis-plugin-group@1.0.1` |
-| Selected target | `0.2.2-rc.1` (npm `latest` and `next`; GitHub pre-release `dsh-v0.2.2-rc.1`, 2026-11-04) |
-| Upstream tag / commit | `dsh-v0.2.2-rc.1` → `66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db` in `deepseek-ai/deepseek-harness` (the repository is not `deepseek-ai/dsh`) |
-| `@deepseek-ai/dsh@0.2.2-rc.1` integrity | `sha512-ijR9UEVYkG15Q/Q79JzvzLBzQOQfc63VLr9n6flpwHPhr5IKn2UxthnSoto/P9l7qGd7pPvI1Ra6TW7LH3oKpg==` |
-| Newer than target | none; `0.2.2-alpha.3` is an alpha |
+| Old | `@deepseek-ai/dsh` and 20 siblings `0.1.1-rc.2`; patched `dsh-agent@0.1.1-rc.2-nexus.1`; `cordis-plugin-group@1.0.1` |
+| New | `dsh@0.2.2-rc.1` (npm `latest`/`next`; GitHub pre-release `dsh-v0.2.2-rc.1`, 2026-11-04) |
+| Upstream | `deepseek-ai/deepseek-harness` tag `dsh-v0.2.2-rc.1`, commit `66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db`; integrity `sha512-ijR9UEVYkG15Q/Q79JzvzLBzQOQfc63VLr9n6flpwHPhr5IKn2UxthnSoto/P9l7qGd7pPvI1Ra6TW7LH3oKpg==` |
+| Newer release | none (`0.2.2-alpha.3` is an alpha); no migration guide exists upstream, only release notes |
 
-Upstream release notes (v0.2.0-rc.1, v0.2.1-rc.1, v0.2.2-rc.1) are user-facing
-changelogs; **no migration guide exists**. Relevant items: automation tasks moved to
-an optional plugin pack (0.2.0), plugin session-record API and agent presets for
-subagents (0.2.1), pi-ai routing changes (0.2.1/0.2.2).
+`runtime/package.json` now pins exactly seven direct dependencies (the 22-package list is gone;
+the tree is `@deepseek-ai/dsh`'s own closure): `dsh@0.2.2-rc.1`, `cordis-plugin-group@1.1.0`
+(required peer of `dsh-app-boot`), `dsh-session-persistence@0.2.2-rc.1` (imported at runtime by
+`dsh-session-persistence-jsonl` but only a devDependency there — an upstream packaging gap),
+`dsh-subagent-codex@0.2.2-rc.1`, `openai-oauth@2.0.0`, `react`/`react-dom@18.3.1`, plus the security
+`overrides` unchanged. It adds an `allowScripts` policy for the five install-script packages
+(`koffi`, `node-pty`, `protobufjs`, `@google/genai`, `dsh-subprocess-local`); npm 11.16 treats it as
+advisory today and will enforce it later. The lockfile resolves 690 packages and installs with
+`npm ci --omit=dev` and no peer-dependency bypass. `--legacy-peer-deps` was removed from
+`setup.sh` and `scripts/Setup.ps1`; the 0.1.1-rc.2 vendored tarball needed it because its
+`peerDependencies` were left as `workspace:^` (it fails with `EUNSUPPORTEDPROTOCOL` on npm 11.16
+and 11.20). `runtime/vendor/` and `runtime/patches/` are retained only as rollback material
+for the 0.1.x pin (see B).
 
-Package changes against the pinned set (probe install, `--ignore-scripts`):
+Removed upstream and not replaced 1:1: `dsh-code-runtime`, `dsh-invariants`,
+`dsh-subagent-in-process-driver`, `dsh-agent-presets`, `dsh-settings-file`, `dsh-client-runtime`,
+`dsh-host-apiproxy`, `dsh-workflow-worker-thread`, `dsh-tool-subagent-report`, `cordis-plugin-hmr`.
 
-- **Not published at 0.2.2-rc.1:** `dsh-code-runtime`, `dsh-invariants`,
-  `dsh-subagent-in-process-driver` (and `cordis-plugin-group@1.0.1` has its own
-  version line, latest `1.1.0`).
-- **Gone from the installed tree:** `dsh-agent-presets`, `dsh-settings-file`,
-  `dsh-client-runtime`, `dsh-host-apiproxy`, `dsh-workflow-worker-thread`,
-  `dsh-code-runtime-worker-thread`, `dsh-tool-subagent-report`,
-  `cordis-plugin-hmr`, `node-addon-landlock-run`.
-- **Tree size:** 199 → 323–331 `@deepseek-ai/*` packages (plugin-pack architecture).
-- `dsh-session-persistence-jsonl@0.2.2-rc.1` imports `@deepseek-ai/dsh-session-persistence`
-  at runtime but does not list it as a dependency (only dev); it must be pinned
-  explicitly in `runtime/package.json` or the runtime fails with `ERR_MODULE_NOT_FOUND`.
-- **Baseline defect found (old runtime):** the vendored patched tarball
-  `deepseek-ai-dsh-agent-0.1.1-rc.2-nexus.1.tgz` declares `peerDependencies` as
-  `workspace:^` (`npm pack` without pnpm rewrite). `npm ci` on this host (npm 11.20)
-  fails with `EUNSUPPORTEDPROTOCOL`; it installs only with `--legacy-peer-deps`.
-  Whether the pinned Node 24.18.1 npm accepts it was **not** verified here. This
-  is further reason the old patched package must not be carried to a new runtime.
+## B. Architecture changes
 
-## B. Architecture changes (upstream) and Nexus adaptations (required, not done)
-
-| Surface | 0.1.1-rc.2 | 0.2.2-rc.1 | Nexus impact |
+| Surface | 0.1.1-rc.2 | 0.2.2-rc.1 | Nexus adaptation (this branch) |
 | --- | --- | --- | --- |
-| Request routing authority | Nexus patch adds `payload.routingAuthority` ranked controller > preset > session > default, protected on `agent/request` | No such concept. `installModelSelection(agentCtx)` takes only the context; the step selection is **fixed at `agent/pre-step`** and `agent/request` that returns a different provider/model/effort now throws (`agent-loop/src/agent.ts:636-639`: "use agent.model.select() before step preparation"). Selections are a durable `model/selection` session event | `Controller-RequestBoundary.cjs`, `Routing-Integrity.cjs`, `Muse-Isolation.cjs`, `ContextCompilerActive*` use `routingAuthority`. Official extension point exists (`agent.model.select()` before step preparation) but it is **durable and adds a "[model changed…]" notice** to the transcript. Not behavior-equivalent to the old request-local route; needs design + prompt-prefix/cache evaluation |
-| Shipped presets | `dsh/config/agent-presets/{code,…}/agent.cordis.yml` | `dsh` package has no `config/`; presets come from `dsh-agent-preset` / `dsh-agent-preset-registry` | `Install-ControllerPresets.ps1`, `Install-MusePreset.ps1`, `Build-DeepSeekPreset.ps1` read the shipped path and would fail |
-| Web UI | `dsh-web-frontend` 0.1.1-rc.2 bundles patched by string replacement | New bundles | `Patch-NexusUi.ps1` hard-fails on any version but 0.1.1-rc.2 by design; Control Room/Composer/Controller panel patches (`Patch-ControlRoomUi`, `Patch-NexusComposer`) need re-derivation |
-| Session storage API | `dsh-session` exports `decodeStorageRecord` | removed; storage is JSONL v4 via `session-persistence-jsonl` | `scripts/lib/Ccv2SessionLog.cjs`, CCv2 evidence readers |
-| Subagents/workflow | `dsh-tool-subagent*`, `dsh-workflow-worker-thread`, `dsh-subagent-in-process-driver` | worker-thread/in-process-driver packages gone | `config/delegation-block.yml` |
-| Provider substrate | `dsh-llm-pi-ai`, `dsh-settings-file` | `dsh-settings-file` gone | `Invoke-ProviderSubstrateProbe.mjs`, `Apply-OpenCodeSessionPatch.cjs` (patches `dsh-llm-pi-ai/lib/index.js`) |
+| Request routing | patched `routingAuthority` ranked controller > preset > session > default | none. The step route is fixed **before** `agent/pre-step` from the durable `model/selection` projection; a different provider/model/effort proposed at `agent/request` throws | `config/Controller-RequestBoundary.cjs`: **arm** with the supported `agent.model.select()` at `agent/inbox/claimed` and `agent/pre-step`, **guard** at `agent/request` (identity and Registry checks unchanged), fail closed on any mismatch. Vendored patch not carried over |
+| Presets | directory scan of `data/.agent-presets/<n>/agent.cordis.yml`, shipped `dsh/config/agent-presets` | presets are `@deepseek-ai/dsh-agent-preset` plugin rows; home patch `$DSH_HOME/cordis.patch.yml` is a supported layer | `scripts/Build-NexusHomePatch.cjs` derives the three planes from the installed `standard` preset (strict structural checks), disables the four stock presets, projects Nexus settings into `agent-default-model`, `llm-pi-ai` and the registry default |
+| Provider settings | `data/settings.yaml` (DSH settings file) | DSH imports **and renames** any `$DSH_HOME/settings.yaml` once | Nexus-owned document renamed `data/nexus-settings.yaml`; installer migrates the old file (no copy, no content change) |
+| Session reads | `session.events` | removed; only deprecated `snapshotEvents()` | one reader, `config/Dsh-SessionEvents.cjs`, used by the isolation modules, shell-env identity and controller |
+| OpenCode Go header | in-place edit of the pi-ai bundle | `llm-pi-ai/request-headers` waterfall | `config/OpenCode-SessionHeader.cjs` (same scope: `opencode-go` only, per-session, never logged); `Apply-OpenCodeSessionPatch.cjs` retired |
+| Web auth | none | per-process token cookie for `/api` and the app shell only | launcher passes `--no-open`, opens the tokenized URL from the DSH banner, treats 401/403 as "listening"; **every Nexus route is gated with `ctx.connection.admit()`** because upstream states plugin routes enforce their own policy (33 controller routes + 2 brand routes, fail closed) |
+| UI | string patches of compiled client bundles | plugins/slots | `scripts/Install-NexusUi.ps1` installs only the three `@nexus/*` plugins; `Patch-NexusUi`, `Patch-NexusComposer`, `Patch-ControlRoomUi` retired |
+| Subagents/workflow | `list-agents`, worker-thread engine, per-worker `persona`/`backgroundMode` | control tool merged, `workflow-ptc`, no per-worker persona | `config/delegation-block.yml` is now the single 0.2.x source consumed by the generator |
 
-**Vendor patch decision:** the routing-authority patch cannot be rebased: the file
-it modifies (`model-selection.ts`) was redesigned and the hook it relies on was
-replaced by an upstream invariant. No replacement patch was authored. Preferred
-direction: implement controller-owned routing through the supported
-`agent.model.select()` path, then prove cache/prefix and transcript equivalence
-before dropping the vendored tarball.
+### Routing semantics — what is *not* equivalent
+
+The old mechanism was request-local and never entered the session. The new one is not, and this
+is stated rather than hidden:
+
+1. **Durable.** A controller route or effort change appends a `model/selection` event; a
+   provider/model change also inserts DSH's "[model changed: …]" notice into the transcript
+   (effort-only changes add none). Asserted in `RuntimeRoutingTrace` (E).
+2. **Granularity.** The route is applied at turn start / message claim and prepared for the
+   following step. A controller target that changes in the *middle* of a turn is refused for that
+   step (fail closed) and applied on the retry; it is never applied silently
+   (`ControllerRouteSelection` 3a/3b).
+3. **Adaptive Muse effort** is computed once per arm, so it takes effect one step later than the
+   old request-time computation (and request/state cannot disagree).
+4. **Effort drift** on an unchanged route is refused, never re-leveled (test 5).
+Prompt-prefix and cache behaviour under durable selections was **not** measured (no live
+provider run); that evaluation is still owed before relying on mid-task re-routing.
 
 ## C. Feature compatibility
 
-Status reflects what was actually executed. "Not tested" means no evidence either way.
-
 | Feature | Status | Evidence |
 | --- | --- | --- |
-| Request-time controller/preset routing authority | **Blocked** | 5 suites that pass on 0.1.1-rc.2 fail on 0.2.2-rc.1: `ComposedRoutingAuthority`, `ComposedRoutingMatrix`, `MuseRoutingAuthorityOrdering`, `RuntimeRoutingTrace`, `ContextWireProjectorResponsesV2` |
-| Transport-boundary Routing-Integrity unit logic | Fully working (pure unit) | `RoutingIntegrity.Tests.cjs` 8/8 on both; does not exercise the new runtime |
-| Controller preset composition on shipped presets | **Blocked** | shipped preset path removed; `ControllerPresetInstalled` needs a real install root (fails on both here) |
-| Nexus Control Room / Controller UI patches | **Blocked** | patch scripts pin 0.1.1-rc.2 bundles; UI contract suites fail on both here for missing install files, so no new-runtime evidence |
-| Engineering Mode v2 / deterministic Controller / task identity / completion gates | Not tested on 0.2.x | controller logic is DSH-independent in most suites (`AihController.Tests` pass on both) but PowerShell suites (`TaskController`, `TaskIdentity`, completion) were **not run** (no pinned PowerShell/Linux install on this host) |
-| Muse / OpenCode Go routing | Partially | pure suites pass on both (`MuseOpenCodeGo`, `MuseProvider`, `NativeOpenCodeGoRoute`); composed routing suites fail on 0.2.2-rc.1 |
-| Context Compaction V1 | Not tested on 0.2.x | upstream `dsh-compaction` exists at 0.2.2-rc.1; V1 suites need the Linux install |
-| Restricted CCv2 production policy (`ccv2-durable-mutation-disabled`) | Fully working, unchanged | `ContextRestrictedProductionV2` and `ContextRestrictedProjectionV2` pass; policy file untouched. `ContextRestrictedDshCompaction`/`InstallV2` fail on both runtimes on this host (environment) |
-| Session creation / restore / persistence on 0.2.x | Partially | real persistence-handle probe (section E) ran; Nexus session binding/restore not exercised |
-| Linux/Windows installers and upgrade | Not tested | clean-install/upgrade not run (see D) |
-| Safe representative engineering task, local verification, restart/restore | Not tested | requires a runnable Nexus on 0.2.x |
+| Dependency install, lockfile, clean `npm ci` | Fully working | Linux install; strict `npm ci --omit=dev` |
+| Clean install / upgrade-in-place (Linux) | Fully working (aarch64 test copy of `setup.sh`) | install logs; upgrade preserved user setting marker, credentials and migrated settings |
+| Real DSH startup via Nexus launcher, READY, stop/restart | Fully working | `aih` → `READY`; restart new PID, controller route 200 |
+| Nexus agent planes (Engineering, DeepSeek-only, Muse) | Fully working | `Verify-NexusComposition` on macOS and Linux: all three mounted, stock presets absent, default `aih-engineering` |
+| Controller-owned routing on the real agent loop | Fully working with the documented semantic changes | `RuntimeRoutingTrace` 5/5, `ControllerRouteSelection` 9/9, `ComposedRoutingMatrix` 8/8 |
+| Muse and OpenCode Go (header, routes, reasoning map) | Fully working offline | `MuseOpenCodeSession` 13/13; substrate probe passes for `opencode-go` and `meta-model-api` (window 1048576, ceiling 131072, levels minimal..xhigh, `off`/`max` refused) |
+| Engineering profile selection backend, workspace registration | Fully working | live `/nexus/engineering-profile.json` 200; live `/nexus/workspace-registration.json` resolved a real git project to its execution root |
+| Operator/web route security | Improved (new) | unauthenticated 401, spoofed Host 403, authenticated 200 on the live server; `NexusRouteAdmission` 7/7 |
+| Credentials and settings preservation | Fully working | `CredentialsCompat` 6/6 (DSH migrates a flat file into `refs:`, values identical, Nexus readers still resolve them, mode 600) |
+| Skills runtime | Fully working | `Verify-SkillsRuntime` native boot loaded a fixture skill body on 0.2.2 |
+| Controller Panel / brand / mode selector (UI) | Partially working | the real new UI loaded all three `@nexus/*` bundles; brand mark and the Controller panel rendered (macOS browser); the Overview/Activity/Verification/Files/Engineering views and operator gates were **not clicked through** |
+| Task Control Room views, verification evidence, operator gates, completion authority end to end | Not tested live | controller/task suites on Linux (see D); no live session-driven task was run |
+| Brand cosmetics: page title, favicon, PWA name, hero copy, sidebar width, send-button colour, model-badge guard | **Not ported** | string patches against compiled bundles have no supported equivalent; the page still says "DeepSeek Harness" |
+| Composer preference seat (`nexusComposerPreference`) | **Not ported** | its patch is retired; the supported route is single-slot election of `conversation.input.model` — not implemented |
+| Workspace-transition composer guard | **Not ported / UNVERIFIED** | upstream 0.2.2 added a pending-workspace chip state but does not disable the composer; supported route is a composer block (`useComposerBlock`) — not implemented. Execution root is still the immutable session cwd |
+| Per-worker persona/background mode for `deepseek_normal`/`deepseek_deep` | Behaviour changed | options no longer exist upstream; workers inherit the plane persona |
+| Context Compaction V1 | Not separately verified on 0.2.x | upstream `dsh-compaction` exists; see D for the suite outcomes |
+| CCv2 restricted production policy | Unchanged, enabled | `ContextDurableMutationPolicyV2.cjs` untouched |
+| CCv2 projection hosts / wire-projector conformance against 0.2 pi-ai | **Failing, not ported** | `request.routingAuthority` and byte-exact wire fixtures no longer hold (see F) |
+| Windows (PowerShell 5.1 and native) | **UNVERIFIED** | no runner; `Setup.ps1` edits are mirrored but unexecuted |
+| Live provider behaviour, real engineering task, local verification run, session restore of a real task | **NOT RUN** | no provider credentials or benchmark authorized |
 
 ## D. Verification
 
-Host: macOS (Darwin), Node v26.13.0 (pinned runtime is 24.18.1), npm 11.20,
-pwsh present but no pinned install. Both Fedora VM addresses (192.168.64.2,
-192.168.65.4) timed out over SSH, so **no native Linux run was possible**.
-
-Commands (installs under the session scratchpad; the repo was not touched):
+Environments. **Authoritative:** Ubuntu 24.04 aarch64 (Lima VM `nexus-a1-linux`), pinned Node 24.18.1
+and PowerShell 7.5.3 downloaded and SHA-verified like `setup.sh` does, DSH installed by the real
+`setup.sh` (a test-only copy whose architecture detection accepts `aarch64`; the committed
+`setup.sh` still rejects aarch64, and an x86_64 run was **not** possible). The macOS host was used
+for JavaScript-only work and the browser check; its own `pwsh` crashes (`.NET FileLoadException`),
+so no PowerShell result from macOS is counted. The Fedora VM would not start from the CLI.
 
 ```sh
-# baseline: committed lockfile; only installs with --legacy-peer-deps (see A)
-cd <scratch>/old-app/app && npm ci --ignore-scripts --legacy-peer-deps
-# probe: Nexus package list, all @deepseek-ai/* at 0.2.2-rc.1, missing packages dropped,
-# upstream dsh-agent instead of the vendored patch, plus dsh-session-persistence
-cd <scratch>/probe-app/app && npm install --ignore-scripts --legacy-peer-deps
-node tests/diagnostics/RunNodeSuites.cjs <repo> <scratch>/old-app   <out.json>
-node tests/diagnostics/RunNodeSuites.cjs <repo> <scratch>/probe-app <out.json>
-node tests/diagnostics/Dsh02OwnershipProbe.mjs <scratch>/probe-app <out.json>
+# runtime
+cd systems/nexus/runtime && npm ci --omit=dev          # strict, no --legacy-peer-deps
+# real installer (VM test copy) — clean install, then in-place upgrade of a 0.1.1-rc.2 install
+bash ./setup.arm64-test.sh --install-root ~/nx-cand --skip-deepseek-login --skip-openai-login --skip-path-check
+bash ./setup.arm64-test.sh --install-root ~/nx-baseline --skip-deepseek-login --skip-openai-login --skip-path-check
+# per-suite harness runner (reads the suite table of scripts/Test-Harness.ps1)
+node tests/diagnostics/RunHarnessSuites.cjs <InstallRoot> <out.json> <privateTmp>
+# real boot / composition proof
+node scripts/Verify-NexusComposition.mjs <InstallRoot>
+node tests/diagnostics/Dsh02OwnershipProbe.mjs <InstallRoot> <out.json>
 ```
 
-| Run | Suites | Pass | Fail |
-| --- | --- | --- | --- |
-| Baseline, DSH 0.1.1-rc.2 (+ nexus.1 patch) | 174 | 124 | 50 |
-| Probe, DSH 0.2.2-rc.1 | 174 | 119 | 55 |
+⟦FINAL_NUMBERS⟧
 
-- **Newly introduced failures: 5**, all in routing authority / request projection
-  (listed in section C). **No suite flipped from fail to pass.**
-- **Baseline failures: 50**, almost all environmental on this macOS pseudo-install:
-  missing installed manifests (`.engineering-preset-closure.json`), no pinned
-  Linux node/pwsh, Linux `/proc` dependence (`ContextLeaseFencing`), missing git
-  identity for cross-process fixtures. They were **not** classified one by one and
-  must be re-baselined on the supported Linux install before any pin change.
-- A passing suite here does not prove 0.2.x compatibility when the suite is a pure
-  unit test of Nexus code (it never loads the new runtime).
-- **Not run:** PowerShell suites (all `*.Tests.ps1`), `Test-Harness.ps1`, clean
-  install, upgrade from an existing isolated install, runtime startup, Controller
-  frontend, live-provider or benchmark runs. These gates are **UNVERIFIED**, not
-  passed. Windows (PowerShell 5.1 and native) is **UNVERIFIED**; Linux is
-  **UNVERIFIED** for this migration.
-- No user sessions, ledgers, credentials or configuration were read or modified;
-  all installs and probe sessions were disposable temp directories.
+### Phase 1 — baseline classification (DSH 0.1.1-rc.2, Linux aarch64)
 
-## E. CCv2 verdict
+The earlier "50 baseline failures" came from a macOS pseudo-install and were mostly environmental.
+A valid baseline on Linux gives **123 PASS / 57 FAIL of 180** suites
+(`suites-baseline-linux-aarch64-dsh-0.1.1-rc.2.json`):
 
-**Original failure: not reproduced under equivalent tests, and not testable — the
-stale-writer model no longer maps. The required guarantees are still missing.
-Verdict: INCONCLUSIVE for the original harness, UNSUPPORTED for enforceable external
-fencing.** The restricted production policy must stay.
+| Class | Suites | Meaning |
+| --- | --- | --- |
+| Installer closure | 22 | CCv2 laboratory suites `require('../config/Context…V2.cjs')` modules the production closure deliberately does not install |
+| Expected: CCv2 restriction | 12 | active-algorithm suites hit `ccv2-durable-mutation-disabled`; they run only through `Ccv2ResearchRunner.cjs` |
+| Environment | 14 | missing files/tools for CCv2/compaction laboratory harnesses, git identity |
+| Needs triage | 9 | `Harness`, `NexusControllerPanel`, `RegistryInstalledRuntime` and six CCv2 live-host suites |
 
-The original 29-PASS/12-FAIL SIGSTOP campaign (`ContextLeaseFencing.Tests.cjs`) was
-not ported: it targets `Session.append` + `SessionStore.flush` with a PowerShell
-lease and `/proc` stop detection (Linux only), and the storage reader it depends on
-(`decodeStorageRecord`) is gone. A harness API mismatch is **not** evidence of a fix.
+Fifty-four of the 57 are the CCv2 laboratory/closure group. None of them were hidden or
+edited.
 
-What the new runtime provides (source: `packages/core/session`,
-`packages/session/session-persistence*` at `66491b05`; behavior: real run,
-`ownership-probe-darwin.json`, DSH 0.2.2-rc.1, Node 26.13.0, macOS only):
+### Evidence files (all under `docs/integration/evidence/dsh-0.2.x/`)
 
-1. **Mutation and flush.** `Session.append` still commits synchronously to an
-   in-memory log with no owner/fence parameter. `'session/event'` is post-commit and
-   cannot veto; `SessionStore.flush` runs `'session/flush'` listeners in
-   parallel with "no waterfall veto". Plugin records (`appendPluginRecord`, 0.2.1)
-   use the same unfenced path.
-2. **Durable writer ownership is a different mechanism.** The JSONL backend takes
-   a kernel `flock` on `session.lock` for the life of a write handle. It is
-   process-bound, **has no expiry by design** ("a live but wedged holder keeps the
-   lock until its process exits"), and takes no external token.
-3. **Equivalence with CCv2.** Upstream internal compaction (`dsh-compaction`,
-   `/compact`) solves context size reduction; it has no HOT/WARM/COLD tiers,
-   generation fencing or externally owned leases. It is not equivalent to CCv2.
+`suites-baseline-linux-aarch64-dsh-0.1.1-rc.2.json`, `suites-final-linux-aarch64-dsh-0.2.2-rc.1.json`,
+`nexus-boot-probe-linux-aarch64.json`, `nexus-boot-probe-darwin.json`,
+`ownership-probe-linux-aarch64.json`, plus the earlier darwin files.
 
-Probe observations (durable handle level):
+## E. CCv2 feasibility appendix
 
-| Experiment | Result |
+**Verdict: INCONCLUSIVE for the original SIGSTOP campaign; UNSUPPORTED for enforceable external
+writer fencing. Nothing was re-enabled and nothing is claimed fixed.** The previous findings stand
+and were re-run on the supported platform: `Dsh02OwnershipProbe` on Linux aarch64 / Node 24.18.1
+reproduces the macOS observations exactly.
+
+| Observation (real jsonl write handle) | Linux result |
 | --- | --- |
-| E1: holder process SIGSTOPped for 4 s (longer than any short Nexus lease) | a second `write` open still gets `SessionAlreadyOwnedError`; after SIGCONT the stale holder's append and flush succeed (`append-ok`) with no fence supplied; after SIGKILL a successor acquires immediately |
-| E2: lock file removed (the upstream-documented escape hatch for a wedged holder), successor appends seq 2, then the stale handle appends seq 2 and flushes | the stale handle's `append` and `flush` are **accepted with no error**; the log then fails to open: `SessionPersistenceCorruptionError … seq gap (expected 3, got 2)`. The backend detects the tear only on a later read |
-| E3: handle API | `append(events, { signal })`, `flush({ signal })`; no owner/token/epoch parameter; `SessionOwnershipLostError` is declared but referenced **0 times** in the shipped JSONL backend (upstream JSDoc: "the shipped in-process backends never throw it yet") |
+| A second write-open while a holder lives | `SessionAlreadyOwnedError` |
+| Holder `SIGSTOP`ped 4 s (any short Nexus lease would expire) | successor still refused |
+| Holder `SIGCONT`, resumed append, no external fence supplied | **accepted** (`append-ok`) |
+| Holder `SIGKILL` | successor acquires immediately (kernel releases the flock) |
+| Lock file removed (upstream's documented escape hatch), stale handle appends and flushes | both **accepted**; the log then fails to open: `SessionPersistenceCorruptionError` (seq gap) |
+| `SessionOwnershipLostError` | declared upstream, referenced 0 times by the shipped backend |
 
-Answers to the six questions:
-
-1. Mutation, history, compaction and flush: described above; in-memory append and
-   post-commit observers remain unfenced.
-2. Internal compaction is not equivalent to CCv2.
-3. The external Nexus Controller **cannot** take part in enforceable writer ownership:
-   the lease is a kernel lock held by the DSH host process, with no token, expiry or
-   takeover protocol that a Controller could drive.
-4. A stale writer is **not** prevented from appending in memory. Durable writes are
-   excluded for the *live-holder* case (the kernel lock) but a suspended holder keeps
-   ownership forever, so Nexus's expiring lease cannot revoke it; and if ownership is
-   forfeited (lock-file removal) a stale handle can still append and flush and corrupt
-   the log with no `SessionOwnershipLostError`. Recovery and finalization fencing for
-   Nexus-owned generation state (A10/A11/A13 files) are entirely outside DSH.
-5. No supported hook or transaction API exists that removes the original blocker.
-   The declared `SessionOwnershipLostError` / lease contract is a promising seam for
-   a future upstream change, not a present guarantee.
-6. HOT/WARM/COLD assembly and generation-aware checkpoints can be built without
-   changing session internals **only in the read-only/projection form already used by
-   restricted CCv2** (request-time projection, immutable content-addressed stores).
-   Durable generation-state writing remains unsafe.
-
-**Missing capability, precisely:** a writer-held ownership primitive consulted by
-append, flush, recovery and finalization, with revocable (expiring) or externally
-arbitrated ownership. Concretely: a veto-capable pre-commit hook on `Session.append`
-(or a fencing-token parameter on `Session.append` and `SessionHandle.append/flush`),
-`SessionOwnershipLostError` actually raised by the backend when ownership is gone,
-and a cross-process arbitration point shared with the Nexus Controller. A safe
-integration proposal is: keep durable CCv2 disabled; if upstream ships the lease
-layer, make the Nexus writer run inside the DSH host holding the handle and treat
-`SessionOwnershipLostError` as the only revocation signal, then re-run the preserved
-SIGSTOP campaign ported to the 0.2.x APIs on Linux before any activation. No CCv2
-safety fix is claimed. `ContextDurableMutationPolicyV2.cjs` and the
-`ccv2-durable-mutation-disabled` refusal were not changed.
-
-Reading caveat: the four CCv2 documents were read as follows — the lease-fencing
-investigation and restricted production scope in full; the 6,526-line architecture
-document and the dev report were **not** read in full (only targeted for the frozen
-requirements cited above).
+- **Internal DSH locking vs Nexus revocation.** DSH 0.2.x gives one process exclusive durable
+  writer ownership per session directory via a non-expiring kernel `flock`. It has no external
+  token, no expiry or takeover protocol and no pre-commit veto: `Session.append` is unfenced,
+  `'session/event'` is post-commit, `'session/flush'` has "no waterfall veto". Nexus's CCv2
+  semantics need the opposite: an *expiring*, externally arbitrated ownership whose revocation
+  stops append, flush, recovery and finalization. An expiring lease cannot revoke a wedged DSH
+  holder, and a forfeited lock does not stop its stale handle.
+- **New surfaces examined:** plugin records (`appendPluginRecord`, ignorable, still unfenced), the
+  `session-persistence-jsonl` generation publisher (exclusive current-generation publication, not
+  a writer fence), the declared-but-unraised `SessionOwnershipLostError`.
+- **Missing capability, exactly:** a writer-held ownership check consulted by append, flush,
+  recovery and finalization with revocable ownership; a pre-commit veto or token parameter on
+  `Session.append`/`SessionHandle.append|flush`; the backend actually raising
+  `SessionOwnershipLostError`; and a cross-process arbitration point shared with the Controller.
+- **Not ported:** the original `ContextLeaseFencing` campaign (it targets removed reader APIs and
+  `/proc` stop detection, and its A10/A11/A13 writers are disabled by policy). A harness mismatch
+  is not evidence of a fix. Any future attempt needs the preserved red regressions ported first.
+- HOT/WARM/COLD assembly can only be built in the read-only projection form that restricted CCv2
+  already uses; durable generation state stays unsafe. This was a feasibility assessment only.
 
 ## F. Remaining blockers and follow-ups
 
-1. Re-baseline on the supported native Linux install (VM was unreachable) so the 50
-   baseline failures can be separated from environment issues.
-2. Design and port request-time controller routing to the 0.2.x
-   `agent.model.select()` model; evaluate durable `model/selection` events and the
-   injected "[model changed…]" notice against prefix-cache and transcript-integrity
-   requirements; rewrite `Controller-RequestBoundary`, `Routing-Integrity`,
-   `Muse-Isolation`, CCv2 active hosts and their five failing suites.
-3. Replace shipped-preset path reads with `dsh-agent-preset` / registry composition
-   in the three preset installers and `Validate-*Preset.cjs`.
-4. Re-derive every UI patch against `dsh-web-frontend@0.2.2-rc.1` (Control Room,
-   Composer, model selection, settings models); rewrite `Doctor.ps1` bundle checks.
-5. Resolve package gaps: dropped packages, explicit `dsh-session-persistence` pin,
-   subagent/workflow replacement, `cordis-plugin-group` line; regenerate
-   `runtime/package-lock.json` and build a clean `npm ci` that does not need
-   `--legacy-peer-deps`.
-6. Fix the baseline vendored-tarball `workspace:^` peer-dependency defect if the
-   old pin must keep shipping.
-7. Run clean-install and upgrade tests for both installers (Linux native, Windows
-   PowerShell 5.1) on real runners; run live-runtime acceptance (startup, Controller
-   UI, session binding, safe task, verification, restart/restore).
-8. Security: no weakening was introduced. The routing-authority port and the
-   missing CCv2 fence are the two items that must keep their negative tests strict.
+Failing or unported tests (not weakened, not hidden):
+- the five CCv2 projection/wire suites that assert `request.routingAuthority` or byte-exact 0.1.x
+  pi-ai wire bodies (`ContextCompilerShadowV2`, `ContextWireProjectorResponsesV2`, and the
+  routing-attestation assertions in the Active/Shadow host suites) — they need the projection
+  hosts' route attestation re-based on the selection model;
+- `MuseProviderRuntime`/`MuseOpenCodeGoRuntime` depend on `Invoke-ProviderSubstrateProbe.mjs`
+  (ported, now passing standalone) — see the numbers in D for their final state;
+- `Test-Tiers.ps1` (live provider tiers) writes a DSH `settings.yaml` into a probe home, which DSH 0.2.x
+  would import and rename; it needs the same Nexus-document treatment before any live run;
+- retired with their mechanism (documented): `MuseRoutingAuthorityOrdering` (the ranking mechanism
+  no longer exists; replaced by `ControllerRouteSelection`), `NexusComposerOwnership`
+  (composer-contract patch retired), `Validate-*Preset`, `Verify-RoutingIntegrityComposition`.
+
+Product gaps: composer preference seat; brand cosmetics; workspace-transition composer guard;
+worker personas; prompt-cache evaluation of durable selections; UI click-through of the Task
+Control Room views and operator gates; a live end-to-end engineering task with provider.
+
+Platform/process: Windows PowerShell 5.1 and native Windows install/upgrade; x86_64 Linux run of
+the committed installer; the Fedora VM; macOS is not an installer platform.
+
+Security notes: DSH 0.2.x has no server-wide auth for plugin routes (now handled in Nexus);
+`dsh-subagent-codex` and the other plugins are upstream pre-release code; `Set-DeepSeekKey.ps1`
+rewrites the credentials file wholesale, which also drops DSH's `records:` browser-session secret
+(it is regenerated; existing browser sessions are invalidated) — a small hardening follow-up is to
+update only the `refs:` block.
 
 ## G. Final recommendation
 
-**MIGRATION BLOCKED.** Interfaces Nexus depends on (request-routing authority,
-shipped presets, UI bundles, session storage reader) changed incompatibly, the
-required CCv2 fencing is not provided upstream, and the native Linux/Windows gates
-could not run. The branch contains audit evidence and probes only; the Nexus DSH
-runtime remains on the previously verified `0.1.1-rc.2` pin.
+**PARTIALLY MIGRATED.** The backend, installer, routing, composition, security of Nexus routes,
+credentials/settings preservation and the real startup path are on `0.2.2-rc.1` and verified on
+Linux. The UI restoration is incomplete (plugin-only; cosmetics, composer seat and the workspace
+guard are not ported), the CCv2 projection suites are red, Windows and x86_64 are unverified, and
+no live provider behaviour was exercised. Do not merge as a complete migration; the next gates are
+the items in F, with the CCv2 fencing question remaining a separate architecture task.
