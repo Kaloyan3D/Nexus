@@ -967,27 +967,18 @@ section('C07 REAL HOST-PATH PROOF - real boundary composition, stub terminal pro
   // Drive the REAL Controller-RequestBoundary arm/guard/rewrite triple
   // plus the REAL Routing-Integrity assertion with a stub terminal
   // provider. Shadow observation runs inside finalize and is discarded.
-  function makeCtx() {
-    const handlers = new Map();
-    return {
-      handlers,
-      on: (event, fn) => {
-        if (!handlers.has(event)) handlers.set(event, []);
-        handlers.get(event).push(fn);
-        return () => {};
-      },
-      shellEnv: { list: () => [], register: () => {} },
-    };
-  }
+  // DSH 0.2.x composition double (arm at claim, request guard, upstream route invariant).
+  const { createPresetCtx, runAgentStep } = require('./lib/AgentRequestComposition.cjs');
+  const makeCtx = () => createPresetCtx();
   async function runThroughBoundary(mode) {
     const ctx = makeCtx();
     let shadowOutcome = null;
     requestBoundary.installControllerRequestBoundary(ctx, {
       targetFor: (payload) => {
         if (!payload || !payload.agent) throw new Error('missing-agent');
-        return { provider: 'muse-spark-direct', model: 'muse-spark-1.3' };
+        return { provider: 'muse-spark-direct', model: 'muse-spark-1.3', reasoning: 'discover' };
       },
-      prepare: () => ({}),
+      prepare: () => ({ effort: 'discover' }),
       finalize: (proposed, target) => {
         const finalized = Object.freeze(Object.assign({}, proposed, {
           provider: target.provider,
@@ -1009,11 +1000,9 @@ section('C07 REAL HOST-PATH PROOF - real boundary composition, stub terminal pro
       },
       fail: (reason) => new Error('boundary-' + reason),
     });
-    const agentHandlers = [];
-    const agent = { session: { id: 'sess-hostproof', header: {}, events: [] }, ctx: { on: (e, fn) => { agentHandlers.push([e, fn]); } } };
-    for (const fn of ctx.handlers.get('agent/pre-step') || []) {
-      await fn({ agent, messages: [{ role: 'user', text: 'hi' }] }, async () => ({ kind: 'continue' }));
-    }
+    // A real step through the 0.2.x selection lifecycle: claim arms the controller
+    // route, pre-step runs, then agent/request resolves through the guard.
+    const agent = { session: { id: 'sess-hostproof', header: {}, events: [], requestHeader: () => undefined }, options: { provider: 'default', model: 'default-model' } };
     const livePrompt = {
       provider: 'muse-spark-direct',
       model: 'muse-spark-1.3',
@@ -1021,21 +1010,7 @@ section('C07 REAL HOST-PATH PROOF - real boundary composition, stub terminal pro
       system: 'host contract bytes',
       tools: [],
     };
-    const payload = { agent };
-    const guardFns = ctx.handlers.get('agent/request') || [];
-    let resolved = null;
-    const terminal = async () => livePrompt;
-    // Emulate the cordis waterfall: guard (outer) -> agent rewrite (inner).
-    const rewrite = agentHandlers.find(([e]) => e === 'agent/request');
-    const inner = async () => {
-      if (!rewrite) return terminal();
-      return rewrite[1](payload, terminal);
-    };
-    // The guard tickets the payload object the rewrite also receives.
-    for (const guard of guardFns) {
-      resolved = await guard(payload, inner);
-    }
-    if (resolved === null) resolved = await inner();
+    const resolved = await runAgentStep(ctx, { agent }, async () => livePrompt);
     // Final immutable assertion, as Routing-Integrity does at llm/stream.
     routingIntegrity.assertRoutingIntegrity(
       { taskId: 'TASK-C07-A', engine: 'muse' },

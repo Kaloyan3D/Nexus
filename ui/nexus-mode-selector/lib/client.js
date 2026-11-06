@@ -27,7 +27,8 @@ window.__ModuleLoader__.load({
       })
     });
     const SUPPORTED_MODES = new Set(Object.keys(MODE_SELECTIONS));
-    const AGENT_PRESET_SETTINGS_NS = "agent-presets";
+    // DSH 0.2.x: the preset registry owns this settings namespace; the user default is its `selectedDefault`.
+    const AGENT_PRESET_SETTINGS_NS = "agent-preset-registry";
 
     function presetOf(session) {
       if (session && typeof session.agentPreset === "string") return session.agentPreset;
@@ -91,8 +92,8 @@ window.__ModuleLoader__.load({
     }
 
     function createModeController(scope) {
-      // Pinned DSH separates RPC (connection.api) from events (remote.$on).
-      const api = scope.get("connection").api;
+      // DSH 0.2.x: unary RPC and events both live on `ctx.remote` (`remote.<namespace>.<method>`).
+      const remote = scope.remote;
       const store = createModeStore({ options: [], current: "", busy: false, error: null });
       let fallback = "";
       let staged;
@@ -108,7 +109,7 @@ window.__ModuleLoader__.load({
 
       async function load() {
         try {
-        const { result } = await api.agentPresets.list({});
+        const result = await remote.agentPresets.list();
         if (disposed) return;
         if (!result.ok) {
           store.patch({ error: result.error.message || "Unable to read Nexus modes." });
@@ -133,7 +134,7 @@ window.__ModuleLoader__.load({
       }
 
       async function persistDefault(id) {
-        const { result } = await api.settings.update({ ns: AGENT_PRESET_SETTINGS_NS, patch: { default: id } });
+        const result = await remote.settings.update(AGENT_PRESET_SETTINGS_NS, { selectedDefault: id });
         if (!result.ok) throw new Error(result.error.message || "Failed to persist the Nexus mode.");
       }
 
@@ -211,9 +212,8 @@ window.__ModuleLoader__.load({
         store.patch({ busy: true, error: null });
         try {
           if (presetOf(session) !== effectiveId) {
-            const { result } = await api.agentPresets.select({ sessionId: session.id, agentPreset: effectiveId });
+            const result = await remote.agentPresets.select(session.id, effectiveId);
             if (!result.ok) throw new Error(result.error.message || "Failed to apply the Nexus mode.");
-            scope.sessions.noteAgentPreset(session.id, result.value.agentPreset);
           }
           engineAutoApplyFailed = false;
           await settleAppliedMode(session, id, effectiveId);
@@ -324,8 +324,10 @@ window.__ModuleLoader__.load({
         "slots",
         "sessions",
         "modelDirectories",
-        "connection",
-        "remote"
+        "remote",
+        // DSH 0.2.x: each Remote namespace is its own injectable service.
+        "remote.agentPresets",
+        "remote.settings"
       ], (scope) => {
         const controller = createModeController(scope);
         // Phase M2.1 (TASK-0038): publish this picker's authoritative client
