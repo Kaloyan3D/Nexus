@@ -53,7 +53,7 @@ foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'docs') -Fil
     Copy-AihSourceFile -Source $file.FullName -Destination (Join-Path $layout.Root 'docs')
 }
 
-foreach ($name in @('versions.json', 'settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'preset-muse.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'Muse-Isolation.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'Controller-RequestBoundary.cjs', 'Preset-ShellEnvironment.cjs', 'Routing-Integrity.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'nexus-profiles.json', 'muse-profiles.json', 'Engineering-Profiles.cjs', 'Nexus-Profiles.cjs')) {
+foreach ($name in @('versions.json', 'settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'preset-muse.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'Muse-Isolation.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'Controller-RequestBoundary.cjs', 'Preset-ShellEnvironment.cjs', 'Dsh-SessionEvents.cjs', 'OpenCode-SessionHeader.cjs', 'Routing-Integrity.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'nexus-profiles.json', 'muse-profiles.json', 'Engineering-Profiles.cjs', 'Nexus-Profiles.cjs')) {
     Copy-AihSourceFile -Source (Join-Path $sourceRoot "config\$name") -Destination (Join-Path $layout.Config $name)
 }
 # TASK-0047.1: Registry runtime closure (managed code and mode manifests).
@@ -162,7 +162,7 @@ if ($installedNodeVersion -ne $nodeVersion) {
 Copy-Item -LiteralPath (Join-Path $layout.Runtime 'package.json') -Destination (Join-Path $layout.App 'package.json') -Force
 Copy-Item -LiteralPath (Join-Path $layout.Runtime 'package-lock.json') -Destination (Join-Path $layout.App 'package-lock.json') -Force
 if (-not $SkipDependencyInstall) {
-    & $layout.Npm ci --omit=dev --legacy-peer-deps --prefix $layout.App
+    & $layout.Npm ci --omit=dev --prefix $layout.App
     if ($LASTEXITCODE -ne 0) { throw 'npm ci failed while installing the pinned Harness runtime.' }
 }
 elseif (-not (Test-Path -LiteralPath $layout.Dsh)) {

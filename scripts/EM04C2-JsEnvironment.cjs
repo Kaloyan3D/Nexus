@@ -109,6 +109,7 @@ steps.push({ step: 'Complete-Install.ps1', status: inst.status })
 if (steps.some((s) => s.status !== 0)) unavailable('an installer step failed: ' + JSON.stringify(steps) + ' ' + (inst.stderr || '').slice(0, 300))
 // RegistryR2Compatibility asserts that a SOURCE checkout holds no live settings file; the presets the
 // other suites need live elsewhere under data/, so only this generated file is removed
+fs.rmSync(path.join(root, 'data', 'nexus-settings.yaml'), { force: true })
 fs.rmSync(path.join(root, 'data', 'settings.yaml'), { force: true })
 git('add', '-A')
 git('commit', '-qm', 'installed state')

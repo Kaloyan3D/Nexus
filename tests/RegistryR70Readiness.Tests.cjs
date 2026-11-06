@@ -27,7 +27,7 @@ function userMessage(text) { return { role: 'user', source: { kind: 'user' }, co
   fs.cpSync(path.join(repoRoot, 'config'), path.join(installRoot, 'config'), { recursive: true });
   fs.mkdirSync(path.join(installRoot, 'ui', 'nexus-controller', 'lib'), { recursive: true });
   fs.cpSync(path.join(repoRoot, 'ui', 'nexus-controller', 'lib', 'gate.cjs'), path.join(installRoot, 'ui', 'nexus-controller', 'lib', 'gate.cjs'));
-  fs.writeFileSync(path.join(dataHome, 'settings.yaml'), 'engineering-profile: deepseek-codex');
+  fs.writeFileSync(path.join(dataHome, 'nexus-settings.yaml'), 'engineering-profile: deepseek-codex');
   const fixture = tmpDir('r70-ws-');
   fs.mkdirSync(path.join(fixture, 'src'), { recursive: true });
   fs.writeFileSync(path.join(fixture, 'src', 'a.js'), 'module.exports = 1;');

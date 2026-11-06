@@ -193,7 +193,7 @@ function fixtureFileMap(dataRoot, workspace, { task, executionClass, decision, d
   } else {
     files[path.join(dataRoot, 'routing', 'decisions.jsonl')] = JSON.stringify(decisionRecord) + '\n'
   }
-  files[path.join(dataRoot, 'settings.yaml')] = FIXTURE_SETTINGS
+  files[path.join(dataRoot, 'nexus-settings.yaml')] = FIXTURE_SETTINGS
   files[path.join(dataRoot, 'aih-state.json')] = JSON.stringify({
     SchemaVersion: 3,
     Status: 'READY',
@@ -2232,12 +2232,12 @@ async function main() {
     const dataRoot = tmpDir('nexus-ctr-')
     const workspace = path.join(dataRoot, 'ws')
     const files = fixtureFileMap(dataRoot, workspace, {})
-    files[path.join(dataRoot, 'settings.yaml')] = 'agent-default-model:\n  provider: flash-max-direct\n  model: deepseek-v4-flash\n  reasoningEffort: max\n'
+    files[path.join(dataRoot, 'nexus-settings.yaml')] = 'agent-default-model:\n  provider: flash-max-direct\n  model: deepseek-v4-flash\n  reasoningEffort: max\n'
     writeTree(dataRoot, files)
     const snapshot = await status.buildControllerSnapshot({
       dataRoot,
       sessionId: 'session-0001',
-      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      settingsPath: path.join(dataRoot, 'nexus-settings.yaml'),
       statePath: path.join(dataRoot, 'aih-state.json'),
       readFile: memoryReader(files),
       modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' },
@@ -2251,7 +2251,7 @@ async function main() {
     const unbound = await status.buildControllerSnapshot({
       dataRoot,
       sessionId: 'session-nobody',
-      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      settingsPath: path.join(dataRoot, 'nexus-settings.yaml'),
       statePath: path.join(dataRoot, 'aih-state.json'),
       readFile: memoryReader(files),
       modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' },
@@ -2262,11 +2262,11 @@ async function main() {
     assert.deepEqual(unbound.preference, { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash' }, 'unbound session still exposes the preference')
 
     // corrupt settings degrade only the preference (fail-closed subsystem)
-    files[path.join(dataRoot, 'settings.yaml')] = '{ this is not yaml: [unclosed'
+    files[path.join(dataRoot, 'nexus-settings.yaml')] = '{ this is not yaml: [unclosed'
     const corrupt = await status.buildControllerSnapshot({
       dataRoot,
       sessionId: 'session-0001',
-      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      settingsPath: path.join(dataRoot, 'nexus-settings.yaml'),
       statePath: path.join(dataRoot, 'aih-state.json'),
       readFile: memoryReader(files),
       modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' },
@@ -2342,7 +2342,7 @@ async function main() {
     const oldTaskFiles = fixtureFileMap(oldTaskDataRoot, path.join(oldTaskDataRoot, 'ws'), {})
     writeTree(oldTaskDataRoot, oldTaskFiles)
     const oldSnap = await status.buildControllerSnapshot({
-      dataRoot: oldTaskDataRoot, sessionId: 'session-0001', settingsPath: path.join(oldTaskDataRoot, 'settings.yaml'),
+      dataRoot: oldTaskDataRoot, sessionId: 'session-0001', settingsPath: path.join(oldTaskDataRoot, 'nexus-settings.yaml'),
       statePath: path.join(oldTaskDataRoot, 'aih-state.json'), readFile: memoryReader(oldTaskFiles),
       modelNames: {}, gitSummary: null, nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
@@ -2466,7 +2466,7 @@ async function main() {
     files27[path.join(dataRoot, 'completion', 'gates.jsonl')] = fs.readFileSync(gateModule.gatesPathOf(dataRoot), 'utf8')
     writeTree(dataRoot, files27)
     const snap27 = await status.buildControllerSnapshot({
-      dataRoot, sessionId: 'session-0001', settingsPath: path.join(dataRoot, 'settings.yaml'),
+      dataRoot, sessionId: 'session-0001', settingsPath: path.join(dataRoot, 'nexus-settings.yaml'),
       statePath: path.join(dataRoot, 'aih-state.json'), readFile: memoryReader(files27),
       modelNames: {}, gitSummary: null, nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
@@ -2795,7 +2795,7 @@ async function main() {
       [path.join(dataRoot, 'routing', 'session-bindings.json')]: JSON.stringify({ schemaVersion: 1, bindings: { 'session-0001': { ...FIXTURE_BINDING, workspace } } }),
       [path.join(dataRoot, 'routing', 'states', stateFile)]: JSON.stringify({ taskId: 'TASK-0042', workspace, preset: 'aih-engineering', executionClass: 'engineer_normal', selectedTier: 3, risk: 'normal', reviewRequired: false, reviewRequested: false, lastFailureSignature: '', sameFailureCount: 0, updatedAtUtc: '2026-08-28T17:30:00.000Z' }),
       [path.join(dataRoot, 'routing', 'decisions.jsonl')]: JSON.stringify({ ...FIXTURE_DECISION, workspace, executionClass: 'engineer_normal', role: 'primaryEngineer', profile: 'deepseek-codex', profileDisplayName: 'DeepSeek + Codex', provider: 'flash-high-direct', model: 'deepseek-v4-flash' }) + '\n',
-      [path.join(dataRoot, 'settings.yaml')]: 'agent-default-model:\n  provider: flash-max-direct\n  model: deepseek-v4-flash\n  reasoningEffort: max\nengineering-profile: glm-codex\n',
+      [path.join(dataRoot, 'nexus-settings.yaml')]: 'agent-default-model:\n  provider: flash-max-direct\n  model: deepseek-v4-flash\n  reasoningEffort: max\nengineering-profile: glm-codex\n',
       [path.join(dataRoot, 'profiles.json')]: JSON.stringify({ schemaVersion: 1, profiles: [{ id: 'glm-codex', displayName: 'GLM + Codex' }, { id: 'deepseek-codex', displayName: 'DeepSeek + Codex' }] }),
       [path.join(dataRoot, 'aih-state.json')]: JSON.stringify({ SchemaVersion: 3, Status: 'READY', Pid: 12345, ProcessStartedAtUtc: '2026-08-28T17:00:00.0000000Z', Workspace: workspace, Url: 'http://127.0.0.1:3080' }),
       [path.join(workspace, '.ai-harness', 'state', 'tasks.json')]: JSON.stringify({ schemaVersion: 1, tasks: [{ ...FIXTURE_TASK.tasks[0], workspace }] }),
@@ -2804,7 +2804,7 @@ async function main() {
     const snapshot = await status.buildControllerSnapshot({
       dataRoot,
       sessionId: 'session-0001',
-      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      settingsPath: path.join(dataRoot, 'nexus-settings.yaml'),
       statePath: path.join(dataRoot, 'aih-state.json'),
       profilesPath: path.join(dataRoot, 'profiles.json'),
       readFile: memoryReader(files),
@@ -2857,7 +2857,7 @@ async function main() {
       },
     }
     const files = {
-      [path.join(dataRoot, 'settings.yaml')]: settingsText,
+      [path.join(dataRoot, 'nexus-settings.yaml')]: settingsText,
       [path.join(dataRoot, 'custom-engineering-profile.json')]: JSON.stringify(customDoc, null, 2),
     }
     writeTree(dataRoot, files)
@@ -2866,7 +2866,7 @@ async function main() {
     const state = buildEngineeringProfileState({
       installRoot: ROOT, // real config: engineering-profiles.json + model-registry.json
       dataRoot,
-      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      settingsPath: path.join(dataRoot, 'nexus-settings.yaml'),
       customProfilePath: path.join(dataRoot, 'custom-engineering-profile.json'),
       nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
@@ -2910,7 +2910,7 @@ async function main() {
     fs.cpSync(path.join(ROOT, 'scripts'), path.join(installRoot, 'scripts'), { recursive: true })
     fs.cpSync(path.join(ROOT, 'config'), path.join(installRoot, 'config'), { recursive: true })
     writeTree(dataRoot, {
-      [path.join(dataRoot, 'settings.yaml')]: 'engineering-profile: glm-codex\n',
+      [path.join(dataRoot, 'nexus-settings.yaml')]: 'engineering-profile: glm-codex\n',
     })
     const previousHome = process.env.DSH_HOME
     process.env.DSH_HOME = dataRoot
@@ -3035,7 +3035,7 @@ async function main() {
     const policyPath = path.join(ROOT, 'config', 'routing-policy.json')
     const registryPath = path.join(ROOT, 'config', 'model-registry.json')
     const profilesPath = path.join(ROOT, 'config', 'engineering-profiles.json')
-    const settingsPath = path.join(dataRoot, 'settings.yaml')
+    const settingsPath = path.join(dataRoot, 'nexus-settings.yaml')
     const settingsA = [
       'agent-default-model:',
       '  provider: zai-direct',

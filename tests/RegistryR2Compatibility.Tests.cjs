@@ -77,7 +77,7 @@ function makeFixture(o) {
       JSON.stringify({ schemaVersion: 1, roles: opts.custom }, null, 2) + '\n',
     )
   }
-  fs.writeFileSync(path.join(root, 'data', 'settings.yaml'), 'engineering-profile: ' + (opts.settingsProfile || 'deepseek-codex') + '\n')
+  fs.writeFileSync(path.join(root, 'data', 'nexus-settings.yaml'), 'engineering-profile: ' + (opts.settingsProfile || 'deepseek-codex') + '\n')
   return root
 }
 function withEnv(vars, fn) {
@@ -119,7 +119,7 @@ function bindingSubset(binding) {
 const DUAL_ROLES = ['primaryEngineer', 'deepEngineer', 'reviewer', 'solver', 'fallback', 'visualReviewer']
 function snapshotSourceFiles(root) {
   const snap = {}
-  for (const rel of ['config/nexus-profiles.json', 'config/engineering-profiles.json', 'config/muse-profiles.json', 'config/model-registry.json', 'config/routing-policy.json', 'data/settings.yaml', 'data/custom-engineering-profile.json']) {
+  for (const rel of ['config/nexus-profiles.json', 'config/engineering-profiles.json', 'config/muse-profiles.json', 'config/model-registry.json', 'config/routing-policy.json', 'data/nexus-settings.yaml', 'data/custom-engineering-profile.json']) {
     const p = path.join(root, rel)
     try {
       snap[rel] = { hash: shaOfFile(p), mode: fs.statSync(p).mode & 511 }
@@ -722,7 +722,7 @@ try {
     const fakeA = 'sk-live-R2TEST-FAKE-AAA111'
     const fakeB = 'xoxb-R2TEST-FAKE-BBB222'
     const settingsBody = '# operator settings (fixture only)' + String.fromCharCode(10) + 'engineering-profile: deepseek-codex' + String.fromCharCode(10) + 'llm-pi-ai:' + String.fromCharCode(10) + '  providers:' + String.fromCharCode(10) + '    zai-direct:' + String.fromCharCode(10) + '      apiKey: ' + fakeA + String.fromCharCode(10) + '      token: ' + fakeB + String.fromCharCode(10)
-    fs.writeFileSync(path.join(root, 'data', 'settings.yaml'), settingsBody)
+    fs.writeFileSync(path.join(root, 'data', 'nexus-settings.yaml'), settingsBody)
     const planned = migration.planMigration(root)
     assert.ok(planned.preview, JSON.stringify(planned.errors))
     const previewText = JSON.stringify(planned.preview)
@@ -733,7 +733,7 @@ try {
     assert.ok(!('settingsYaml' in planned.preview.legacyDigest.settings), 'no settings body field may exist on the digest')
     const made = migration.createLegacyBackup(root)
     assert.deepEqual(made.errors, [])
-    assert.ok(made.backup.files['data/settings.yaml'].content.indexOf(fakeA) !== -1, 'explicit backup must stay complete for restore')
+    assert.ok(made.backup.files['data/nexus-settings.yaml'].content.indexOf(fakeA) !== -1, 'explicit backup must stay complete for restore')
     const isolated = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r2-secret-'))
     fixtureRoots.push(isolated)
     const applied = migration.applyPlanToIsolatedRoot(planned.preview, root, path.join(isolated, 'review'))
@@ -743,7 +743,7 @@ try {
     const target = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r2-secret-rb-'))
     fixtureRoots.push(target)
     assert.deepEqual(migration.restoreLegacySource(made.backup, target).errors, [])
-    assert.equal(fs.readFileSync(path.join(target, 'data', 'settings.yaml'), 'utf8'), settingsBody)
+    assert.equal(fs.readFileSync(path.join(target, 'data', 'nexus-settings.yaml'), 'utf8'), settingsBody)
   }),
 
   check('R2.5: adversarial destinations and file keys are refused', () => {
@@ -799,7 +799,7 @@ try {
     const funky = JSON.stringify(JSON.parse(fs.readFileSync(engPath, 'utf8')), null, 4) + String.fromCharCode(10) + String.fromCharCode(10)
     fs.writeFileSync(engPath, funky)
     const hash = '# operator header comment, keep me' + String.fromCharCode(10) + 'engineering-profile: glm-codex   # trailing comment' + String.fromCharCode(10) + 'llm-pi-ai:' + String.fromCharCode(10) + '  providers: {}' + String.fromCharCode(10)
-    fs.writeFileSync(path.join(root, 'data', 'settings.yaml'), hash)
+    fs.writeFileSync(path.join(root, 'data', 'nexus-settings.yaml'), hash)
     fs.rmSync(path.join(root, 'data', 'custom-engineering-profile.json'))
     const planned = migration.planMigration(root)
     assert.ok(planned.preview, JSON.stringify(planned.errors))
@@ -811,14 +811,14 @@ try {
     const target = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r2-bytes-'))
     fixtureRoots.push(target)
     assert.deepEqual(migration.restoreLegacySource(made.backup, target).errors, [])
-    for (const rel of migration.KNOWN_LEGACY_FILES.concat(['data/settings.yaml'])) {
+    for (const rel of migration.KNOWN_LEGACY_FILES.concat(['data/nexus-settings.yaml'])) {
       const entry = made.backup.files[rel]
       assert.ok(entry && entry.present, rel)
       assert.equal(shaOfFile(path.join(target, rel)), entry.sha256, rel + ' byte-exact')
       assert.equal(fs.readFileSync(path.join(target, rel), 'utf8'), fs.readFileSync(path.join(root, rel), 'utf8'))
     }
     assert.ok(!fs.existsSync(path.join(target, 'data', 'custom-engineering-profile.json')), 'absent files stay absent')
-    assert.ok(fs.readFileSync(path.join(target, 'data', 'settings.yaml'), 'utf8').indexOf('# operator header comment, keep me') !== -1, 'YAML comments survive')
+    assert.ok(fs.readFileSync(path.join(target, 'data', 'nexus-settings.yaml'), 'utf8').indexOf('# operator header comment, keep me') !== -1, 'YAML comments survive')
     const replanned = migration.planMigration(target)
     assert.ok(replanned.preview)
     assert.equal(replanned.preview.planHash, planned.preview.planHash)
@@ -893,12 +893,12 @@ try {
     const target = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r211-filelink-'))
     fixtureRoots.push(target)
     fs.mkdirSync(path.join(target, 'data'), { recursive: true })
-    const linkSrc = path.join(src, 'data', 'settings.yaml')
-    const linkDst = path.join(target, 'data', 'settings.yaml')
+    const linkSrc = path.join(src, 'data', 'nexus-settings.yaml')
+    const linkDst = path.join(target, 'data', 'nexus-settings.yaml')
     fs.symlinkSync(linkSrc, linkDst)
     const attempt = migration.restoreLegacySource(made.backup, target)
     assert.equal(attempt.restored, false)
-    assert.ok(attempt.errors.some((e) => e.indexOf('migration-symlink-escape:data/settings.yaml') !== -1), JSON.stringify(attempt.errors))
+    assert.ok(attempt.errors.some((e) => e.indexOf('migration-symlink-escape:data/nexus-settings.yaml') !== -1), JSON.stringify(attempt.errors))
     assert.ok(fs.lstatSync(linkDst).isSymbolicLink(), 'the link itself must survive, never be replaced')
     assertSourceUnchanged(src, before)
   }),
@@ -912,7 +912,7 @@ try {
     fixtureRoots.push(target)
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r211-outside-'))
     fixtureRoots.push(outside)
-    fs.symlinkSync(path.join(src, 'data', 'settings.yaml'), path.join(target, 'migration-preview.json'))
+    fs.symlinkSync(path.join(src, 'data', 'nexus-settings.yaml'), path.join(target, 'migration-preview.json'))
     const attempt = migration.applyPlanToIsolatedRoot(planned.preview, src, target)
     assert.equal(attempt.applied, false)
     assert.ok(attempt.errors.some((e) => e.indexOf('migration-symlink-escape:migration-preview.json') !== -1), JSON.stringify(attempt.errors))
@@ -931,7 +931,7 @@ try {
   check('R2: no legacy production file was modified', () => {
     const after = PROD_INPUTS.map((rel) => shaOfFile(path.join(repoRoot, rel)))
     assert.deepEqual(after, prodHashesBefore)
-    assert.ok(!fs.existsSync(path.join(repoRoot, 'data', 'settings.yaml')), 'no live settings file may be created')
+    assert.ok(!fs.existsSync(path.join(repoRoot, 'data', 'nexus-settings.yaml')), 'no live settings file may be created')
   })
 
   console.log('SUITE RESULT: PASS ' + passed + ' | FAIL 0 | total ' + passed)

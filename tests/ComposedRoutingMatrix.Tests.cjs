@@ -56,18 +56,20 @@ async function main() {
         if (engine === 'dual') engineering.apply(ctx)
       }
       // TASK-0058: registration order must not change routing semantics.
-      // installModelSelection may run before (outer) or after (inner) the
-      // controller isolation middleware; both positions must converge on the
-      // controller target, with exact verification at the transport boundary.
+      // DSH 0.2.x installModelSelection(agentCtx) only adds the model-switch
+      // notice on pre-step; the route itself is the durable selection fixed
+      // BEFORE pre-step. The controller boundary arms that selection, so the
+      // pre-step registration position (before or after the isolation rows)
+      // must not change the outcome.
       if (modelSelectionFirst) {
-        installModelSelection(ctx, { current: { ...sessionTarget, reasoningEffort: 'max' }, assembled: undefined })
+        installModelSelection(ctx)
         applyIsolation()
       } else {
         applyIsolation()
-        installModelSelection(ctx, { current: { ...sessionTarget, reasoningEffort: 'max' }, assembled: undefined })
+        installModelSelection(ctx)
       }
-      await ctx.hooks.get('system-prompt/assemble')[0].listener({}, {}, async () => ({ variables: {} }))
-      const payload = { agent: { session: { id: sessionId, header: { agentPreset: preset }, events: [] } } }
+      // The session's own selection (live AgentOptions) is the session-level route.
+      const payload = { agent: { session: { id: sessionId, header: { agentPreset: preset }, events: [], requestHeader: () => undefined }, options: { ...sessionTarget, reasoningEffort: 'max' } } }
       const actual = await runAgentStep(ctx, payload,
         async () => ({ provider: 'default', model: 'default-model', reasoningEffort: 'low', maxTokens: 32768 }))
       const expected = target || sessionTarget

@@ -61,7 +61,7 @@ function New-AihMuseFixture{
         '            high: high',
         '            xhigh: xhigh'
     )
-    [IO.File]::WriteAllText((Join-Path $fixtureRoot 'data/settings.yaml'),(($settings -join [Environment]::NewLine)+[Environment]::NewLine),[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $fixtureRoot 'data/nexus-settings.yaml'),(($settings -join [Environment]::NewLine)+[Environment]::NewLine),[Text.UTF8Encoding]::new($false))
     return $fixtureRoot
 }
 

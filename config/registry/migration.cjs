@@ -43,7 +43,7 @@ const KNOWN_LEGACY_FILES = Object.freeze([
 ])
 
 const BACKUP_SCHEMA_VERSION = 1
-const BACKUP_FILE_ALLOWLIST = Object.freeze(KNOWN_LEGACY_FILES.concat(['data/settings.yaml', 'data/custom-engineering-profile.json']))
+const BACKUP_FILE_ALLOWLIST = Object.freeze(KNOWN_LEGACY_FILES.concat(['data/nexus-settings.yaml', 'data/settings.yaml', 'data/custom-engineering-profile.json']))
 const PREVIEW_FILE_NAME = 'migration-preview.json'
 const RESTRICTED_FILE_MODE = 384
 const RESTRICTED_DIR_MODE = 448
@@ -84,7 +84,7 @@ function detectLegacyFormats(installRoot) {
   let settingsProfile = null
   let settingsPresent = false
   try {
-    const text = fs.readFileSync(path.join(installRoot, 'data', 'settings.yaml'), 'utf8')
+    const text = fs.readFileSync(path.join(installRoot, 'data', 'nexus-settings.yaml'), 'utf8')
     settingsPresent = true
     const match = /^engineering-profile:\s*([^\s#\r\n]+)/m.exec(text)
     if (match) settingsProfile = match[1].trim().replace(/^['\"]|['\"]$/g, '')
@@ -229,7 +229,7 @@ function describeLegacyFiles(installRoot) {
 function describeSettingsPointer(installRoot) {
   let text = null
   try {
-    text = fs.readFileSync(path.join(installRoot, 'data', 'settings.yaml'), 'utf8')
+    text = fs.readFileSync(path.join(installRoot, 'data', 'nexus-settings.yaml'), 'utf8')
   } catch {
     return { present: false, engineeringProfile: null }
   }

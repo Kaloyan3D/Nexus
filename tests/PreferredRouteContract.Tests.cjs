@@ -36,7 +36,7 @@ const known = new Set(['aih-engineering', 'aih-deepseek', 'aih-muse'])
 
 function webState(preferredId) {
   const template = fs.readFileSync(path.join(root, 'config', 'settings.yaml'), 'utf8')
-  fs.writeFileSync(path.join(data, 'settings.yaml'), template.replace(/^engineering-profile:.*$/m, 'engineering-profile: ' + preferredId))
+  fs.writeFileSync(path.join(data, 'nexus-settings.yaml'), template.replace(/^engineering-profile:.*$/m, 'engineering-profile: ' + preferredId))
   const contract = cli('EngineeringProfile.ps1', ['-Action', 'get', '-InstallRoot', root])
   const built = engineering.buildEngineeringProfileState({ installRoot: root, dataRoot: data, profileContract: contract })
   const response = JSON.parse(JSON.stringify(built)) // actual Web serialization boundary
@@ -58,7 +58,7 @@ try {
   for (const name of ['engineering-profiles.json', 'model-registry.json', 'routing-policy.json']) {
     fs.copyFileSync(path.join(source, 'config', name), path.join(legacy, 'config', name))
   }
-  fs.copyFileSync(path.join(source, 'config', 'settings.yaml'), path.join(legacy, 'data', 'settings.yaml'))
+  fs.copyFileSync(path.join(source, 'config', 'settings.yaml'), path.join(legacy, 'data', 'nexus-settings.yaml'))
   const legacyState = cli('EngineeringProfile.ps1', ['-Action', 'get', '-InstallRoot', legacy])
   assert.ok(legacyState.roleRequirements, 'legacy editor requirements remain available without a Nexus catalog')
   assert.equal(legacyState.roleRequirements.visualReviewer.requiresVision, true)

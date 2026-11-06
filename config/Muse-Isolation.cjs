@@ -1,5 +1,6 @@
 'use strict'
 
+const sessionReader = require('./Dsh-SessionEvents.cjs')
 const shellEnvironment = require('./Preset-ShellEnvironment.cjs')
 
 /**
@@ -111,9 +112,10 @@ function targetShape(value) {
 }
 
 function sessionPreset(session) {
-  if (Array.isArray(session.events)) {
-    for (let index = session.events.length - 1; index >= 0; index -= 1) {
-      const event = session.events[index]
+  const events = sessionReader.sessionEvents(session)
+  if (Array.isArray(events)) {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
       if (event && event.type === 'agent-preset/selected' && event.data && event.data.agentPreset) {
         return event.data.agentPreset
       }

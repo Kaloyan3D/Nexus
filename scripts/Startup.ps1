@@ -66,6 +66,9 @@ function Get-AihWebProbe {
         if ($null -ne $responseProperty -and $null -ne $responseProperty.Value) {
             try { $httpStatus = [int]$responseProperty.Value.StatusCode } catch { }
         }
+        # DSH 0.2.x answers 401/403 to an unauthenticated request while the
+        # server is up (per-process Web token): that is a ready listener.
+        if ($httpStatus -eq 401 -or $httpStatus -eq 403) { $httpReady = $true }
     }
 
     $stdoutMarker = $false

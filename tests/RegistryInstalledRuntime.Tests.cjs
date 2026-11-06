@@ -28,14 +28,14 @@ function fixture(name) {
   for (const f of ['engineering-profiles.json', 'muse-profiles.json', 'model-registry.json']) {
     fs.copyFileSync(path.join(repo, 'config', f), path.join(root, 'config', f))
   }
-  for (const f of ['data/registry/operator.json', 'data/settings.yaml', 'data/routing/session-bindings.json', 'config/settings.yaml']) {
+  for (const f of ['data/registry/operator.json', 'data/nexus-settings.yaml', 'data/routing/session-bindings.json', 'config/settings.yaml']) {
     fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true })
     fs.writeFileSync(path.join(root, f), 'operator-owned: ' + f)
   }
   return root
 }
 function preserved(root) {
-  for (const f of ['data/registry/operator.json', 'data/settings.yaml', 'data/routing/session-bindings.json', 'config/settings.yaml']) {
+  for (const f of ['data/registry/operator.json', 'data/nexus-settings.yaml', 'data/routing/session-bindings.json', 'config/settings.yaml']) {
     assert.equal(fs.readFileSync(path.join(root, f), 'utf8'), 'operator-owned: ' + f)
   }
 }

@@ -589,7 +589,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $fixtureModels 'client.js'), $noticeBlock, [Text.UTF8Encoding]::new($false))
     $fixtureData = Join-Path $fixture 'data'
     New-Item -ItemType Directory -Force -Path (Join-Path $fixtureData 'profiles/node_modules') | Out-Null
-    [IO.File]::WriteAllText((Join-Path $fixtureData 'settings.yaml'), "agent-default-model:`r`n  provider: flash-max-direct`r`n", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $fixtureData 'nexus-settings.yaml'), "agent-default-model:`r`n  provider: flash-max-direct`r`n", [Text.UTF8Encoding]::new($false))
 
     & (Join-Path $InstallRoot 'scripts/Patch-NexusUi.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot
     if ($LASTEXITCODE -ne 0) { throw 'Nexus UI patch failed on the fixture' }
@@ -608,7 +608,7 @@ try {
     Assert-Aih ((Test-Path -LiteralPath (Join-Path $fixtureDist 'assets/nexus-logo.png')) -and (Test-Path -LiteralPath (Join-Path $fixtureDist 'assets/nexus-mark.png'))) 'fixture: brand assets copied to dist'
     $fixtureModelsText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureModels 'client.js')
     Assert-Aih ($fixtureModelsText.Contains('About Nexus') -and $fixtureModelsText.Contains($fixtureCopy.welcomeNotice.titleZh.to) -and -not $fixtureModelsText.Contains('Internal Testing Notice')) 'fixture: welcome notice patched'
-    Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureData 'settings.yaml')).Contains('preference: dark')) 'fixture: dark theme default added'
+    Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureData 'nexus-settings.yaml')).Contains('preference: dark')) 'fixture: dark theme default added'
     Assert-Aih (Test-Path -LiteralPath (Join-Path $fixtureData 'profiles/node_modules/@nexus/ui-brand/package.json')) 'fixture: Nexus package installed'
 
     $firstIndex = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureDist 'index.html')

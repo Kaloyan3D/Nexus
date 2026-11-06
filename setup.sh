@@ -163,7 +163,7 @@ AIH_PWSH_VERSION=$(aih_read_version PowerShellVersion "$AIH_SOURCE_ROOT/config/v
 [ -n "$AIH_PWSH_VERSION" ] || { echo "Nexus installer: could not read PowerShellVersion from config/versions.json" >&2; exit 1; }
 
 # Fail closed when the source tree is not a complete Nexus checkout.
-for _required in config/versions.json config/settings.yaml config/nexus-profiles.json config/muse-profiles.json config/preset-muse.yml config/Muse-Isolation.cjs config/Controller-RequestBoundary.cjs config/Routing-Integrity.cjs scripts/Common.ps1 scripts/aih.ps1 scripts/Verify-RoutingIntegrityComposition.mjs runtime/package.json runtime/package-lock.json; do
+for _required in config/versions.json config/settings.yaml config/nexus-profiles.json config/muse-profiles.json config/preset-muse.yml config/Muse-Isolation.cjs config/Controller-RequestBoundary.cjs config/Routing-Integrity.cjs scripts/Common.ps1 scripts/aih.ps1 scripts/Verify-NexusComposition.mjs scripts/Build-NexusHomePatch.cjs scripts/Install-NexusPresets.ps1 scripts/Install-NexusUi.ps1 runtime/package.json runtime/package-lock.json; do
   AIH_FAIL_UNLESS "$AIH_SOURCE_ROOT/$_required" "The source tree is incomplete; clone the Nexus repository and run ./setup.sh from its root."
 done
 
@@ -183,7 +183,7 @@ for _name in setup.sh setup.ps1 README.md SECURITY.md .gitignore .gitattributes 
   if [ -f "$AIH_SOURCE_ROOT/$_name" ]; then cp -f "$AIH_SOURCE_ROOT/$_name" "$AIH_INSTALL_ROOT/$_name"; fi
 done
 
-AIH_CONFIG_FILES='versions.json settings.yaml home.cordis.patch.yml delegation-block.yml preset.yml preset-deepseek.yml preset-muse.yml DeepSeek-Isolation.cjs Engineering-Isolation.cjs Muse-Isolation.cjs Muse-ReasoningGovernor.cjs Muse-ReasoningRuntime.cjs Muse-ReasoningSignals.cjs Muse-ReasoningActivity.cjs Controller-RequestBoundary.cjs Preset-ShellEnvironment.cjs Routing-Integrity.cjs AihController.cjs ContextCompaction.cjs deepseek-agent.cordis.yml routing-policy.json engineering-profiles.json model-registry.json nexus-profiles.json muse-profiles.json Engineering-Profiles.cjs Nexus-Profiles.cjs'
+AIH_CONFIG_FILES='versions.json settings.yaml home.cordis.patch.yml delegation-block.yml preset.yml preset-deepseek.yml preset-muse.yml DeepSeek-Isolation.cjs Engineering-Isolation.cjs Muse-Isolation.cjs Muse-ReasoningGovernor.cjs Muse-ReasoningRuntime.cjs Muse-ReasoningSignals.cjs Muse-ReasoningActivity.cjs Controller-RequestBoundary.cjs Preset-ShellEnvironment.cjs Dsh-SessionEvents.cjs OpenCode-SessionHeader.cjs Routing-Integrity.cjs AihController.cjs ContextCompaction.cjs deepseek-agent.cordis.yml routing-policy.json engineering-profiles.json model-registry.json nexus-profiles.json muse-profiles.json Engineering-Profiles.cjs Nexus-Profiles.cjs'
 for _name in $AIH_CONFIG_FILES; do
   if [ -f "$AIH_SOURCE_ROOT/config/$_name" ]; then cp -f "$AIH_SOURCE_ROOT/config/$_name" "$AIH_INSTALL_ROOT/config/$_name"; fi
 done
@@ -293,7 +293,7 @@ else
   # caller's PATH is preserved behind the pinned entry and nothing
   # persistent (rc files) is touched.
   aih_use_pinned_node "$AIH_NODE_DIR" "$AIH_NODE_VERSION"
-  "$AIH_NODE_DIR/bin/node" "$AIH_NPM_CLI" ci --omit=dev --legacy-peer-deps --prefix "$AIH_INSTALL_ROOT/app"
+  "$AIH_NODE_DIR/bin/node" "$AIH_NPM_CLI" ci --omit=dev --prefix "$AIH_INSTALL_ROOT/app"
 fi
 
 # Shared install composition (settings, UI patches, agent presets, data dirs,

@@ -30,7 +30,7 @@ async function main() {
   fs.cpSync(path.join(repo, 'config'), path.join(root, 'config'), { recursive: true })
   fs.cpSync(path.join(repo, 'scripts'), path.join(root, 'scripts'), { recursive: true })
   fs.mkdirSync(path.join(root, 'data'))
-  fs.writeFileSync(path.join(root, 'data/settings.yaml'), 'engineering-profile: glm-codex\nllm-pi-ai:\n  providers:\n    opencode-go:\n      baseUrl: https://blocked.invalid\n      apiKeyEnv: BLOCKED\n    meta-model-api:\n      baseUrl: https://blocked.invalid\n      apiKeyEnv: BLOCKED\n')
+  fs.writeFileSync(path.join(root, 'data/nexus-settings.yaml'), 'engineering-profile: glm-codex\nllm-pi-ai:\n  providers:\n    opencode-go:\n      baseUrl: https://blocked.invalid\n      apiKeyEnv: BLOCKED\n    meta-model-api:\n      baseUrl: https://blocked.invalid\n      apiKeyEnv: BLOCKED\n')
   const savedEnv = { ...process.env }
   process.env.DSH_HOME = path.join(root, 'data')
   process.env.AIH_INSTALL_ROOT = root
@@ -79,9 +79,9 @@ async function main() {
     if (process.env.NEXUS_BOOTSTRAP_LIVE_PROBE === '1') {
       // Final provider-blocked production call on a fresh real blank DSH session.
       const blank = session(host, 'live-' + crypto.randomUUID())
-      const count = blank.events.length
+      const count = blank.seq
       const authority = await host.api.prepareSession(request(blank))
-      assert.equal(blank.events.length, count)
+      assert.equal(blank.seq, count)
       assert.equal(networkAttempts, 0)
       console.log('LIVE_PROBE: ' + JSON.stringify({ ...authority, binding: bindingsFile, routingState: stateOf(blank.id), promptCalls: 0, providerNetworkAttempts: networkAttempts }))
       return
@@ -94,7 +94,7 @@ async function main() {
     })
     const s = session(host, 'bootstrap-muse')
     assert.equal(fs.existsSync(bindingsFile), false)
-    const eventsBefore = s.events.length
+    const eventsBefore = s.seq
     const first = await host.api.prepareSession(request(s))
     assert.deepEqual(Object.keys(first).sort(), ['engine', 'model', 'profile', 'provider', 'sessionId', 'taskId', 'taskInstanceId'].sort())
     assert.equal(first.provider, 'opencode-go')
@@ -104,7 +104,7 @@ async function main() {
     assert.match(first.taskInstanceId, /^task_[0-9a-f]{32}$/)
     assert.equal(read(ledgerFile).tasks.length, 1)
     assert.equal(read(stateOf(s.id)).taskInstanceId, first.taskInstanceId)
-    assert.equal(s.events.length, eventsBefore)
+    assert.equal(s.seq, eventsBefore)
     assert.equal(networkAttempts, 0)
     pass('new session produces task/binding/routing authority without prompts, providers or counters')
     const warmTurn = await warmListeners['agent/pre-step']({ agent: { session: s }, step: 1, turn: 'warm-first', messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Implement the change' }] }] }, () => 'next')

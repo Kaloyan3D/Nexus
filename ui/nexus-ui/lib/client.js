@@ -213,15 +213,15 @@ window.__ModuleLoader__.load({
 		* intrinsic size does not constrain it: 34px in the conversation hero,
 		* 30px in the expanded sidebar brand row, 26px in the collapsed rail.
 		* The NEXUS wordmark renders separately through the sidebar.brand.name
-		* slot. The asset is copied into the web frontend dist by
-		* scripts/Patch-NexusUi.ps1 (step 2d) and served from /assets/.
+		* slot. The asset is served by the @nexus/ui-brand host half (it used to be copied into the web frontend dist by
+		* the retired scripts/Patch-NexusUi.ps1) on /nexus/assets/.
 		* @param props - host-supplied mark presentation (size + positioning class).
 		* @returns the Nexus icon mark.
 		*/
 		function NexusMark({ size, className }) {
 			return (0, react_jsx_runtime.jsx)("img", {
 				className: className ? "nexus-brand-mark " + className : "nexus-brand-mark",
-				src: "/assets/nexus-mark.png",
+				src: "/nexus/assets/nexus-mark.png",
 				alt: "",
 				"aria-hidden": "true"
 			});

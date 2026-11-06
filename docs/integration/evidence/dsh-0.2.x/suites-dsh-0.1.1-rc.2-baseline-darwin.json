@@ -1,0 +1,872 @@
+[
+ {
+  "file": "AihController.Tests.cjs",
+  "status": 0,
+  "ms": 10273
+ },
+ {
+  "file": "AihControllerHost.Tests.cjs",
+  "status": 0,
+  "ms": 121
+ },
+ {
+  "file": "AihControllerIdentity.Tests.cjs",
+  "status": 1,
+  "ms": 23419
+ },
+ {
+  "file": "ComposedRoutingAuthority.Tests.cjs",
+  "status": 0,
+  "ms": 142
+ },
+ {
+  "file": "ComposedRoutingMatrix.Tests.cjs",
+  "status": 0,
+  "ms": 145
+ },
+ {
+  "file": "ContextActivationPressureV2.Tests.cjs",
+  "status": 0,
+  "ms": 238
+ },
+ {
+  "file": "ContextActiveApplyV2.Tests.cjs",
+  "status": 1,
+  "ms": 175
+ },
+ {
+  "file": "ContextActiveApplyV2LiveHost.Tests.cjs",
+  "status": 0,
+  "ms": 168
+ },
+ {
+  "file": "ContextActiveApplyV2XProc.Tests.cjs",
+  "status": 1,
+  "ms": 61904
+ },
+ {
+  "file": "ContextApplyLockAuthority.Tests.cjs",
+  "status": 0,
+  "ms": 19761
+ },
+ {
+  "file": "ContextAuthorityCertificationV2.Tests.cjs",
+  "status": 0,
+  "ms": 423
+ },
+ {
+  "file": "ContextBudgetAllocatorV2.Tests.cjs",
+  "status": 0,
+  "ms": 203
+ },
+ {
+  "file": "ContextBudgetAllocatorV2H.Tests.cjs",
+  "status": 0,
+  "ms": 166
+ },
+ {
+  "file": "ContextBudgetAllocatorV2XProc.Tests.cjs",
+  "status": 0,
+  "ms": 556
+ },
+ {
+  "file": "ContextCheckpointV2.Tests.cjs",
+  "status": 1,
+  "ms": 126
+ },
+ {
+  "file": "ContextCheckpointabilityV2.Tests.cjs",
+  "status": 1,
+  "ms": 157
+ },
+ {
+  "file": "ContextCheckpointabilityV2LiveHost.Tests.cjs",
+  "status": 0,
+  "ms": 203
+ },
+ {
+  "file": "ContextCompactionAcceptance.Tests.cjs",
+  "status": 0,
+  "ms": 172
+ },
+ {
+  "file": "ContextCompactionBridge.Tests.cjs",
+  "status": 0,
+  "ms": 1684
+ },
+ {
+  "file": "ContextCompactionCrash.Tests.cjs",
+  "status": 0,
+  "ms": 168
+ },
+ {
+  "file": "ContextCompactionF10ReaderBounds.Tests.cjs",
+  "status": 0,
+  "ms": 18684
+ },
+ {
+  "file": "ContextCompactionF1Loop.Tests.cjs",
+  "status": 1,
+  "ms": 234
+ },
+ {
+  "file": "ContextCompactionF2Prod.Tests.cjs",
+  "status": 1,
+  "ms": 209
+ },
+ {
+  "file": "ContextCompactionF5Prod.Tests.cjs",
+  "status": 1,
+  "ms": 509
+ },
+ {
+  "file": "ContextCompactionF5Slow.Tests.cjs",
+  "status": 1,
+  "ms": 290
+ },
+ {
+  "file": "ContextCompactionF6UsageRace.Tests.cjs",
+  "status": 0,
+  "ms": 38769
+ },
+ {
+  "file": "ContextCompactionF7Telemetry.Tests.cjs",
+  "status": 0,
+  "ms": 20818
+ },
+ {
+  "file": "ContextCompactionF8GitFacts.Tests.cjs",
+  "status": 0,
+  "ms": 13333
+ },
+ {
+  "file": "ContextCompactionF9TailBound.Tests.cjs",
+  "status": 0,
+  "ms": 188
+ },
+ {
+  "file": "ContextCompactionPartial.Tests.cjs",
+  "status": 1,
+  "ms": 521
+ },
+ {
+  "file": "ContextCompactionV2DshGenerationProof.Tests.cjs",
+  "status": 0,
+  "ms": 355
+ },
+ {
+  "file": "ContextCompactionV2FoundationHardening.Tests.cjs",
+  "status": 1,
+  "ms": 187
+ },
+ {
+  "file": "ContextCompactionV2Operation.Tests.cjs",
+  "status": 0,
+  "ms": 296
+ },
+ {
+  "file": "ContextCompactionXProc.Tests.cjs",
+  "status": 1,
+  "ms": 11108
+ },
+ {
+  "file": "ContextCompilerActiveDeepseekV4.Tests.cjs",
+  "status": 1,
+  "ms": 136
+ },
+ {
+  "file": "ContextCompilerActiveHostV2.Tests.cjs",
+  "status": 1,
+  "ms": 147
+ },
+ {
+  "file": "ContextCompilerActiveMuseRoutesV2.Tests.cjs",
+  "status": 1,
+  "ms": 133
+ },
+ {
+  "file": "ContextCompilerActiveMuseV2.Tests.cjs",
+  "status": 0,
+  "ms": 287
+ },
+ {
+  "file": "ContextCompilerActiveOpencodeHostV2.Tests.cjs",
+  "status": 1,
+  "ms": 144
+ },
+ {
+  "file": "ContextCompilerActiveOpencodeV2.Tests.cjs",
+  "status": 0,
+  "ms": 347
+ },
+ {
+  "file": "ContextCompilerActiveV2.Tests.cjs",
+  "status": 0,
+  "ms": 221
+ },
+ {
+  "file": "ContextCompilerActiveV2XProc.Tests.cjs",
+  "status": 0,
+  "ms": 684
+ },
+ {
+  "file": "ContextCompilerShadowHostV2.Tests.cjs",
+  "status": 1,
+  "ms": 147
+ },
+ {
+  "file": "ContextCompilerShadowV2.Tests.cjs",
+  "status": 0,
+  "ms": 843
+ },
+ {
+  "file": "ContextCompilerShadowV2XProc.Tests.cjs",
+  "status": 0,
+  "ms": 610
+ },
+ {
+  "file": "ContextCompilerV2.Tests.cjs",
+  "status": 0,
+  "ms": 234
+ },
+ {
+  "file": "ContextCompilerV2H.Tests.cjs",
+  "status": 0,
+  "ms": 146
+ },
+ {
+  "file": "ContextCompilerV2XProc.Tests.cjs",
+  "status": 0,
+  "ms": 439
+ },
+ {
+  "file": "ContextCompleteTaskV2.Tests.cjs",
+  "status": 1,
+  "ms": 129
+ },
+ {
+  "file": "ContextCompleteTaskV2LiveHost.Tests.cjs",
+  "status": 0,
+  "ms": 146
+ },
+ {
+  "file": "ContextCompleteTaskV2XProc.Tests.cjs",
+  "status": 1,
+  "ms": 1492
+ },
+ {
+  "file": "ContextCompressionLadderV2.Tests.cjs",
+  "status": 0,
+  "ms": 491
+ },
+ {
+  "file": "ContextCompressionLadderV2H.Tests.cjs",
+  "status": 0,
+  "ms": 363
+ },
+ {
+  "file": "ContextCompressionLadderV2XProc.Tests.cjs",
+  "status": 0,
+  "ms": 477
+ },
+ {
+  "file": "ContextEvidenceRehydrationV2.Tests.cjs",
+  "status": 0,
+  "ms": 396
+ },
+ {
+  "file": "ContextEvidenceRehydrationV2H.Tests.cjs",
+  "status": 0,
+  "ms": 205
+ },
+ {
+  "file": "ContextEvidenceRehydrationV2LiveHost.Tests.cjs",
+  "status": 0,
+  "ms": 170
+ },
+ {
+  "file": "ContextEvidenceRehydrationV2XProc.Tests.cjs",
+  "status": 0,
+  "ms": 414
+ },
+ {
+  "file": "ContextGenerationRuntimeV2.Tests.cjs",
+  "status": 1,
+  "ms": 166
+ },
+ {
+  "file": "ContextGenerationRuntimeV2LiveHost.Tests.cjs",
+  "status": 0,
+  "ms": 164
+ },
+ {
+  "file": "ContextGenerationRuntimeV2XProc.Tests.cjs",
+  "status": 1,
+  "ms": 3178
+ },
+ {
+  "file": "ContextLeaseFencing.Tests.cjs",
+  "status": 2,
+  "ms": 122
+ },
+ {
+  "file": "ContextMemoryProducerV2.Tests.cjs",
+  "status": 1,
+  "ms": 133
+ },
+ {
+  "file": "ContextMemoryTierV2.Tests.cjs",
+  "status": 0,
+  "ms": 137
+ },
+ {
+  "file": "ContextMemoryTierV2H.Tests.cjs",
+  "status": 0,
+  "ms": 152
+ },
+ {
+  "file": "ContextMemoryTierV2XProc.Tests.cjs",
+  "status": 0,
+  "ms": 489
+ },
+ {
+  "file": "ContextModelCapabilityV2.Tests.cjs",
+  "status": 0,
+  "ms": 428
+ },
+ {
+  "file": "ContextPageStoreV2.Tests.cjs",
+  "status": 0,
+  "ms": 214
+ },
+ {
+  "file": "ContextPageStoreV2Advisory.Tests.cjs",
+  "status": 0,
+  "ms": 138
+ },
+ {
+  "file": "ContextPageStoreV2Crash.Tests.cjs",
+  "status": 0,
+  "ms": 6283
+ },
+ {
+  "file": "ContextPageStoreV2Fallback.Tests.cjs",
+  "status": 0,
+  "ms": 276
+ },
+ {
+  "file": "ContextPageStoreV2FallbackXProc.Tests.cjs",
+  "status": 0,
+  "ms": 567
+ },
+ {
+  "file": "ContextPageStoreV2Secrets.Tests.cjs",
+  "status": 0,
+  "ms": 222
+ },
+ {
+  "file": "ContextPageStoreV2XProc.Tests.cjs",
+  "status": 0,
+  "ms": 546
+ },
+ {
+  "file": "ContextPageV2.Tests.cjs",
+  "status": 0,
+  "ms": 483
+ },
+ {
+  "file": "ContextPressureRetentionV2LiveHost.Tests.cjs",
+  "status": 0,
+  "ms": 153
+ },
+ {
+  "file": "ContextPressureV2.Tests.cjs",
+  "status": 0,
+  "ms": 123
+ },
+ {
+  "file": "ContextPromptLayoutV2.Tests.cjs",
+  "status": 0,
+  "ms": 235
+ },
+ {
+  "file": "ContextPromptLayoutV2XProc.Tests.cjs",
+  "status": 0,
+  "ms": 598
+ },
+ {
+  "file": "ContextPromptRendererV2.Tests.cjs",
+  "status": 0,
+  "ms": 214
+ },
+ {
+  "file": "ContextR1RealSessionContracts.Tests.cjs",
+  "status": 0,
+  "ms": 13148
+ },
+ {
+  "file": "ContextRecoveryV2.Tests.cjs",
+  "status": 1,
+  "ms": 149
+ },
+ {
+  "file": "ContextRecoveryV2LiveHost.Tests.cjs",
+  "status": 0,
+  "ms": 151
+ },
+ {
+  "file": "ContextRecoveryV2XProc.Tests.cjs",
+  "status": 1,
+  "ms": 1630
+ },
+ {
+  "file": "ContextRemoteCounterMuseV2.Tests.cjs",
+  "status": 0,
+  "ms": 126
+ },
+ {
+  "file": "ContextRemoteCounterResilienceV2.Tests.cjs",
+  "status": 0,
+  "ms": 2521
+ },
+ {
+  "file": "ContextRestrictedDshCompaction.Tests.cjs",
+  "status": 1,
+  "ms": 205
+ },
+ {
+  "file": "ContextRestrictedInstallV2.Tests.cjs",
+  "status": 1,
+  "ms": 12938
+ },
+ {
+  "file": "ContextRestrictedProductionV2.Tests.cjs",
+  "status": 0,
+  "ms": 1412
+ },
+ {
+  "file": "ContextRestrictedProjectionV2.Tests.cjs",
+  "status": 0,
+  "ms": 767
+ },
+ {
+  "file": "ContextRetentionV2.Tests.cjs",
+  "status": 0,
+  "ms": 162
+ },
+ {
+  "file": "ContextRetrieverV2.Tests.cjs",
+  "status": 0,
+  "ms": 216
+ },
+ {
+  "file": "ContextRetrieverV2H.Tests.cjs",
+  "status": 0,
+  "ms": 252
+ },
+ {
+  "file": "ContextRetrieverV2XProc.Tests.cjs",
+  "status": 0,
+  "ms": 305
+ },
+ {
+  "file": "ContextSafePointV2.Tests.cjs",
+  "status": 0,
+  "ms": 139
+ },
+ {
+  "file": "ContextSafePointV2LiveHost.Tests.cjs",
+  "status": 0,
+  "ms": 171
+ },
+ {
+  "file": "ContextShadowV2.Tests.cjs",
+  "status": 0,
+  "ms": 208
+ },
+ {
+  "file": "ContextShadowV2LiveHost.Tests.cjs",
+  "status": 0,
+  "ms": 165
+ },
+ {
+  "file": "ContextSnapshotV2.Tests.cjs",
+  "status": 1,
+  "ms": 149
+ },
+ {
+  "file": "ContextTokenizerDeepseekV4.Tests.cjs",
+  "status": 0,
+  "ms": 389
+ },
+ {
+  "file": "ContextTokenizerDeepseekV4XProc.Tests.cjs",
+  "status": 0,
+  "ms": 1148
+ },
+ {
+  "file": "ContextTrustV2.Tests.cjs",
+  "status": 1,
+  "ms": 171
+ },
+ {
+  "file": "ContextViewV2.Tests.cjs",
+  "status": 0,
+  "ms": 190
+ },
+ {
+  "file": "ContextViewV2XProc.Tests.cjs",
+  "status": 0,
+  "ms": 548
+ },
+ {
+  "file": "ContextWireProjectorResponsesV2.Tests.cjs",
+  "status": 0,
+  "ms": 482
+ },
+ {
+  "file": "ControllerPresetCleanInstall.Tests.cjs",
+  "status": 0,
+  "ms": 7400
+ },
+ {
+  "file": "ControllerPresetInstalled.Tests.cjs",
+  "status": 1,
+  "ms": 121
+ },
+ {
+  "file": "ControllerSessionBootstrap.Tests.cjs",
+  "status": 1,
+  "ms": 239
+ },
+ {
+  "file": "DeepSeekIsolation.Tests.cjs",
+  "status": 0,
+  "ms": 141
+ },
+ {
+  "file": "DeepSeekRequestBoundaryHost.Tests.cjs",
+  "status": 0,
+  "ms": 123
+ },
+ {
+  "file": "EM04C2GateNegativeControls.Tests.cjs",
+  "status": 0,
+  "ms": 590
+ },
+ {
+  "file": "EngineeringIsolation.Tests.cjs",
+  "status": 0,
+  "ms": 150
+ },
+ {
+  "file": "EpistemicProductionHardening.Tests.cjs",
+  "status": 0,
+  "ms": 160
+ },
+ {
+  "file": "MixedPresetShellEnv.Tests.cjs",
+  "status": 0,
+  "ms": 166
+ },
+ {
+  "file": "MuseEgressCleanup.Tests.cjs",
+  "status": 0,
+  "ms": 130
+ },
+ {
+  "file": "MuseIsolation.Tests.cjs",
+  "status": 0,
+  "ms": 165
+ },
+ {
+  "file": "MuseOpenCodeGo.Tests.cjs",
+  "status": 0,
+  "ms": 310
+ },
+ {
+  "file": "MuseOpenCodeSession.Tests.cjs",
+  "status": 0,
+  "ms": 179
+ },
+ {
+  "file": "MusePresetCleanInstall.Tests.cjs",
+  "status": 0,
+  "ms": 4288
+ },
+ {
+  "file": "MusePresetDependencyClosure.Tests.cjs",
+  "status": 0,
+  "ms": 837
+ },
+ {
+  "file": "MusePresetRegistryModes.Tests.cjs",
+  "status": 1,
+  "ms": 36188
+ },
+ {
+  "file": "MuseProvider.Tests.cjs",
+  "status": 0,
+  "ms": 726
+ },
+ {
+  "file": "MuseReasoningActivity.Tests.cjs",
+  "status": 1,
+  "ms": 169
+ },
+ {
+  "file": "MuseReasoningGovernor.Tests.cjs",
+  "status": 0,
+  "ms": 120
+ },
+ {
+  "file": "MuseReasoningRuntime.Tests.cjs",
+  "status": 0,
+  "ms": 214
+ },
+ {
+  "file": "MuseReasoningSignals.Tests.cjs",
+  "status": 1,
+  "ms": 241
+ },
+ {
+  "file": "MuseRoutingAuthorityOrdering.Tests.cjs",
+  "status": 0,
+  "ms": 342
+ },
+ {
+  "file": "NativeA20.Tests.cjs",
+  "status": 1,
+  "ms": 150
+ },
+ {
+  "file": "NativeDispatchIntent.Tests.cjs",
+  "status": 0,
+  "ms": 116
+ },
+ {
+  "file": "NativeIntentBridge.Tests.cjs",
+  "status": 0,
+  "ms": 1941
+ },
+ {
+  "file": "NativeOpenCodeGoCredentials.Tests.cjs",
+  "status": 0,
+  "ms": 119
+ },
+ {
+  "file": "NativeOpenCodeGoRoute.Tests.cjs",
+  "status": 0,
+  "ms": 15285
+ },
+ {
+  "file": "NativeRegistryCatalog.Tests.cjs",
+  "status": 0,
+  "ms": 3209
+ },
+ {
+  "file": "NativeRepoInspectBridge.Tests.cjs",
+  "status": 0,
+  "ms": 32140
+ },
+ {
+  "file": "NativeShadowA12.Tests.cjs",
+  "status": 1,
+  "ms": 448
+ },
+ {
+  "file": "NativeShadowA13.Tests.cjs",
+  "status": 1,
+  "ms": 176
+ },
+ {
+  "file": "NativeTargetV2.Tests.cjs",
+  "status": 1,
+  "ms": 236
+ },
+ {
+  "file": "NativeTaskBinding.Tests.cjs",
+  "status": 0,
+  "ms": 213
+ },
+ {
+  "file": "NexusComposerOwnership.Tests.cjs",
+  "status": 1,
+  "ms": 155
+ },
+ {
+  "file": "NexusControllerPanel.Tests.cjs",
+  "status": 1,
+  "ms": 2726
+ },
+ {
+  "file": "NexusEngineContract.Tests.cjs",
+  "status": 0,
+  "ms": 167
+ },
+ {
+  "file": "NexusModeContract.Tests.cjs",
+  "status": 0,
+  "ms": 295
+ },
+ {
+  "file": "NexusProfiles.Tests.cjs",
+  "status": 1,
+  "ms": 229
+ },
+ {
+  "file": "NexusSkills.Runtime.Tests.cjs",
+  "status": 1,
+  "ms": 269
+ },
+ {
+  "file": "PreferredRouteContract.Tests.cjs",
+  "status": 0,
+  "ms": 16462
+ },
+ {
+  "file": "RegistryAdaptiveMode.Tests.cjs",
+  "status": 1,
+  "ms": 205
+ },
+ {
+  "file": "RegistryCore.Tests.cjs",
+  "status": 0,
+  "ms": 312
+ },
+ {
+  "file": "RegistryInstalledRuntime.Tests.cjs",
+  "status": 1,
+  "ms": 2540
+ },
+ {
+  "file": "RegistryLegacyBaseline.Tests.cjs",
+  "status": 0,
+  "ms": 209
+ },
+ {
+  "file": "RegistryR2Compatibility.Tests.cjs",
+  "status": 1,
+  "ms": 571
+ },
+ {
+  "file": "RegistryR3Hardening.Tests.cjs",
+  "status": 0,
+  "ms": 553
+ },
+ {
+  "file": "RegistryR3UI.Tests.cjs",
+  "status": 1,
+  "ms": 601
+ },
+ {
+  "file": "RegistryR4ProbeSecurity.Tests.cjs",
+  "status": 0,
+  "ms": 15393
+ },
+ {
+  "file": "RegistryR4Providers.Tests.cjs",
+  "status": 0,
+  "ms": 15336
+ },
+ {
+  "file": "RegistryR4TransportBinding.Tests.cjs",
+  "status": 0,
+  "ms": 15236
+ },
+ {
+  "file": "RegistryR511CliContract.Tests.cjs",
+  "status": 0,
+  "ms": 260
+ },
+ {
+  "file": "RegistryR51Auth.Tests.cjs",
+  "status": 0,
+  "ms": 241
+ },
+ {
+  "file": "RegistryR5Connections.Tests.cjs",
+  "status": 0,
+  "ms": 336
+ },
+ {
+  "file": "RegistryR62Shadow.Tests.cjs",
+  "status": 0,
+  "ms": 4877
+ },
+ {
+  "file": "RegistryR631Lockdown.Tests.cjs",
+  "status": 0,
+  "ms": 45028
+ },
+ {
+  "file": "RegistryR632Execution.Tests.cjs",
+  "status": 0,
+  "ms": 114013
+ },
+ {
+  "file": "RegistryR63Binding.Tests.cjs",
+  "status": 0,
+  "ms": 62169
+ },
+ {
+  "file": "RegistryR65Matrix.Tests.cjs",
+  "status": 0,
+  "ms": 3648
+ },
+ {
+  "file": "RegistryR70Readiness.Tests.cjs",
+  "status": 0,
+  "ms": 72887
+ },
+ {
+  "file": "RegistryR74RollbackRecovery.Tests.cjs",
+  "status": null,
+  "ms": 240007
+ },
+ {
+  "file": "RegistryR751DependencyCompatibility.Tests.cjs",
+  "status": 1,
+  "ms": 216
+ },
+ {
+  "file": "RegistryR75InstallationAudit.Tests.cjs",
+  "status": 1,
+  "ms": 190
+ },
+ {
+  "file": "RegistryRequestBudget.Tests.cjs",
+  "status": 0,
+  "ms": 205
+ },
+ {
+  "file": "RoutingIntegrity.Tests.cjs",
+  "status": 0,
+  "ms": 197
+ },
+ {
+  "file": "RuntimeRoutingTrace.Tests.cjs",
+  "status": 0,
+  "ms": 272
+ },
+ {
+  "file": "SourceCompleteness.Tests.cjs",
+  "status": 0,
+  "ms": 5396
+ },
+ {
+  "file": "Spike02RegistryIntent.Tests.cjs",
+  "status": 0,
+  "ms": 5405
+ },
+ {
+  "file": "VisualControllerLifecycle.Tests.cjs",
+  "status": 1,
+  "ms": 2238
+ },
+ {
+  "file": "VisualReviewBridge.Tests.cjs",
+  "status": 0,
+  "ms": 209
+ }
+]

@@ -110,7 +110,7 @@ await check('R6.2 real muse boundary decision reaches shadow parity in isolation
   try { fs.symlinkSync(path.join(repoRoot, 'config'), path.join(root, 'config'), 'dir'); }
   catch (e) { await skip('R6.2 muse isolation fixture', 'config symlink unavailable: ' + String((e && e.message) || e)); return; }
   fs.mkdirSync(path.join(root, 'data'), { recursive: true });
-  fs.copyFileSync(path.join(repoRoot, 'config', 'settings.yaml'), path.join(root, 'data', 'settings.yaml'));
+  fs.copyFileSync(path.join(repoRoot, 'config', 'settings.yaml'), path.join(root, 'data', 'nexus-settings.yaml'));
   const ws = tmpDir('r62-ws-muse-');
   const decision = await runRouteDryRun(['-Description', 'Harden contributor tool boundary', '-Workspace', ws, '-InstallRoot', root, '-Preset', 'aih-muse', '-ProfileId', 'muse-spark-1.3-contributor', '-DryRun'], 'muse');
   assert.equal(decision.engine, 'muse'); assert.equal(decision.role, null);

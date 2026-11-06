@@ -36,7 +36,7 @@ function New-AihMuseRoutingFixture{
     $catalogText=[IO.File]::ReadAllText($catalogPath).Replace('"selectable": false','"selectable": true').Replace('"runnable": false','"runnable": true')
     [IO.File]::WriteAllText($catalogPath,$catalogText,[Text.UTF8Encoding]::new($false))
     $settings=(Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'config/settings.yaml')) -replace '(?m)^engineering-profile:[^\r\n]+','engineering-profile: muse-spark-1.3-contributor'
-    $settingsPath=Join-Path (Join-Path $fixtureRoot 'data') 'settings.yaml'
+    $settingsPath=Join-Path (Join-Path $fixtureRoot 'data') 'nexus-settings.yaml'
     [IO.File]::WriteAllText($settingsPath,$settings,[Text.UTF8Encoding]::new($false))
     [pscustomobject]@{ Root=$fixtureRoot; Settings=$settingsPath; Workspace=(Join-Path $fixtureRoot 'ws'); Policy=(Join-Path $fixtureRoot 'config/routing-policy.json'); Catalog=(Join-Path $fixtureRoot 'config/nexus-profiles.json'); Registry=(Join-Path $fixtureRoot 'config/model-registry.json'); MuseProfiles=(Join-Path $fixtureRoot 'config/muse-profiles.json') }
 }

@@ -33,7 +33,7 @@ function makeFixture(repoRoot) {
     copyFile(path.join(repoRoot, 'config', name), path.join(root, 'config', name))
   }
   fs.mkdirSync(path.join(root, 'data'), { recursive: true })
-  fs.writeFileSync(path.join(root, 'data', 'settings.yaml'), 'engineering-profile: glm-codex\n', 'utf8')
+  fs.writeFileSync(path.join(root, 'data', 'nexus-settings.yaml'), 'engineering-profile: glm-codex\n', 'utf8')
   return root
 }
 
@@ -160,7 +160,7 @@ function main() {
     const adapterState = engineering.buildEngineeringProfileState({
       installRoot: fixture,
       dataRoot: fixture,
-      settingsPath: path.join(fixture, 'data', 'settings.yaml'),
+      settingsPath: path.join(fixture, 'data', 'nexus-settings.yaml'),
       nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
     assert.deepEqual(adapterState.profiles.map((p) => p.id), ['deepseek-codex', 'glm-codex'], 'Dual profile state keeps its exact legacy shape (no Muse bleed)')
@@ -210,7 +210,7 @@ function main() {
     const customState = engineering.buildEngineeringProfileState({
       installRoot: fixture,
       dataRoot: fixture,
-      settingsPath: path.join(fixture, 'data', 'settings.yaml'),
+      settingsPath: path.join(fixture, 'data', 'nexus-settings.yaml'),
       customProfilePath: path.join(fixture, 'data', 'custom-engineering-profile.json'),
       nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
@@ -228,11 +228,11 @@ function main() {
     // 4. Fail-closed: missing/invalid catalog degrades to an EMPTY list
     const bareRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-profiles-bare-'))
     fs.mkdirSync(path.join(bareRoot, 'data'), { recursive: true })
-    fs.writeFileSync(path.join(bareRoot, 'data', 'settings.yaml'), 'engineering-profile: glm-codex\n', 'utf8')
+    fs.writeFileSync(path.join(bareRoot, 'data', 'nexus-settings.yaml'), 'engineering-profile: glm-codex\n', 'utf8')
     const bareState = engineering.buildEngineeringProfileState({
       installRoot: bareRoot,
       dataRoot: bareRoot,
-      settingsPath: path.join(bareRoot, 'data', 'settings.yaml'),
+      settingsPath: path.join(bareRoot, 'data', 'nexus-settings.yaml'),
       nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
     assert.deepEqual(bareState.nexusProfiles, [], 'missing catalog: no profiles exposed, state degrades safely')
@@ -247,7 +247,7 @@ function main() {
     const corruptState = engineering.buildEngineeringProfileState({
       installRoot: corruptRoot,
       dataRoot: corruptRoot,
-      settingsPath: path.join(corruptRoot, 'data', 'settings.yaml'),
+      settingsPath: path.join(corruptRoot, 'data', 'nexus-settings.yaml'),
       nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
     assert.deepEqual(corruptState.nexusProfiles, [], 'invalid catalog: fail closed instead of guessing')
@@ -442,11 +442,11 @@ function main() {
     museCatalogEntry.runnable = false
     fs.writeFileSync(path.join(selectableMuseRoot, 'config', 'nexus-profiles.json'), JSON.stringify(selectableCatalog, null, 2), 'utf8')
     fs.mkdirSync(path.join(selectableMuseRoot, 'data'), { recursive: true })
-    fs.writeFileSync(path.join(selectableMuseRoot, 'data', 'settings.yaml'), 'engineering-profile: glm-codex\n', 'utf8')
+    fs.writeFileSync(path.join(selectableMuseRoot, 'data', 'nexus-settings.yaml'), 'engineering-profile: glm-codex\n', 'utf8')
     const selectableMuseState = engineering.buildEngineeringProfileState({
       installRoot: selectableMuseRoot,
       dataRoot: selectableMuseRoot,
-      settingsPath: path.join(selectableMuseRoot, 'data', 'settings.yaml'),
+      settingsPath: path.join(selectableMuseRoot, 'data', 'nexus-settings.yaml'),
       nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
     const selectableMuseAdapter = selectableMuseState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3-contributor')
@@ -468,11 +468,11 @@ function main() {
     const noMuseRegistryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-profiles-nomuse-'))
     for (const name of ['engineering-profiles.json', 'model-registry.json', 'nexus-profiles.json']) copyFile(path.join(repoRoot, 'config', name), path.join(noMuseRegistryRoot, 'config', name))
     fs.mkdirSync(path.join(noMuseRegistryRoot, 'data'), { recursive: true })
-    fs.writeFileSync(path.join(noMuseRegistryRoot, 'data', 'settings.yaml'), 'engineering-profile: glm-codex\n', 'utf8')
+    fs.writeFileSync(path.join(noMuseRegistryRoot, 'data', 'nexus-settings.yaml'), 'engineering-profile: glm-codex\n', 'utf8')
     const noMuseState = engineering.buildEngineeringProfileState({
       installRoot: noMuseRegistryRoot,
       dataRoot: noMuseRegistryRoot,
-      settingsPath: path.join(noMuseRegistryRoot, 'data', 'settings.yaml'),
+      settingsPath: path.join(noMuseRegistryRoot, 'data', 'nexus-settings.yaml'),
       nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
     assert.equal(noMuseState.nexusProfiles.some((p) => p.id === 'muse-spark-1.3-contributor'), false, 'unresolved Muse source is omitted')
@@ -544,7 +544,7 @@ function main() {
     const bareEngineState = engineering.buildEngineeringProfileState({
       installRoot: bareRoot,
       dataRoot: bareRoot,
-      settingsPath: path.join(bareRoot, 'data', 'settings.yaml'),
+      settingsPath: path.join(bareRoot, 'data', 'nexus-settings.yaml'),
       nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
     assert.deepEqual(bareEngineState.engineAgentPresets, {}, 'a missing catalog publishes NO engine mapping')

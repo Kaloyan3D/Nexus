@@ -23,7 +23,7 @@ try{
     Copy-Item $layout.RoutingPolicy (Join-Path $fixture 'config/routing-policy.json')
     Copy-Item (Join-Path $InstallRoot 'config/nexus-profiles.json') (Join-Path $fixture 'config/nexus-profiles.json')
     Copy-Item (Join-Path $InstallRoot 'config/muse-profiles.json') (Join-Path $fixture 'config/muse-profiles.json')
-    Copy-Item $layout.Settings (Join-Path $fixture 'data/settings.yaml')
+    Copy-Item $layout.Settings (Join-Path $fixture 'data/nexus-settings.yaml')
     $flayout=Get-AihLayout $fixture
 
     function Invoke-AihEditor {param([string]$Action,[string]$ProfileId,[string]$PayloadFile)

@@ -550,7 +550,7 @@ async function runBridgeEndToEnd() {
   fs.mkdirSync(path.join(installRoot, 'ui', 'nexus-controller', 'lib'), { recursive: true })
   fs.cpSync(path.join(repoRoot, 'ui', 'nexus-controller', 'lib', 'gate.cjs'), path.join(installRoot, 'ui', 'nexus-controller', 'lib', 'gate.cjs'))
   // GLM + Codex active profile (route through the copied settings).
-  fs.writeFileSync(path.join(dataHome, 'settings.yaml'), 'engineering-profile: glm-codex\n')
+  fs.writeFileSync(path.join(dataHome, 'nexus-settings.yaml'), 'engineering-profile: glm-codex\n')
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-identity-e2e-'))
   fs.mkdirSync(path.join(fixture, 'src'))
   fs.writeFileSync(path.join(fixture, 'src', 'huge.js'), 'x'.repeat(140000))
@@ -757,7 +757,7 @@ async function runBridgeEndToEnd() {
     try {
       fs.writeFileSync(path.join(museWorkspace, 'package.json'), JSON.stringify({ private: true, scripts: { test: 'node -e "process.exit(0)"' } }))
       const museSettings = fs.readFileSync(path.join(installRoot, 'config', 'settings.yaml'), 'utf8')
-      fs.writeFileSync(path.join(dataHome, 'settings.yaml'), museSettings.replace(/^engineering-profile:.*$/m, 'engineering-profile: muse-spark-1.3-contributor'))
+      fs.writeFileSync(path.join(dataHome, 'nexus-settings.yaml'), museSettings.replace(/^engineering-profile:.*$/m, 'engineering-profile: muse-spark-1.3-contributor'))
       const preStepInvalidPlane = boot()
       const invalidSession = {
         id: 'e2e-session-invalid-plane',
@@ -793,7 +793,7 @@ async function runBridgeEndToEnd() {
       const savedBindings = JSON.parse(fs.readFileSync(bindingsPath, 'utf8'))
       savedBindings.bindings[museSession.id].needsRouteCheck = true
       fs.writeFileSync(bindingsPath, JSON.stringify(savedBindings))
-      fs.writeFileSync(path.join(dataHome, 'settings.yaml'), museSettings.replace(/^engineering-profile:.*$/m, 'engineering-profile: missing-muse-profile'))
+      fs.writeFileSync(path.join(dataHome, 'nexus-settings.yaml'), museSettings.replace(/^engineering-profile:.*$/m, 'engineering-profile: missing-muse-profile'))
       const preStepBrokenRoute = boot()
       let routeFailureNextCalls = 0
       const routeFailureOutcome = await preStepBrokenRoute(
@@ -804,7 +804,7 @@ async function runBridgeEndToEnd() {
       assert.equal(routeFailureNextCalls, 0, 'routing failure never invokes downstream inference')
       assert.ok(museSession.messages.at(-1).message.content[0].text.includes('Inference was not started.'), 'controller reports one clear failure')
       assert.equal(JSON.parse(fs.readFileSync(bindingsPath, 'utf8')).bindings[museSession.id].taskInstanceId, museBinding.taskInstanceId, 'task binding remains available for recovery')
-      fs.writeFileSync(path.join(dataHome, 'settings.yaml'), museSettings.replace(/^engineering-profile:.*$/m, 'engineering-profile: muse-spark-1.3-contributor'))
+      fs.writeFileSync(path.join(dataHome, 'nexus-settings.yaml'), museSettings.replace(/^engineering-profile:.*$/m, 'engineering-profile: muse-spark-1.3-contributor'))
       fs.writeFileSync(bindingsPath, JSON.stringify({ ...savedBindings, bindings: { ...savedBindings.bindings, [museSession.id]: museBinding } }))
 
       // Corrupting the authoritative ledger engine must fail closed at the

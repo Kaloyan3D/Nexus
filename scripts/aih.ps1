@@ -104,7 +104,7 @@ if ($null -ne $runningState -and $null -ne $runningState.Pid) {
         $runningState.UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
         Write-AihState -Path $layout.State -State $runningState
     }
-    if ($null -ne $existing -and (Test-AihEndpoint -Uri $webUrl -TimeoutSec 2)) {
+    if ($null -ne $existing -and (Test-AihEndpoint -Uri $webUrl -TimeoutSec 2 -AcceptAuthRequired)) {
         if (Test-AihReusableUniversalRuntimeState -State $runningState -Restart:$Restart) {
             $runningState.Status = 'READY'
             $runningState.Preset = $Preset
@@ -135,7 +135,7 @@ if ($null -ne $runningState -and $null -ne $runningState.Pid) {
         $null = Stop-AihTrackedProcess -Process $existing
     }
 }
-elseif ((Test-AihEndpoint -Uri $webUrl -TimeoutSec 2) -and -not $Restart) {
+elseif ((Test-AihEndpoint -Uri $webUrl -TimeoutSec 2 -AcceptAuthRequired) -and -not $Restart) {
     throw "$webUrl is already in use by an untracked process. Stop it or rerun with -Restart after confirming ownership."
 }
 
@@ -163,7 +163,7 @@ $stdoutLog = Join-Path $layout.Logs 'dsh.out.log'
 $stderrLog = Join-Path $layout.Logs 'dsh.err.log'
 $launchTime = [DateTime]::UtcNow
 if (-not $resumingStartup) {
-    $arguments = @($layout.Dsh, 'web', '--port', '3080')
+    $arguments = @($layout.Dsh, 'web', '--no-open', '--port', '3080')
     # The server has a neutral runtime directory. Every actual command/file/git
     # operation resolves its cwd from the immutable session header; Nexus never
     # uses process.chdir() or launch-directory switching.
@@ -241,7 +241,7 @@ if ($startup.Status -eq 'STARTING') {
 # which exited during the final probe.
 $readyProcess = Get-Process -Id ([int]$state['Pid']) -ErrorAction SilentlyContinue
 $readyIdentity = $null -ne $readyProcess -and (Test-AihTrackedProcessIdentity -Process $readyProcess -State ([pscustomobject]$state) -ExpectedExecutable $layout.Node)
-$readyEndpoint = Test-AihEndpoint -Uri $webUrl -TimeoutSec 2
+$readyEndpoint = Test-AihEndpoint -Uri $webUrl -TimeoutSec 2 -AcceptAuthRequired
 if (-not $readyIdentity -or -not $readyEndpoint) {
     $state['Status'] = 'FAILED'
     $state['UpdatedAtUtc'] = [DateTime]::UtcNow.ToString('o')
@@ -261,5 +261,13 @@ Write-AihState -Path $layout.State -State $state
 Write-Host 'Nexus status: READY (universal runtime)'
 Write-Host "Default mode for new sessions: $Preset ($($mode.DisplayName); source: $presetSource)"
 if ($null -ne $preselected) { Write-Host "Preselected workspace: $($preselected.executionRoot)" }
+# DSH 0.2.x protects the Web UI with a per-process token printed in its stdout
+# banner; open that exact URL (plus the optional workspace preselection).
+$loggedUrl = Get-AihDshWebUrlFromLog -StdoutLog $stdoutLog -NotBeforeUtc $launchTime
+if ($null -ne $loggedUrl) {
+    $separator = if ($loggedUrl.Contains('?')) { '&' } else { '?' }
+    $openUrl = if ($null -eq $preselected -or [string]::IsNullOrWhiteSpace([string]$preselected.executionRoot)) { $loggedUrl }
+               else { $loggedUrl + $separator + 'nexus-open=' + [Uri]::EscapeDataString([IO.Path]::GetFullPath([string]$preselected.executionRoot)) }
+}
 Write-Host $openUrl
 if ($Open) { Open-AihUrlInBrowser -Url $openUrl }

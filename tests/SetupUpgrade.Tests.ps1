@@ -138,26 +138,29 @@ if (-not (Test-Path -LiteralPath $completeInstallPath)) {
 $compositionText = Get-Content -Raw -Encoding UTF8 -LiteralPath $completeInstallPath
 $settingsInitIndex = $compositionText.IndexOf("if (`$ResetManagedSettings -or -not (Test-Path -LiteralPath `$layout.Settings))")
 $managedPatchCopyIndex = $compositionText.LastIndexOf("home.cordis.patch.yml")
-$modeInstallerIndex = $compositionText.IndexOf("Patch-ControlRoomUi.ps1")
-$nexusPatchIndex = $compositionText.IndexOf("Patch-NexusUi.ps1")
+$modeInstallerIndex = $compositionText.IndexOf("'Install-NexusUi.ps1')")
+$nexusPatchIndex = $compositionText.IndexOf("'Install-NexusPresets.ps1')")
 
 if ($settingsInitIndex -lt 0) {
-    throw 'FAIL: the shared install composition no longer initializes data\settings.yaml.'
+    throw 'FAIL: the shared install composition no longer initializes data\nexus-settings.yaml.'
 }
 if ($managedPatchCopyIndex -lt 0) {
     throw 'FAIL: the shared install composition no longer syncs the managed home.cordis.patch.yml into data.'
 }
 if ($modeInstallerIndex -lt 0) {
-    throw 'FAIL: the shared install composition no longer invokes the Nexus mode-selector compatibility installer.'
+    throw 'FAIL: the shared install composition no longer invokes the Nexus UI plugin installer (Install-NexusUi.ps1).'
 }
 if ($nexusPatchIndex -lt 0) {
-    throw 'FAIL: the shared install composition no longer invokes Patch-NexusUi.ps1.'
+    throw 'FAIL: the shared install composition no longer invokes Install-NexusPresets.ps1.'
 }
 if ($settingsInitIndex -gt $modeInstallerIndex -or $settingsInitIndex -gt $nexusPatchIndex) {
-    throw 'FAIL: data\settings.yaml must exist before UI patchers run on a fresh install.'
+    throw 'FAIL: data\nexus-settings.yaml must exist before the UI/preset installers run on a fresh install.'
 }
 if ($managedPatchCopyIndex -gt $modeInstallerIndex -or $managedPatchCopyIndex -gt $nexusPatchIndex) {
-    throw 'FAIL: managed cordis.patch.yml must be synced before Nexus UI installers so upgrades from stale installs can migrate safely.'
+    throw 'FAIL: the static managed cordis.patch.yml must be seeded before the Nexus UI/preset installers.'
+}
+if ($compositionText.Contains('Patch-NexusUi.ps1') -or $compositionText.Contains('Patch-NexusComposer.ps1') -or $compositionText.Contains('Patch-ControlRoomUi.ps1')) {
+    throw 'FAIL: the shared install composition still invokes a retired compiled-bundle patcher.'
 }
 
 foreach ($managedModule in @('Engineering-Isolation.cjs', 'AihController.cjs')) {
@@ -167,16 +170,18 @@ foreach ($managedModule in @('Engineering-Isolation.cjs', 'AihController.cjs')) 
     }
 }
 
-$modeInstallerPath = Join-Path $InstallRoot 'scripts/Patch-ControlRoomUi.ps1'
+$modeInstallerPath = Join-Path $InstallRoot 'scripts/Install-NexusUi.ps1'
 $modeInstaller = Get-Content -Raw -Encoding UTF8 -LiteralPath $modeInstallerPath
-if ($modeInstaller.Contains('AIH_CONTROL_ROOM_MODE_MODEL_SYNC') -or $modeInstaller.Contains('$clientPath') -or $modeInstaller.Contains('.Replace($old')) {
-    throw 'FAIL: Patch-ControlRoomUi.ps1 regressed to compiled upstream bundle monkey-patching.'
+# Executable lines only: the header comments legitimately name the retired patchers.
+$modeInstallerCode = (@($modeInstaller -split "\r?\n") | Where-Object { $_.TrimStart() -notlike '#*' }) -join [string][char]10
+if ($modeInstallerCode.Contains('.Replace(') -or $modeInstallerCode.Contains('dsh-client-ui-') -or $modeInstallerCode.Contains('node_modules/@deepseek-ai') -or $modeInstallerCode.Contains('dsh-web-frontend')) {
+    throw 'FAIL: Install-NexusUi.ps1 regressed to compiled upstream bundle monkey-patching.'
 }
 if ($modeInstaller -match '(?im)^\s*\$host\s*=') {
-    throw 'FAIL: Patch-ControlRoomUi.ps1 shadows the read-only PowerShell $Host automatic variable.'
+    throw 'FAIL: Install-NexusUi.ps1 shadows the read-only PowerShell $Host automatic variable.'
 }
-if (-not $modeInstaller.Contains("'@nexus/mode-selector'")) {
-    throw 'FAIL: Patch-ControlRoomUi.ps1 no longer installs the Nexus-owned mode-selector plugin.'
+foreach ($uiPlugin in @('ui/nexus-mode-selector', 'ui/nexus-controller', 'ui/nexus-ui')) {
+    if (-not $modeInstaller.Contains($uiPlugin)) { throw "FAIL: Install-NexusUi.ps1 no longer installs the Nexus-owned plugin from $uiPlugin." }
 }
 
 $managedPatchPath = Join-Path $InstallRoot 'config/home.cordis.patch.yml'
@@ -185,10 +190,11 @@ if (-not $managedPatch.Contains("name: '@nexus/mode-selector'")) {
     throw 'FAIL: managed composition no longer carries @nexus/mode-selector.'
 }
 
-$nexusPatch = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'scripts/Patch-NexusUi.ps1')
-if (-not $nexusPatch.Contains('pendingWorkspaceId !== void 0')) {
-    throw 'FAIL: Nexus UI patch no longer blocks composer submission during an optimistic workspace transition.'
-}
+# DSH 0.2.x: the optimistic workspace-transition composer guard that Nexus used
+# to patch into the compiled conversation bundle is NOT asserted here. Upstream
+# 0.2.2 gained a pending-workspace chip state but does not disable the composer;
+# the supported replacement (a composer block via the conversation block seat)
+# is a documented follow-up in docs/integration/dsh-0.2.x-migration-report.md.
 
 $modeClientPath = Join-Path $InstallRoot 'ui/nexus-mode-selector/lib/client.js'
 if (-not (Test-Path -LiteralPath $modeClientPath)) {
@@ -560,7 +566,7 @@ else {
 # operator-owned runtime document. Complete-Install must migrate managed
 # provider routes additively and idempotently without ever touching user
 # values. These tests exercise the real migration function against temp
-# fixture documents; the live data/settings.yaml is never touched.
+# fixture documents; the live data/nexus-settings.yaml is never touched.
 . (Join-Path $InstallRoot 'scripts/SettingsMigration.ps1')
 $migrationTemplatePath = Join-Path $InstallRoot 'config/settings.yaml'
 $migrationRegistryPath = Join-Path $InstallRoot 'config/model-registry.json'
@@ -749,7 +755,7 @@ try {
 
     # Scenario 4c (TASK-0040): the drifted shape must match the prior state
     # EXACTLY as it appears on a real upgraded install — assert the embedded
-    # variant against the literal block this task observed in data/settings.yaml.
+    # variant against the literal block this task observed in data/nexus-settings.yaml.
     $expectedDrift = @(
         '    meta-model-api:',
         '      displayName: Meta Model API (Muse Spark, direct)',
@@ -825,30 +831,30 @@ Write-Host 'PASS: repo-local setup/update/launchers are portable and checkout-re
 Write-Host 'PASS: fresh install creates settings before Nexus UI patchers run'
 Write-Host 'PASS: managed cordis.patch.yml is synced before Nexus UI migration'
 Write-Host 'PASS: required engineering config modules are installed on fresh setup'
-Write-Host 'PASS: Control Room mode lifecycle is Nexus-owned and no longer patches compiled upstream UI'
-Write-Host 'PASS: mode-selector installer avoids PowerShell automatic-variable collisions'
-Write-Host 'PASS: workspace transition blocks old-session submission until the selected workspace is current'
+Write-Host 'PASS: Nexus UI installs as supported plugins and never patches compiled upstream UI'
+Write-Host 'PASS: UI installer avoids PowerShell automatic-variable collisions'
+Write-Host 'NOTE: workspace-transition composer guard is a documented follow-up on DSH 0.2.x (not asserted)'
 
 # ── Phase M3 (TASK-0040): the aih-muse agent plane is built by the shared
 #    installer with exactly two structural transforms (Muse-native persona;
 #    EMPTY delegation section) and the isolation/controller rows. The built
 #    preset must not contain a single Dual delegation/workflow row — the
 #    release blocker is structural ABSENCE, not a disabled flag. ──
-$musePresetBlockIndex = $compositionText.IndexOf('Install-MusePreset.ps1')
-if ($musePresetBlockIndex -lt 0) { throw 'FAIL: Complete-Install.ps1 no longer installs the staged aih-muse agent plane.' }
-$museInstallerText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'scripts/Install-MusePreset.ps1')
+$musePresetBlockIndex = $compositionText.IndexOf("'Install-NexusPresets.ps1')")
+if ($musePresetBlockIndex -lt 0) { throw 'FAIL: Complete-Install.ps1 no longer installs the staged Nexus agent planes (including aih-muse).' }
+$museInstallerText = (Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'scripts/Install-NexusPresets.ps1')) + [string][char]10 + (Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'scripts/Build-NexusHomePatch.cjs'))
 foreach ($museContract in @(
     'preset-muse.yml',
     'Muse-Isolation.cjs',
     'AIH_PERSONA_MUSE',
-    "[regex]::Replace(`$museText, `$museDelegationPattern, '')",
-    'Validate-MusePreset.cjs',
-    'text: !!js >-',
+    "delegation: 'none'",
+    'Verify-NexusComposition.mjs',
     'aih-muse-isolation',
+    'aih-muse-reasoning-signals',
     'MusePresetDependencyClosure.cjs',
-    'copy $InstallRoot $stage'
+    "copy `$InstallRoot `$stage"
 )) {
-    if (-not $museInstallerText.Contains($museContract)) { throw "FAIL: the staged aih-muse installer is missing contract: $museContract" }
+    if (-not $museInstallerText.Contains($museContract)) { throw "FAIL: the Nexus plane installer is missing the aih-muse contract: $museContract" }
 }
 $museClosureManifest = Join-Path $InstallRoot 'config/.muse-preset-closure.json'
 if (Test-Path -LiteralPath $museClosureManifest) {
@@ -865,18 +871,15 @@ foreach ($requiredMuseFile in @('Engineering-Profiles.cjs', 'ContextCompilerActi
 if (-not $compositionText.Contains('Remove-MuseContributorEgressPatch.cjs')) {
     throw 'FAIL: Complete-Install.ps1 does not remove the retired Muse provider-egress hook on upgrade.'
 }
-# TASK-0009: the OpenCode Go x-opencode-session substrate patch is part of
-# the shared install composition (fresh install AND update/reinstall, both
-# platforms): apply after the pinned dependencies exist, then verify status
-# is `applied`, failing closed on any deviation.
-$sessionPatchApplyIndex = $compositionText.IndexOf("Apply-OpenCodeSessionPatch.cjs') `$InstallRoot apply")
-if ($sessionPatchApplyIndex -lt 0) { throw 'FAIL: Complete-Install.ps1 must apply the OpenCode Go x-opencode-session substrate patch.' }
-$sessionPatchStatusIndex = $compositionText.IndexOf("Apply-OpenCodeSessionPatch.cjs') `$InstallRoot status")
-if ($sessionPatchStatusIndex -lt $sessionPatchApplyIndex) { throw 'FAIL: Complete-Install.ps1 must verify the substrate patch status after applying it.' }
-if (-not $compositionText.Contains("is not applied after installation. Refusing a broken transport.")) { throw 'FAIL: Complete-Install.ps1 must fail closed when the patch status is not applied.' }
-$egressRemovalIndex = $compositionText.IndexOf('Remove-MuseContributorEgressPatch.cjs')
-if ($sessionPatchApplyIndex -lt $egressRemovalIndex -or $sessionPatchApplyIndex -gt $musePresetBlockIndex) { throw 'FAIL: the substrate patch must run after egress cleanup and before the Muse preset install.' }
-Write-Host 'PASS: Complete-Install applies and verifies the x-opencode-session substrate patch (fail closed)'
+# TASK-0009 (DSH 0.2.x): the OpenCode Go x-opencode-session header is a supported
+# plugin on the llm-pi-ai/request-headers waterfall, not a substrate patch. The
+# shared install composition must publish the plugin next to the home patch and
+# must NOT edit provider adapter bundles.
+if ($compositionText.Contains('Apply-OpenCodeSessionPatch.cjs')) { throw 'FAIL: Complete-Install.ps1 must not apply an in-place provider-adapter patch on DSH 0.2.x.' }
+if (-not $compositionText.Contains("'OpenCode-SessionHeader.cjs'")) { throw 'FAIL: Complete-Install.ps1 must publish the OpenCode session header plugin.' }
+$homePatchText = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent (Split-Path -Parent $completeInstallPath)) 'config/home.cordis.patch.yml')
+if (-not $homePatchText.Contains('nexus-opencode-session-header')) { throw 'FAIL: the home patch must mount the OpenCode session header plugin.' }
+Write-Host 'PASS: Complete-Install publishes the supported x-opencode-session header plugin (no substrate patch)'
 # TASK-0009: Windows Setup.ps1 must publish top-level .cjs patch appliers
 # into the installed scripts tree (Linux setup.sh copies scripts/
 # recursively); otherwise Complete-Install cannot patch on Windows.
@@ -903,32 +906,37 @@ Write-Host 'PASS: the Muse V0 request boundary is installed with the 32768 bound
 
 # When the harness runs against an INSTALLED root, verify the built artifact
 # itself: the delegation surface must be structurally absent.
-$museBuiltPreset = Join-Path $InstallRoot 'data/.agent-presets/aih-muse/agent.cordis.yml'
-if (Test-Path -LiteralPath $museBuiltPreset) {
-    $museBuiltText = Get-Content -Raw -Encoding UTF8 -LiteralPath $museBuiltPreset
-    foreach ($forbiddenRow in @('tool-subagent-control', 'list-agents', 'tool-subagent-fork', 'workflow-worker-thread', 'tool-workflow', 'tool-ralph', 'delegation and workflows')) {
-        if ($museBuiltText.Contains($forbiddenRow)) { throw "FAIL: the built aih-muse preset contains the Dual row '$forbiddenRow' (no Muse subagent may exist in V0)." }
+# When the harness runs against an INSTALLED root, verify the built artifact
+# itself (DSH 0.2.x: the planes are preset rows in data/cordis.patch.yml): the
+# Muse delegation surface must be structurally absent.
+$builtHomePatch = Join-Path $InstallRoot 'data/cordis.patch.yml'
+function Get-BuiltPlaneBlock([string]$Text, [string]$PlaneId) {
+    $match = [regex]::Match($Text, '(?ms)^[ \t]*- id: preset-' + [regex]::Escape($PlaneId) + '[ \t]*$(.*?)(?=^[ \t]*- id: preset-aih-|^# ---- END NEXUS GENERATED|\z)')
+    if ($match.Success) { return $match.Groups[1].Value }
+    return $null
+}
+if (Test-Path -LiteralPath $builtHomePatch) {
+    $builtHomeText = Get-Content -Raw -Encoding UTF8 -LiteralPath $builtHomePatch
+    $museBuiltText = Get-BuiltPlaneBlock $builtHomeText 'aih-muse'
+    if ($null -eq $museBuiltText) { throw 'FAIL: the built home patch does not declare the aih-muse plane.' }
+    foreach ($forbiddenRow in @('tool-subagent-control', 'list-agents', 'tool-subagent-fork', 'workflow-ptc', 'workflow-worker-thread', 'tool-workflow', 'tool-ralph', 'id: delegation')) {
+        if ($museBuiltText.Contains($forbiddenRow)) { throw "FAIL: the built aih-muse plane contains the Dual row '$forbiddenRow' (no Muse subagent may exist in V0)." }
     }
     foreach ($requiredRow in @('AIH_PERSONA_MUSE', 'aih-muse-isolation', 'aih-controller', 'Muse-Isolation.cjs')) {
-        if (-not $museBuiltText.Contains($requiredRow)) { throw "FAIL: the built aih-muse preset is missing: $requiredRow" }
+        if (-not $museBuiltText.Contains($requiredRow)) { throw "FAIL: the built aih-muse plane is missing: $requiredRow" }
     }
-    $museBuiltMeta = Join-Path $InstallRoot 'data/.agent-presets/aih-muse/preset.yml'
-    if (-not (Test-Path -LiteralPath $museBuiltMeta)) { throw 'FAIL: the built aih-muse preset carries no preset.yml metadata.' }
-    Write-Host 'PASS: the built aih-muse preset has NO Dual delegation surface and carries the muse plane rows'
+    if (-not $museBuiltText.Contains("name: 'Muse Agent Plane'") -or -not $museBuiltText.Contains('order: 2')) { throw 'FAIL: the built aih-muse plane carries no preset metadata (name/order).' }
+    Write-Host 'PASS: the built aih-muse plane has NO Dual delegation surface and carries the muse plane rows'
+    # The Dual planes keep their FULL delegation surface (byte-compat regression guard).
+    foreach ($dualPlane in @('aih-engineering', 'aih-deepseek')) {
+        $dualBuiltText = Get-BuiltPlaneBlock $builtHomeText $dualPlane
+        if ($null -eq $dualBuiltText) { throw "FAIL: the built home patch does not declare $dualPlane." }
+        if (-not $dualBuiltText.Contains('aih-controller')) { throw "FAIL: the built Dual plane lost its controller row: $dualPlane" }
+        if (-not $dualBuiltText.Contains('tool-subagent-control')) { throw "FAIL: $dualPlane lost its Dual delegation surface (M3 must be additive)." }
+    }
+    Write-Host 'PASS: the built Dual planes keep their delegation surfaces and controller rows'
 } else {
-    Write-Host 'PASS: aih-muse build artifact not present in this checkout (installer run asserted by contract only)'
-}
-# The Dual presets keep their FULL delegation surface (byte-compat regression guard).
-foreach ($dualPresetRel in @('data/.agent-presets/aih-engineering/agent.cordis.yml', 'data/.agent-presets/aih-deepseek/agent.cordis.yml')) {
-    $dualBuiltPreset = Join-Path $InstallRoot $dualPresetRel
-    if (Test-Path -LiteralPath $dualBuiltPreset) {
-        $dualBuiltText = Get-Content -Raw -Encoding UTF8 -LiteralPath $dualBuiltPreset
-        if (-not $dualBuiltText.Contains('aih-controller')) { throw "FAIL: the built Dual preset lost its controller row: $dualPresetRel" }
-        if ($dualPresetRel -like '*aih-engineering*' -and -not $dualBuiltText.Contains('tool-subagent-control')) { throw 'FAIL: aih-engineering lost its Dual delegation surface (M3 must be additive).' }
-    }
-}
-if (Test-Path -LiteralPath (Join-Path $InstallRoot 'data/.agent-presets/aih-engineering/agent.cordis.yml')) {
-    Write-Host 'PASS: the built Dual presets keep their delegation surfaces and controller rows'
+    Write-Host 'PASS: built home patch not present in this checkout (installer run asserted by contract only)'
 }
 
 # ── TASK-0006: installer publishes the Muse profile catalogs. The
@@ -1004,7 +1012,7 @@ try {
     if (-not $userAfter.Contains('opencode-go:')) { throw 'FAIL: managed migration did not add opencode-go to the existing runtime document.' }
     if (-not $userAfter.Contains('https://opencode.ai/zen/go/v1')) { throw 'FAIL: migrated opencode-go route lacks the Go baseURL.' }
     if (-not $userAfter.Contains('engineering-profile: muse-spark-1.3-contributor')) { throw 'FAIL: migration clobbered the user engineering-profile key.' }
-    Write-Host 'PASS: existing data/settings.yaml gains opencode-go additively with user settings preserved (TASK-0006)'
+    Write-Host 'PASS: existing data/nexus-settings.yaml gains opencode-go additively with user settings preserved (TASK-0006)'
 }
 finally {
     if (Test-Path -LiteralPath $pubFixture) { Remove-Item -LiteralPath $pubFixture -Recurse -Force -ErrorAction SilentlyContinue }

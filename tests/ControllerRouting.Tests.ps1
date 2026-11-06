@@ -18,8 +18,8 @@ function New-InstallFixture([object]$SourceLayout,[string]$Name){
  Copy-Item -LiteralPath $SourceLayout.Scripts -Destination (Join-Path $root 'scripts') -Recurse
  Copy-Item -LiteralPath $SourceLayout.Config -Destination (Join-Path $root 'config') -Recurse
  New-Item -ItemType Directory -Path (Join-Path $root 'data/routing') -Force|Out-Null
- if(Test-Path -LiteralPath $SourceLayout.Settings){Copy-Item -LiteralPath $SourceLayout.Settings -Destination (Join-Path $root 'data/settings.yaml')}
- $fixtureSettings=Join-Path $root 'data/settings.yaml'
+ if(Test-Path -LiteralPath $SourceLayout.Settings){Copy-Item -LiteralPath $SourceLayout.Settings -Destination (Join-Path $root 'data/nexus-settings.yaml')}
+ $fixtureSettings=Join-Path $root 'data/nexus-settings.yaml'
  $fixtureSettingsText=if(Test-Path -LiteralPath $fixtureSettings){Get-Content -Raw -LiteralPath $fixtureSettings}else{''}
  if($fixtureSettingsText -match '(?m)^engineering-profile:'){$fixtureSettingsText=[regex]::Replace($fixtureSettingsText,'(?m)^engineering-profile:.*$','engineering-profile: deepseek-codex')}else{$fixtureSettingsText="engineering-profile: deepseek-codex`r`n"+$fixtureSettingsText}
  Set-Content -LiteralPath $fixtureSettings -Value $fixtureSettingsText -Encoding UTF8
@@ -144,11 +144,22 @@ try{
 }finally{if(Test-Path $escalationRoot){Remove-Item -LiteralPath $escalationRoot -Recurse -Force}}
 
 # ── 5. NO FREE DELEGATION: the model cannot invoke unrestricted Codex ──
-$engineeringPreset=Join-Path $layout.Data '.agent-presets/aih-engineering/agent.cordis.yml'
-$deepseekPreset=Join-Path $layout.Data '.agent-presets/aih-deepseek/agent.cordis.yml'
-foreach($preset in @($engineeringPreset,$deepseekPreset)){
- $presetName=Split-Path (Split-Path $preset -Parent) -Leaf
- $presetLines=@(Get-Content -LiteralPath $preset)
+# DSH 0.2.x: the planes are preset rows in the generated home patch
+# (data/cordis.patch.yml), not .agent-presets/<name>/agent.cordis.yml files.
+$homePatchLines=@(Get-Content -LiteralPath (Join-Path $layout.Data 'cordis.patch.yml'))
+function Get-PresetBlock([string]$PresetId){
+ $start=-1;$end=$homePatchLines.Count
+ for($i=0;$i -lt $homePatchLines.Count;$i++){
+  if($homePatchLines[$i] -match "^\s*- id: preset-$([regex]::Escape($PresetId))\s*$"){ $start=$i;continue }
+  if($start -ge 0 -and $homePatchLines[$i] -match '^\s*- id: preset-aih-' ){ $end=$i;break }
+  if($start -ge 0 -and $homePatchLines[$i] -match '^# ---- END NEXUS GENERATED'){ $end=$i;break }
+ }
+ if($start -lt 0){ return $null }
+ return @($homePatchLines[$start..($end-1)])
+}
+foreach($presetName in @('aih-engineering','aih-deepseek')){
+ $presetLines=Get-PresetBlock $presetName
+ Assert-Aih ($null -ne $presetLines) "preset $presetName is declared in the home patch"
  $codexIndex=-1
  for($i=0;$i -lt $presetLines.Count;$i++){ if($presetLines[$i] -match '^\s*- id: tool-subagent-codex\s*$'){ $codexIndex=$i;break } }
  if($presetName -eq 'aih-engineering'){

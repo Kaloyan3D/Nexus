@@ -49,7 +49,7 @@ try {
   for (const name of configNames) {
     fs.copyFileSync(path.join(sourceRoot, 'config', name), path.join(fixtureRoot, 'config', name))
   }
-  fs.writeFileSync(path.join(fixtureRoot, 'data', 'settings.yaml'), 'engineering-profile: deepseek-codex\n')
+  fs.writeFileSync(path.join(fixtureRoot, 'data', 'nexus-settings.yaml'), 'engineering-profile: deepseek-codex\n')
 
   check('fixture format and legacy profile catalog', () => {
     assert.equal(golden.schemaVersion, 1)

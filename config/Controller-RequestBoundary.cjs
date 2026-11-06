@@ -2,47 +2,48 @@
 
 /**
  * Controller-RequestBoundary.cjs — the one composition pattern the preset
- * isolation plugins (Muse-Isolation.cjs, Engineering-Isolation.cjs) use to
- * apply a controller-produced provider/model route to DSH `agent/request`.
+ * isolation plugins (Muse-Isolation.cjs, Engineering-Isolation.cjs,
+ * DeepSeek-Isolation.cjs) use to apply a controller-produced provider/model/
+ * effort route to a DSH agent (DSH 0.2.x model-selection lifecycle).
  *
- * WHY A PATTERN IS NEEDED (waterfall ordering, proven against the installed
- * cordis + dsh-agent + dsh-agent-presets + dsh-host-apiproxy):
- *   - `agent/request` is a cordis waterfall. Listeners run outermost-first in
- *     REGISTRATION order; the seed request (AgentOptions provider/model, i.e.
- *     the host default route) is the innermost `next`.
- *   - DSH model-selection (installModelSelection) is registered on each
- *     agent's own scope during agent setup. It protects
- *     `payload.routingAuthority` and requires the route returned by ITS
- *     `next()` to equal the declared authority target.
- *   - Preset rows are mounted once per preset as a STANDING composition that
- *     every later session of that preset joins. A listener a preset row
- *     registers is therefore inside model-selection only for agents whose
- *     setup ran before the standing mount existed (the first session of the
- *     preset in the process). For every later session it sits OUTSIDE
- *     model-selection, so a route rewritten after `next()` arrives too late:
- *     model-selection has already compared the default seed route with the
- *     controller authority and thrown.
+ * WHY THE 0.1.x PATTERN IS GONE
+ *   DSH 0.1.x let a request listener declare `payload.routingAuthority`
+ *   (a Nexus patch to dsh-agent) and rewrite the route inside `agent/request`.
+ *   DSH 0.2.x fixes the step's route BEFORE `agent/pre-step`
+ *   (`agent.model.current()` = durable `model/selection` projection) and
+ *   throws if `agent/request` proposes a different provider, model or
+ *   reasoning effort ("use agent.model.select() before step preparation").
+ *   There is no request-local route any more and no vendored patch.
  *
- * THE PATTERN:
- *   arm     (preset row, `agent/pre-step`): pre-step runs every step before
- *           the request is built and after any preset mount or recompose, so
- *           an agent-scoped listener registered here is always INSIDE
- *           model-selection. Registered once per agent on the agent's own
- *           scope, exactly where DSH registers model-selection, and disposed
- *           with the agent.
- *   guard   (preset row, `agent/request`): resolves the controller target
- *           once per request and hands it to the agent's rewrite through a
- *           per-request ticket. Fails closed when the rewrite is not composed,
- *           did not run, or the final route/authority is not the target.
- *   rewrite (agent scope, `agent/request`): declares the controller
- *           routingAuthority under model-selection's protection, then applies
- *           the target to the proposed request, so the route model-selection
- *           validates already equals the declared authority.
+ * THE 0.2.x PATTERN (supported APIs only: agent.model.select + agent events)
+ *   arm    (`agent/inbox/claimed`, then `agent/pre-step`): resolves the
+ *          controller target with the plane's `targetFor`, runs the plane's
+ *          `prepare` (adaptive effort), and records the complete selection
+ *          with `agent.model.select()`. `agent/inbox/claimed` is dispatched by
+ *          the inbox claim immediately before the loop reads
+ *          `agent.model.current()`, so a turn's first step is exact. The
+ *          pre-step arm prepares the FOLLOWING step.
+ *   guard  (`agent/request`, preset row): the unchanged fail-closed gate.
+ *          It re-validates task identity and Registry binding, re-resolves
+ *          the controller target, and requires that the route the loop
+ *          already fixed equals the armed selection AND the current target.
+ *          A mismatch (stale arm, controller changed mid-turn, selection
+ *          written by anyone else, effort drift) fails closed; the arm that
+ *          ran for the next step makes a retry converge.
  *
- * The guard is always outside the rewrite: the standing mount exists before
- * any pre-step of an agent composed from it. The DSH guard is not weakened:
- * DSH still validates the declared controller authority against the
- * effective route, and still ranks and rejects every other route claim.
+ * DIFFERENCES FROM 0.1.x (deliberate, documented, not hidden):
+ *   - Durable: a route/effort change appends a `model/selection` session
+ *     event, and a provider/model change adds the upstream
+ *     "[model changed: ...]" notice to the transcript (effort-only changes
+ *     add none). 0.1.x kept the route request-local and out of the session.
+ *   - Granularity: the route is applied at turn start / message claim and for
+ *     the next step; a controller target that changes in the middle of a turn
+ *     is refused for the current step (fail closed), never silently applied.
+ *   - Adaptive effort (Muse) takes effect one step later than at the old
+ *     request-time computation; it is computed once per arm, never per
+ *     request, so request and recorded state cannot disagree.
+ *   - Nothing here lowers authority: no fallback route exists, and the guard
+ *     verifies provider, model and effort on every request.
  */
 
 const registryBinding = require('./registry/session-binding.cjs')
@@ -82,30 +83,46 @@ async function assertCurrentTaskIdentity(installRoot, binding) {
   }
 }
 
-const AUTHORITY_SOURCE = 'controller'
-
 function sameRoute(value, target) {
   return Boolean(value) && value.provider === target.provider && value.model === target.model
 }
 
+function selectionOf(target, effort) {
+  return {
+    provider: target.provider,
+    model: target.model,
+    ...(typeof effort === 'string' && effort !== '' ? { reasoningEffort: effort } : {}),
+  }
+}
+
+function currentSelection(agent) {
+  const model = agent && agent.model
+  if (!model || typeof model.current !== 'function' || typeof model.select !== 'function') {
+    const error = new Error('Controller route cannot be applied: the DSH agent has no model-selection API.')
+    error.code = 'controller-route-selection-unavailable'
+    throw error
+  }
+  return model.current()
+}
+
 /**
- * Install the arm/guard/rewrite triple for one controller plane.
+ * Install the arm/guard pair for one controller plane.
  *
  * @param ctx - the preset row's plugin context.
  * @param boundary - the plane's request semantics:
  *   targetFor(payload)  -> null (not this plane's request: pass through) or
  *                          the controller target ({ provider, model, ... });
- *                          throws to fail closed. Must be side-effect free.
- *   prepare(payload, target) -> optional per-request value, computed once,
- *                          after the rewrite is known to be composed and
- *                          before anything downstream runs.
+ *                          throws to fail closed. Must be side-effect free and
+ *                          read only `payload.agent`.
+ *   prepare(payload, target) -> optional per-arm value (`{ effort }` for an
+ *                          adaptive plane), computed once per arm.
  *   finalize(proposed, target, prepared) -> the request to return; must keep
- *                          every proposed field it does not own.
+ *                          every proposed field it does not own and may not
+ *                          change provider, model or reasoning effort.
  *   fail(reason, target) -> the plane's fail-closed Error.
  */
 function installControllerRequestBoundary(ctx, boundary) {
-  const composed = new WeakSet()
-  const tickets = new WeakMap()
+  const armedByAgent = new WeakMap()
   const markedScopes = new WeakSet()
   function observe(payload, target) {
     const agent = payload && payload.agent
@@ -121,23 +138,36 @@ function installControllerRequestBoundary(ctx, boundary) {
     if (marked) markedScopes.add(scope)
   }
 
+  // Resolve the controller target and record the complete selection with the
+  // supported DSH API. Never throws: a refusal is stored and re-raised by the
+  // guard on the request path so no request is produced.
+  function arm(agent) {
+    if (!agent || !agent.session) return
+    const payload = { agent }
+    let target
+    try {
+      target = boundary.targetFor(payload)
+      observe(payload, target)
+      if (target === null) { armedByAgent.delete(agent); return }
+      const prepared = boundary.prepare ? boundary.prepare(payload, target) : undefined
+      const effort = prepared && Object.hasOwn(prepared, 'effort') ? prepared.effort : target.reasoning
+      const selection = selectionOf(target, effort)
+      currentSelection(agent)
+      agent.model.select(selection)
+      armedByAgent.set(agent, { target, prepared, selection })
+    } catch (error) {
+      armedByAgent.set(agent, { error, target })
+    }
+  }
+
+  ctx.on('agent/inbox/claimed', (payload) => {
+    arm(payload && payload.agent)
+  })
+
   ctx.on('agent/pre-step', (payload, next) => {
     const agent = payload && payload.agent
     observe(payload, boundary.targetFor(payload))
-    if (agent && agent.ctx && !composed.has(agent)) {
-      agent.ctx.on('agent/request', async (request, inner) => {
-        const ticket = tickets.get(request)
-        if (ticket === undefined) return inner()
-        request.routingAuthority = {
-          source: AUTHORITY_SOURCE,
-          target: { provider: ticket.target.provider, model: ticket.target.model },
-        }
-        const proposed = await inner()
-        ticket.applied = true
-        return Object.freeze(boundary.finalize(proposed, ticket.target, ticket.prepared))
-      })
-      composed.add(agent)
-    }
+    arm(agent)
     return next()
   })
 
@@ -184,26 +214,33 @@ function installControllerRequestBoundary(ctx, boundary) {
         throw error
       }
     }
-    if (!composed.has(payload.agent)) throw boundary.fail('controller-route-rewrite-not-composed', target)
-    const prepared = boundary.prepare ? boundary.prepare(payload, target) : undefined
-    const ticket = { target, prepared, applied: false }
-    tickets.set(payload, ticket)
-    let resolved
-    try {
-      resolved = await next()
-    } finally {
-      tickets.delete(payload)
+    const agent = payload.agent
+    const armed = armedByAgent.get(agent)
+    // The loop fixed this step's route before agent/request. It must be the
+    // route armed for the CURRENT controller target; anything else (never
+    // armed, arm refused, stale arm, or a selection written by another
+    // party) fails closed. Re-arm so the next attempt converges.
+    if (!armed) { arm(agent); throw boundary.fail('controller-route-selection-not-armed', target) }
+    if (armed.error) { const refusal = armed.error; arm(agent); throw refusal }
+    if (!sameRoute(armed.selection, target)) { arm(agent); throw boundary.fail('controller-route-selection-stale', target) }
+    const fixed = currentSelection(agent)
+    if (!fixed || !sameRoute(fixed, target) || fixed.reasoningEffort !== armed.selection.reasoningEffort) {
+      arm(agent)
+      throw boundary.fail('step-selection-differs-from-controller-target', target)
     }
-    if (!ticket.applied) throw boundary.fail('controller-route-rewrite-did-not-run', target)
-    const authority = payload.routingAuthority
-    if (!authority || authority.source !== AUTHORITY_SOURCE || !sameRoute(authority.target, target)) {
-      throw boundary.fail('declared-authority-is-not-controller-target', target)
-    }
+    const resolved = await next()
     if (!sameRoute(resolved, target)) throw boundary.fail('effective-route-differs-from-controller-target', target)
+    if (resolved.reasoningEffort !== armed.selection.reasoningEffort) {
+      throw boundary.fail('effective-effort-differs-from-armed-effort', target)
+    }
     if (registryBinding.classifyRegistryState(binding).state === 'pinned' && resolved.reasoningEffort !== target.reasoning) {
       throw boundary.fail('effective-effort-differs-from-pinned-target', target)
     }
-    return resolved
+    const finalized = boundary.finalize(resolved, target, armed.prepared)
+    if (!sameRoute(finalized, target) || finalized.reasoningEffort !== resolved.reasoningEffort) {
+      throw boundary.fail('finalize-changed-the-controller-route', target)
+    }
+    return Object.freeze(finalized)
   })
 }
 

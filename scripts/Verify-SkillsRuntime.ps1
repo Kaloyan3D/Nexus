@@ -94,13 +94,17 @@ $presetRows = @(
     @{ id = 'skill-filesystem'; name = '@deepseek-ai/dsh-skill-filesystem'; bucket = 'filesystemProvider' },
     @{ id = 'tool-skill'; name = '@deepseek-ai/dsh-tool-skill'; bucket = 'modelSkillTool' }
 )
+# DSH 0.2.x: the planes are preset rows in the generated home patch
+# (data/cordis.patch.yml); there are no .agent-presets/<name>/agent.cordis.yml files.
+$homePatchPath = Join-Path $layout.Data 'cordis.patch.yml'
+$homePatchText = if (Test-Path -LiteralPath $homePatchPath) { Get-Content -Raw -Encoding UTF8 -LiteralPath $homePatchPath } else { '' }
 foreach ($presetName in @('aih-engineering', 'aih-deepseek')) {
-    $presetPath = Join-Path $layout.Data ('.agent-presets/' + $presetName + '/agent.cordis.yml')
-    if (-not (Test-Path -LiteralPath $presetPath)) {
+    $presetMatch = [regex]::Match($homePatchText, '(?ms)^[ \t]*- id: preset-' + [regex]::Escape($presetName) + '[ \t]*$(.*?)(?=^[ \t]*- id: preset-aih-|^# ---- END NEXUS GENERATED|\z)')
+    if (-not $presetMatch.Success) {
         foreach ($row in $presetRows) { $results[$row.bucket].evidence += ("MISSING deployed preset: " + $presetName) }
         continue
     }
-    $presetText = Get-Content -Raw -Encoding UTF8 -LiteralPath $presetPath
+    $presetText = $presetMatch.Groups[1].Value
     foreach ($row in $presetRows) {
         $state = Test-CompositionRow -Text $presetText -RowId $row.id -ExpectedName $row.name
         if ($state.present -and -not $state.disabled) {

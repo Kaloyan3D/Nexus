@@ -45,7 +45,10 @@ function Get-AihLayout {
         Dsh = Join-Path $root 'app/node_modules/@deepseek-ai/dsh/lib/bin.js'
         OAuth = Join-Path $root 'app/node_modules/openai-oauth/dist/cli.js'
         Credentials = Join-Path $root 'data/.credentials.yaml'
-        Settings = Join-Path $root 'data/settings.yaml'
+        # DSH 0.2.x imports and RENAMES any $DSH_HOME/settings.yaml, so the Nexus-owned
+        # settings document must not use that name (see docs/integration/dsh-0.2.x-migration-report.md).
+        Settings = Join-Path $root 'data/nexus-settings.yaml'
+        LegacySettings = Join-Path $root 'data/settings.yaml'
         State = Join-Path $root 'data/aih-state.json'
         RoutingPolicy = Join-Path $root 'config/routing-policy.json'
         ModelRegistry = Join-Path $root 'config/model-registry.json'
@@ -154,7 +157,12 @@ function Get-AihCodexAuthFile {
 function Test-AihEndpoint {
     param(
         [Parameter(Mandatory = $true)][string]$Uri,
-        [int]$TimeoutSec = 2
+        [int]$TimeoutSec = 2,
+        # DSH 0.2.x serves the Web UI behind a per-process token: an
+        # unauthenticated request answers 401/403 while the server is up.
+        # Callers probing the DSH Web listener accept that answer as "a
+        # server is listening"; the OAuth models probe keeps strict 2xx.
+        [switch]$AcceptAuthRequired
     )
 
     try {
@@ -162,8 +170,26 @@ function Test-AihEndpoint {
         return $true
     }
     catch {
+        if ($AcceptAuthRequired) {
+            $responseProperty = $_.Exception.PSObject.Properties['Response']
+            if ($null -ne $responseProperty -and $null -ne $responseProperty.Value) {
+                try { $status = [int]$responseProperty.Value.StatusCode; if ($status -eq 401 -or $status -eq 403) { return $true } } catch { }
+            }
+        }
         return $false
     }
+}
+
+function Get-AihDshWebUrlFromLog {
+    # DSH 0.2.x prints `dsh web: http://host:port/?token=...` once the server
+    # is listening. The token authorizes the browser session, so the launcher
+    # opens exactly this URL. Returns $null when the line is absent.
+    param([string]$StdoutLog, [datetime]$NotBeforeUtc = [datetime]::MinValue)
+    if ([string]::IsNullOrWhiteSpace($StdoutLog) -or -not (Test-Path -LiteralPath $StdoutLog)) { return $null }
+    if ((Get-Item -LiteralPath $StdoutLog).LastWriteTimeUtc -lt $NotBeforeUtc.AddSeconds(-1)) { return $null }
+    $hits = @(Get-Content -LiteralPath $StdoutLog -Tail 50 -ErrorAction SilentlyContinue | ForEach-Object { if ($_ -match 'dsh web:\s+(https?://\S+)') { $Matches[1] } })
+    if ($hits.Count -eq 0) { return $null }
+    return [string]$hits[-1]
 }
 
 function Get-AihDeepSeekKey {

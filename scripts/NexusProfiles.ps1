@@ -221,7 +221,7 @@ function Resolve-AihActiveNexusProfile {
     $root=[IO.Path]::GetFullPath($InstallRoot)
     $policy=Get-AihRoutingPolicy (Join-Path $root 'config/routing-policy.json')
     $presetDoc=Resolve-AihPreset $policy $Preset
-    $requested=Get-AihRequestedNexusProfileId -Policy $policy -Preset $presetDoc -SettingsPath (Join-Path $root 'data/settings.yaml')
+    $requested=Get-AihRequestedNexusProfileId -Policy $policy -Preset $presetDoc -SettingsPath (Join-Path $root 'data/nexus-settings.yaml')
     if([string]::IsNullOrWhiteSpace($requested)){return $null}
     # No fallback across engines. Unknown/foundation-only profiles remain
     # explicit and callers decide whether Runnable is acceptable.

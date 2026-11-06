@@ -47,11 +47,35 @@ function createSingleFlight(keyOf = (value) => String(value)) {
   }
 }
 
+
+/**
+ * DSH 0.2.x has no server-wide authentication: only /api and the app shell are
+ * behind the per-process Web token (dsh-client-connection). Routes a plugin
+ * registers on webServer are the plugin's own responsibility, and these routes
+ * read controller state and take operator actions (gate decisions, profile
+ * changes, workspace registration, provider/credential-connection management).
+ * Every route therefore requires the same admission as /api: the Host/Origin
+ * fence plus the token-derived browser cookie, via ctx.connection.admit().
+ * Fail closed: without the connection service no request is served.
+ */
+function protect(webCtx, handler) {
+  return (req, res) => {
+    const connection = webCtx.connection
+    const verdict = connection && typeof connection.admit === 'function' ? connection.admit(req) : { rejection: 503 }
+    if (verdict && 'rejection' in verdict) {
+      res.writeHead(verdict.rejection, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify({ ok: false, error: verdict.rejection === 503 ? 'connection-service-unavailable' : 'not-admitted' }))
+      return undefined
+    }
+    return handler(req, res)
+  }
+}
+
 function apply(ctx) {
   // Cordis lifecycle injection: starts this callback once the webServer
   // service is available (immediately, or later when the service appears).
   // Without the service the callback never runs — the plugin stays inert.
-  ctx.inject(['webServer'], (webCtx) => {
+  ctx.inject(['webServer', 'connection'], (webCtx) => {
     // Phase 3.2.5: the LIVE runtime data root (DSH_HOME) owns install-root
     // identity — the same precedence as the controller bridge and the
     // engineering profile layer. AIH_INSTALL_ROOT stays the fallback for
@@ -80,7 +104,7 @@ function apply(ctx) {
       try { accessSync(pinned, constants.X_OK); return pinned } catch { /* fall through */ }
       return 'pwsh'
     })()
-    const settingsPath = join(dataRoot, 'settings.yaml')
+    const settingsPath = join(dataRoot, 'nexus-settings.yaml')
     const statePath = join(dataRoot, 'aih-state.json')
 
   // js-yaml resolves through the app closure (the same pattern
@@ -603,27 +627,27 @@ function apply(ctx) {
     }
 
     webCtx.effect(
-      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/controller.json', handler }),
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/controller.json', handler: protect(webCtx, handler) }),
       'nexus-controller: read-only state route',
     )
     webCtx.effect(
-      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/control-room.json', handler: detailHandler }),
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/control-room.json', handler: protect(webCtx, detailHandler) }),
       'nexus-controller: read-only control-room route',
     )
     webCtx.effect(
-      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/gate-action.json', handler: gateHandler }),
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/gate-action.json', handler: protect(webCtx, gateHandler) }),
       'nexus-controller: operator gate action route',
     )
     webCtx.effect(
-      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/engineering-profile.json', handler: engineeringHandler }),
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/engineering-profile.json', handler: protect(webCtx, engineeringHandler) }),
       'nexus-controller: engineering profile read route',
     )
     webCtx.effect(
-      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/engineering-profile-action.json', handler: engineeringActionHandler }),
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/engineering-profile-action.json', handler: protect(webCtx, engineeringActionHandler) }),
       'nexus-controller: engineering profile action route',
     )
     webCtx.effect(
-      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/workspace-registration.json', handler: workspaceRegistrationHandler }),
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/workspace-registration.json', handler: protect(webCtx, workspaceRegistrationHandler) }),
       'nexus-controller: Phase 3.1 workspace registration route',
     )
 
@@ -637,23 +661,23 @@ function apply(ctx) {
     const registryService = registryServiceModule.createService({ installRoot, dataRoot })
     const registryHandlers = registryAdapter.createRegistryHandlers(registryService)
     webCtx.effect(
-      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/modes', handler: registryHandlers.modesHandler }),
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/modes', handler: protect(webCtx, registryHandlers.modesHandler) }),
       'nexus-controller: registry R3 mode list route',
     )
     webCtx.effect(
-      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/configuration', handler: registryHandlers.configurationHandler }),
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/configuration', handler: protect(webCtx, registryHandlers.configurationHandler) }),
       'nexus-controller: registry R3 configuration route',
     )
     webCtx.effect(
-      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/eligible', handler: registryHandlers.eligibleHandler }),
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/eligible', handler: protect(webCtx, registryHandlers.eligibleHandler) }),
       'nexus-controller: registry R3 eligible-routes route',
     )
     webCtx.effect(
-      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/validate', handler: registryHandlers.validateHandler }),
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/validate', handler: protect(webCtx, registryHandlers.validateHandler) }),
       'nexus-controller: registry R3 validation route',
     )
     webCtx.effect(
-      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/preview', handler: registryHandlers.previewHandler }),
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/preview', handler: protect(webCtx, registryHandlers.previewHandler) }),
       'nexus-controller: registry R3 compile-preview route',
     )
     // ── Registry R4 (TASK-0048): Models & Providers management API ──
@@ -687,7 +711,7 @@ function apply(ctx) {
       const handler = registryHandlers[handlerName]
       if (typeof handler !== 'function') throw new Error('nexus-controller: missing registry R4 handler ' + handlerName)
       webCtx.effect(
-        () => webCtx.webServer.register({ kind: 'exact', path: routePath, handler }),
+        () => webCtx.webServer.register({ kind: 'exact', path: routePath, handler: protect(webCtx, handler) }),
         'nexus-controller: ' + label,
       )
     }
