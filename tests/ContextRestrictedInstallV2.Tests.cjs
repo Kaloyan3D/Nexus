@@ -21,7 +21,7 @@ try {
     const rows=prepare(source,area,{profile});
     check(rows.some(row=>row.name==='ContextDurableMutationPolicyV2.cjs') && rows.every(row=>!row.name.includes('ResearchRunner')),profile+' installed closure contains fixed guard and no research helper');
   }
-  execFileSync(pwsh,['-NoProfile','-File',path.join(area,'scripts/Install-ControllerPresets.ps1'),'-InstallRoot',area],{stdio:'pipe',timeout:60000});
+  execFileSync(pwsh,['-NoProfile','-File',path.join(area,'scripts/Install-NexusPresets.ps1'),'-InstallRoot',area],{stdio:'pipe',timeout:60000});
   execFileSync(process.execPath,[path.join(area,'tests/ControllerPresetInstalled.Tests.cjs'),area],{stdio:'pipe',timeout:60000});
   check(true,'actual installed controller compositions validate with the restricted dependency graph');
   const policy=require(path.join(area,'data/.agent-presets/aih-engineering/ContextDurableMutationPolicyV2.cjs'));
