@@ -512,3 +512,48 @@ and shadow host proof; `21970aee` restricted install fixture; `18e9b0ab` report 
 `62bbf4ab` ordinary compaction with CCv2 disabled (7/7); `695a3b7b` browser-acceptance fixes, sweep, evidence;
 `ac6d817a` production / ccv2-lab lanes; `61321d65` panel and registry suites ported; `7ef8c96b` previous final report; `65a4e137` settings arity + PREFERRED pill; `37f57169` V1 compaction bridge port; `d6e1d9bb` CCv2 lab writers keep their op shape; `47061b78` default-mode route + verifier default; `038c98f9` tests follow the route (final source revision tested; the report/evidence commit after it is documentation only).
 Touched areas: `systems/nexus/{config,scripts,ui,tests,docs,runtime}`; no other system was modified.
+
+## K. Provenance: transplant into `Kaloyan3D/Nexus`
+
+This migration was **developed on a branch of the ArthurLabs-Ecosystem monorepo** (`Arthur-Labs-AI/ArthurLabs-Ecosystem`,
+branch `feature/nexus-dsh-0.2-migration`, Nexus under `systems/nexus/`, base `217b3143`, final source HEAD `4b6c4fc6`). That was
+the wrong repository. The work was then transplanted, unpushed, into the canonical repository **`Kaloyan3D/Nexus`** on branch
+`feature/dsh-0.2.2-migration` (from `origin/dev` `3b90bdd4`). **Future development belongs in `Kaloyan3D/Nexus`.**
+
+Method: `git format-patch --relative=systems/nexus --binary` of the 20 source commits, applied with `git am -3` (no conflicts, none dropped,
+none squashed). Author, author date and message are preserved for all 20 (checked pairwise); commit SHAs differ as expected.
+
+| # | Source SHA (monorepo) | Destination SHA (Nexus) |
+| --- | --- | --- |
+| 1 | `c8eda89b` | `631de3cc` |
+| 2 | `e3c5ed31` | `ac506c35` |
+| 3 | `9d0b07a3` | `238cdfd3` |
+| 4 | `21970aee` | `485e9813` |
+| 5 | `18e9b0ab` | `2ea7d99f` |
+| 6 | `7d6b35bc` | `44f575c9` |
+| 7 | `b819b600` | `80fb8a3f` |
+| 8 | `92274bb8` | `063bcfd7` |
+| 9 | `f9b43521` | `8cb31199` |
+| 10 | `62bbf4ab` | `1f05c113` |
+| 11 | `695a3b7b` | `7458a603` |
+| 12 | `ac6d817a` | `a32f78e2` |
+| 13 | `61321d65` | `89cec5de` |
+| 14 | `7ef8c96b` | `9a5ffeab` |
+| 15 | `65a4e137` | `dd737eb4` |
+| 16 | `37f57169` | `daad138c` |
+| 17 | `d6e1d9bb` | `c4a0b2cf` |
+| 18 | `47061b78` | `08d6dfad` |
+| 19 | `038c98f9` | `bbb3d530` |
+| 20 | `4b6c4fc6` | `b6561734` |
+
+Tree equivalence (checked immediately after the transplant, before this section was added):
+
+- source subtree `systems/nexus` at `4b6c4fc6`: `b60e272fc15a5684e04607cf0ffe3693368de15c`; destination root tree at `b6561734`: `794f557b88e6b1b56206388335346013ab297259`.
+- The trees are **not** byte-identical, for one reason outside the migration: the two baselines already differed by a single file.
+  `apps/nexus-desktop/packaging/build-release.sh` in the monorepo import carries a 3-line `cargo fetch` block that `origin/dev` does not (baseline subtree
+  `87cfb42f` versus `origin/dev` tree `a8185542`). No migration commit touches that file. `git diff <source subtree> <destination>` lists exactly that file and nothing else;
+  `git ls-tree -r` (modes, symlinks, blob ids) is identical for every other path (1606 regular files, 11 executables), and the file list and per-commit path sets of the migration delta are identical.
+  The drift file was deliberately left as `origin/dev` has it.
+- Tests: the release-candidate results in sections D, H and J were executed on the monorepo tree **before** the transplant and are unchanged. After the transplant only one run was made: a fresh Linux aarch64 VM install and the
+  real `Test-Harness.ps1 -Lane production` on the transplanted tree: 105 rows, 103 pass, the same two failures as in J9 (`ContextRestrictedProductionV2`, `Harness`). No other platform was re-validated.
+
