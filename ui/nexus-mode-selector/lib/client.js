@@ -337,8 +337,13 @@ window.__ModuleLoader__.load({
     //     supersession alike) and also when the guard is disposed.
     const WORKSPACE_GUARD_REASON = "Switching workspace… the composer unlocks when the selected workspace's session is open.";
     function createWorkspaceTransitionGuard({ uiWorkspace, blocks, sessions, reason = WORKSPACE_GUARD_REASON }) {
-      if (!uiWorkspace || typeof uiWorkspace.openWorkspace !== "function") return { dispose() {}, pending: () => false };
-      if (!blocks || typeof blocks.set !== "function") return { dispose() {}, pending: () => false };
+      // An unsupported host shape cannot be guarded. It is NEVER silent: the guard
+      // reports status "unavailable" with the reason (logged by apply() and published
+      // on the nexusWorkspaceGuard service) so the gap is observable and testable.
+      const unavailable = (why) => ({ status: "unavailable", reason: why, dispose() {}, pending: () => false });
+      if (!uiWorkspace || typeof uiWorkspace.openWorkspace !== "function") return unavailable("uiWorkspace.openWorkspace is not a function");
+      if (!blocks || typeof blocks.set !== "function") return unavailable("conversation.blocks.set is not a function");
+      if (!sessions || !sessions.list || typeof sessions.list.getSnapshot !== "function") return unavailable("sessions.list.getSnapshot is not a function");
       const original = uiWorkspace.openWorkspace;
       let token = 0;
       let latest = 0;
@@ -378,6 +383,7 @@ window.__ModuleLoader__.load({
         });
       };
       return {
+        status: "active",
         pending: () => active,
         dispose() {
           unsubscribe();
@@ -392,6 +398,8 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       ctx.inject(["uiWorkspace", "conversation", "sessions"], (scope) => {
         const guard = createWorkspaceTransitionGuard({ uiWorkspace: scope.uiWorkspace, blocks: scope.conversation && scope.conversation.blocks, sessions: scope.sessions });
+        if (guard.status !== "active") console.error("Nexus workspace-transition guard UNAVAILABLE: " + guard.reason);
+        scope.provide("nexusWorkspaceGuard", { status: guard.status, reason: guard.reason || null, pending: guard.pending });
         scope.effect(() => guard.dispose, "nexus-mode-selector: workspace-transition composer guard");
       });
       ctx.inject([

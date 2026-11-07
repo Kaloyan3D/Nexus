@@ -3401,6 +3401,43 @@ function ComposerPreference({ sessionId, useSession, useSessions, legacy }) {
             : legacy,
     });
 }
+// DSH 0.2.x composer preference seat. The seat is the supported single-occupant
+// slot `conversation.input.model`; the Nexus registration outranks upstream's
+// ModelSelect by priority (supported election, no DOM mutation, no bundle patch).
+// Engineering sessions get the Engineering profile selector (the Controller owns
+// routing, so an upstream model picker would advertise a choice the Controller
+// overrides). Legacy (DeepSeek-only) sessions keep a real model chooser over the
+// SAME per-session ModelDirectory upstream uses, so choosing a model still works.
+function LegacyModelChooser({ directory, load, select, locked, available }) {
+    const state = react.useSyncExternalStore(directory.subscribe, directory.getSnapshot, directory.getSnapshot);
+    react.useEffect(() => { load(); }, [load]);
+    if (available === false) return null;
+    const groups = Array.isArray(state.groups) ? state.groups : [];
+    const options = [];
+    for (const group of groups) for (const model of group.models || []) options.push({ key: group.id + "\u0000" + model.id, provider: group.id, model: model.id, label: group.name + " · " + model.name });
+    const current = state.current ? state.current.provider + "\u0000" + state.current.model : "";
+    const busy = state.status === "selecting" || state.status === "loading";
+    return react_jsx_runtime.jsx("select", {
+        "data-nexus-legacy-model": "true",
+        "aria-label": "Model",
+        className: "nx-eng-trigger",
+        value: current,
+        disabled: !!locked || busy || options.length === 0,
+        title: state.error ? String(state.error) : "Model for this DeepSeek-only session",
+        onChange: (event) => {
+            const picked = options.find((option) => option.key === event.target.value);
+            if (picked) select({ provider: picked.provider, model: picked.model });
+        },
+        children: [
+            current === "" ? react_jsx_runtime.jsx("option", { value: "", children: busy ? "Loading models…" : "Model" }, "none") : null,
+            ...options.map((option) => react_jsx_runtime.jsx("option", { value: option.key, children: option.label }, option.key)),
+        ],
+    });
+}
+function NexusModelSeat(props) {
+    const legacy = react_jsx_runtime.jsx(LegacyModelChooser, { directory: props.directory, load: props.load, select: props.select, locked: props.locked, available: props.available });
+    return react_jsx_runtime.jsx(ComposerPreference, { sessionId: props.sessionId, useSession: props.useSession, useSessions: props.useSessions, legacy });
+}
 //#region styles
 /**
 * Panel + drawer styles, scoped to the nx-* classes and the
@@ -3719,6 +3756,23 @@ function apply(ctx) {
 	// controller still boots.
 	ctx.inject(["nexusModeState"], (scope) => {
 		attachNexusModeState(scope.nexusModeState);
+	});
+	ctx.inject(["modelDirectories", "sessions"], (scope) => {
+		scope.slots.inject("conversation.input.model", () => scope.slots.register({
+			name: "conversation.input.model",
+			priority: 100,
+			label: "Nexus model preference",
+			inject: (sessionId) => {
+				const directory = scope.modelDirectories.directoryFor(sessionId);
+				const available = typeof scope.sessions.subagentAddress !== "function" || scope.sessions.subagentAddress(sessionId) === undefined;
+				return {
+					available,
+					directory: directory.store,
+					load: () => { if (available) directory.load().catch(() => {}); },
+					select: (selection) => available ? directory.select(selection) : Promise.resolve(undefined),
+				};
+			},
+		}, NexusModelSeat));
 	});
 }
 //#endregion

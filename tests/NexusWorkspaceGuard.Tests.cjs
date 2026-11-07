@@ -11,8 +11,9 @@ const vm = require('node:vm')
 
 async function main() {
   let plugin
+  const logged = []
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../ui/nexus-mode-selector/lib/client.js'), 'utf8'),
-    { window: { __ModuleLoader__: { load(def) { plugin = def.factory(() => ({})) } } } })
+    { console: { error: (...a) => logged.push(a.join(' ')), log() {}, warn() {} }, window: { __ModuleLoader__: { load(def) { plugin = def.factory(() => ({})) } } } })
   let passed = 0
   const pass = (m) => { passed++; console.log('PASS: ' + m) }
   const make = () => {
@@ -89,10 +90,31 @@ async function main() {
   { // version lock: unsupported shape wraps nothing
     const g = plugin.createWorkspaceTransitionGuard({ uiWorkspace: {}, blocks: { set() {} }, sessions: {} })
     assert.equal(g.pending(), false)
+    assert.equal(g.status, 'unavailable')
+    assert.match(g.reason, /openWorkspace/)
+    for (const [ui, bl, se, re] of [
+      [{ openWorkspace() {} }, {}, { list: { getSnapshot() {} } }, /blocks/],
+      [{ openWorkspace() {} }, { set() {} }, {}, /sessions/],
+    ]) {
+      const x = plugin.createWorkspaceTransitionGuard({ uiWorkspace: ui, blocks: bl, sessions: se })
+      assert.equal(x.status, 'unavailable'); assert.match(x.reason, re)
+    }
     const u = { openWorkspace: 'not-a-function' }
     plugin.createWorkspaceTransitionGuard({ uiWorkspace: u, blocks: { set() {} }, sessions: {} })
     assert.equal(u.openWorkspace, 'not-a-function')
-    pass('an unsupported uiWorkspace shape is left untouched')
+    pass('every unsupported host shape is left untouched AND reported as unavailable with a reason (never silent)')
+  }
+  { // apply(): mounted guard publishes status; unsupported host logs an error and publishes unavailable
+    const provided = {}
+    const mk = (uiWorkspace) => ({
+      slots: { inject() {}, register() { return () => {} } },
+      inject(names, fn) { if (!names.includes('uiWorkspace')) return; fn({ uiWorkspace, conversation: { blocks: { set() {} } }, sessions: { list: { getSnapshot: () => ({ byId: {} }), subscribe: () => () => {} } }, provide: (n, v) => { provided[n] = v }, effect() {} }) },
+    })
+    plugin.apply(mk({ openWorkspace() {} })); plugin.apply(mk({}))
+    assert.equal(logged.length, 1)
+    assert.match(logged[0], /guard UNAVAILABLE/)
+    assert.equal(provided.nexusWorkspaceGuard.status, 'unavailable')
+    pass('apply() logs and publishes the unavailable status for an unsupported host')
   }
   console.log('SUITE RESULT: PASS ' + passed + ' | FAIL 0 | total ' + passed)
 }

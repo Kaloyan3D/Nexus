@@ -204,6 +204,7 @@ $suites = @(
     [ordered]@{ name='NexusControllerPanel'; script='tests/NexusControllerPanel.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='NexusModeContract'; script='tests/NexusModeContract.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='NexusWorkspaceGuard'; script='tests/NexusWorkspaceGuard.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusComposerSeat'; script='tests/NexusComposerSeat.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='PlatformDetachedLifecycle'; script='tests/PlatformDetachedLifecycle.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='PreferredRouteContract'; script='tests/PreferredRouteContract.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='RoutingIntegrity'; script='tests/RoutingIntegrity.Tests.cjs'; executable=$layout.Node; kind='node' },
