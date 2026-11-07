@@ -3137,7 +3137,18 @@ function composerPreferredEngineer(snapshot, editor) {
 	return composer.preferredEngineer && typeof composer.preferredEngineer === "object" ? composer.preferredEngineer : null;
 }
 
-function executorChipContent(snapshot, editor, composerMode) {
+// DSH 0.2 keeps the model choice PER SESSION (`modelSelection`: pending ?? lastUsed),
+// while the controller snapshot's `preference` still reads the global agent-default-model.
+// In a legacy (DeepSeek-only) session the two can disagree after the operator picks a
+// model; a stale PREFERRED label would contradict the chooser, so it is only shown while
+// it names the session's actual selection (the chooser itself is the authoritative display).
+function sessionModelSelectionOf(session) {
+	const projection = session && typeof session === "object" ? session.modelSelection : null;
+	if (!projection || typeof projection !== "object") return null;
+	const chosen = projection.pending || projection.lastUsed;
+	return chosen && typeof chosen.provider === "string" && typeof chosen.model === "string" ? chosen : null;
+}
+function executorChipContent(snapshot, editor, composerMode, sessionSelection) {
 	if (!snapshot || snapshot.error) return null;
 	const composer = snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
 	// TASK-0038: the pills obey the SAME authoritative mode the chip derived
@@ -3165,6 +3176,10 @@ function executorChipContent(snapshot, editor, composerMode) {
 	} else {
 		preference = snapshot.preference && typeof snapshot.preference.label === "string" && snapshot.preference.label ? snapshot.preference.label : null;
 		preferenceReasoning = snapshot.preference && typeof snapshot.preference.reasoning === "string" && snapshot.preference.reasoning ? snapshot.preference.reasoning : null;
+		if (preference !== null && sessionSelection && snapshot.preference && (snapshot.preference.provider !== sessionSelection.provider || snapshot.preference.modelId !== sessionSelection.model)) {
+			preference = null;
+			preferenceReasoning = null;
+		}
 	}
 	const reasoning = reasoningBadgeVisible(modelName, effectiveReasoning) ? effectiveReasoning : null;
 	// PREFERRED adds information only when it differs from RUNNING (or when
@@ -3387,10 +3402,21 @@ function useComposerState(session, explicitSessionId) {
 }
 
 // Additive execution status has no responsibility for the preference control.
-function ExecutorChip({ session }) {
+// The per-session model directory (DSH 0.2 `ctx.modelDirectories`), captured when the
+// service is provided (see the model seat registration). Absent in hosts/tests that do not
+// provide it; the chip then falls back to the session's own `modelSelection` projection.
+let modelDirectoriesService = null;
+const NO_DIRECTORY_STORE = { subscribe: () => () => {}, getSnapshot: () => null };
+function ExecutorChip({ session, sessionId: slotSessionId }) {
     const { snapshot, editor, derivedMode } = useComposerState(session);
+    // A blank hero session has no session object yet, but the slot still names its id.
+    const sessionId = typeof slotSessionId === "string" ? slotSessionId : session && typeof session.sessionId === "string" ? session.sessionId : undefined;
+    let store = NO_DIRECTORY_STORE;
+    try { if (modelDirectoriesService && sessionId) store = modelDirectoriesService.directoryFor(sessionId).store; } catch { store = NO_DIRECTORY_STORE; }
+    const directoryState = react.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+    const directorySelection = directoryState && directoryState.current && typeof directoryState.current.provider === "string" && typeof directoryState.current.model === "string" ? directoryState.current : null;
     return react_jsx_runtime.jsx(ExecutorPill, {
-        content: executorChipContent(snapshot, derivedMode.mode === "engineering" ? editor : null, derivedMode.mode),
+        content: executorChipContent(snapshot, derivedMode.mode === "engineering" ? editor : null, derivedMode.mode, directorySelection || sessionModelSelectionOf(session)),
     });
 }
 
@@ -3771,6 +3797,7 @@ function apply(ctx) {
 		id: "nexus-controller",
 		order: 90,
 		label: "Task executor",
+		inject: (sessionId) => ({ sessionId }),
 	}, ExecutorChip));
 	// Phase M2.1 (TASK-0038): consume the mode selector's authoritative client
 	// state (see the nexus mode bridge region). The nested inject is
@@ -3785,6 +3812,7 @@ function apply(ctx) {
 	// Scopes carry only the names listed here; the slot registry is the apply
 	// context's own (declared above), never `scope.slots`.
 	ctx.inject(["modelDirectories", "sessions"], (scope) => {
+		modelDirectoriesService = scope.modelDirectories;
 		ctx.slots.inject("conversation.input.model", () => ctx.slots.register({
 			name: "conversation.input.model",
 			priority: -100,

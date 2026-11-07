@@ -24,7 +24,7 @@ async function main() {
     async select(sessionId, preset){ assert.equal(typeof sessionId,'string'); assert.equal(typeof preset,'string'); calls.push({sessionId, agentPreset: preset}); if (rejectSelection) return {ok:false,error:{message:'refused',details:{}}}; project(sessionId, preset); return {ok:true,value:preset} },
   }
   const settings = {
-    async update(ns, patch){ settingsWrites.push({ns, patch}); assert.equal(ns,'agent-preset-registry'); assert.ok(typeof patch.selectedDefault === 'string'); return {ok:true,value:{}} },
+    async update(...args){ assert.equal(args.length, 3, 'DSH 0.2 Remote settings.update takes (ns, patch, expectedRevision) and rejects other arity'); const [ns, patch] = args; assert.equal(args[2], undefined, 'unconditional merge'); settingsWrites.push({ns, patch}); assert.equal(ns,'agent-preset-registry'); assert.ok(typeof patch.selectedDefault === 'string'); return {ok:true,value:{}} },
   }
   const scope = {
     slots:{inject(_name,fn){return fn()},register(spec,component){registered.push({spec,component});return ()=>{}}},

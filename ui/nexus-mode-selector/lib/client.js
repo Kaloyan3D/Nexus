@@ -140,7 +140,10 @@ window.__ModuleLoader__.load({
       }
 
       async function persistDefault(id) {
-        const result = await remote.settings.update(AGENT_PRESET_SETTINGS_NS, { selectedDefault: id });
+        // DSH 0.2 Remote methods validate their arity: the third argument is the expected
+        // revision, and an explicit `undefined` is the documented unconditional merge (the
+        // patch touches only `selectedDefault`).
+        const result = await remote.settings.update(AGENT_PRESET_SETTINGS_NS, { selectedDefault: id }, void 0);
         if (!result.ok) throw new Error(result.error.message || "Failed to persist the Nexus mode.");
       }
 

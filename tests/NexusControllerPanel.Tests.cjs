@@ -1802,6 +1802,13 @@ async function main() {
     const unboundHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001', agentPreset: 'aih-deepseek' } }))
     assert.ok(!unboundHtml.includes('data-nexus-executor'), 'unbound session never invents a RUNNING value')
     assert.match(unboundHtml, /data-nexus-preferred/, 'unbound legacy session keeps the preference labeled and usable')
+    // DSH 0.2 per-session model choice: a PREFERRED label that names a DIFFERENT model than the
+    // session's actual selection (pending ?? lastUsed) would contradict the chooser -> suppressed.
+    const selectedPro = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001', agentPreset: 'aih-deepseek', modelSelection: { lastUsed: null, pending: { provider: 'deepseek-pro-direct', model: 'deepseek-v4-pro' } } } }))
+    assert.ok(!selectedPro.includes('data-nexus-preferred'), 'stale PREFERRED (flash) is not shown when the session selected pro')
+    const selectedSame = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001', agentPreset: 'aih-deepseek', modelSelection: { lastUsed: { provider: 'flash-max-direct', model: 'deepseek-v4-flash' }, pending: null } } }))
+    assert.match(selectedSame, /data-nexus-preferred/, 'PREFERRED stays when it names the session\'s actual selection')
+    assert.ok(!renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001', agentPreset: 'aih-deepseek', modelSelection: { lastUsed: null, pending: { provider: 'deepseek-pro-direct', model: 'deepseek-v4-pro' } } } })).includes('>DeepSeek V4 Flash<'), 'the stale label text never renders')
     // An unbound session with NO preset anywhere is an unknown boot state:
     // fail closed toward engineering/loading (Profile UI trigger mounted).
     const unknownUnboundHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } }))
