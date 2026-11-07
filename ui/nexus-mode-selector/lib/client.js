@@ -318,8 +318,82 @@ window.__ModuleLoader__.load({
       });
     }
 
+    // DSH 0.2.x workspace-transition composer guard (replaces the retired 0.1.x
+    // compiled-bundle patch). Selecting a workspace is asynchronous: until
+    // uiWorkspace.openWorkspace() settles, the chip shows the TARGET workspace
+    // while the composer is still bound to the CURRENT session, so a fast submit
+    // would execute in the wrong workspace. Upstream 0.2.2 keeps that pending
+    // state private to the conversation component, so the only observable seam is
+    // the public openWorkspace() call itself. This wraps that one method on the
+    // uiWorkspace service instance (version-locked: it refuses to wrap anything but
+    // a function with the 0.2.x signature) and raises a supported composer block
+    // (ctx.conversation.blocks) on every known session for the bounded window.
+    //   - exact bindings: no session accepts input while ANY pick is in flight, so
+    //     a message can never reach a session whose workspace is not the displayed one;
+    //   - stale-state rejection: each pick takes a monotonically increasing token;
+    //     only the newest pick may clear the block, a superseded pick settling late
+    //     cannot unblock a newer pending pick;
+    //   - fail closed: the block is cleared in `finally` (success, rejection and
+    //     supersession alike) and also when the guard is disposed.
+    const WORKSPACE_GUARD_REASON = "Switching workspace… the composer unlocks when the selected workspace's session is open.";
+    function createWorkspaceTransitionGuard({ uiWorkspace, blocks, sessions, reason = WORKSPACE_GUARD_REASON }) {
+      if (!uiWorkspace || typeof uiWorkspace.openWorkspace !== "function") return { dispose() {}, pending: () => false };
+      if (!blocks || typeof blocks.set !== "function") return { dispose() {}, pending: () => false };
+      const original = uiWorkspace.openWorkspace;
+      let token = 0;
+      let latest = 0;
+      let active = false;
+      const blocked = new Set();
+      const knownIds = () => {
+        const snapshot = sessions && sessions.list ? sessions.list.getSnapshot() : undefined;
+        return snapshot && snapshot.byId ? Object.keys(snapshot.byId) : [];
+      };
+      const raise = () => {
+        for (const id of knownIds()) {
+          if (blocked.has(id)) continue;
+          blocked.add(id);
+          blocks.set(id, { reason });
+        }
+      };
+      const release = () => {
+        for (const id of [...blocked]) blocks.set(id, undefined);
+        blocked.clear();
+      };
+      let unsubscribe = () => {};
+      if (sessions && sessions.list && typeof sessions.list.subscribe === "function") {
+        // Sessions created while a pick is pending are blocked too.
+        unsubscribe = sessions.list.subscribe(() => { if (active) raise(); });
+      }
+      uiWorkspace.openWorkspace = function guardedOpenWorkspace(...args) {
+        const mine = ++token;
+        latest = mine;
+        active = true;
+        raise();
+        let result;
+        try { result = original.apply(this, args); } catch (error) { result = Promise.reject(error); }
+        return Promise.resolve(result).finally(() => {
+          if (latest !== mine) return;
+          active = false;
+          release();
+        });
+      };
+      return {
+        pending: () => active,
+        dispose() {
+          unsubscribe();
+          if (uiWorkspace.openWorkspace && uiWorkspace.openWorkspace.name === "guardedOpenWorkspace") uiWorkspace.openWorkspace = original;
+          active = false;
+          release();
+        }
+      };
+    }
+
     const inject = ["slots"];
     function apply(ctx) {
+      ctx.inject(["uiWorkspace", "conversation", "sessions"], (scope) => {
+        const guard = createWorkspaceTransitionGuard({ uiWorkspace: scope.uiWorkspace, blocks: scope.conversation && scope.conversation.blocks, sessions: scope.sessions });
+        scope.effect(() => guard.dispose, "nexus-mode-selector: workspace-transition composer guard");
+      });
       ctx.inject([
         "slots",
         "sessions",
@@ -366,6 +440,7 @@ window.__ModuleLoader__.load({
     }
 
     exports.apply = apply;
+    exports.createWorkspaceTransitionGuard = createWorkspaceTransitionGuard;
     exports.inject = inject;
     exports.MODE_SELECTIONS = MODE_SELECTIONS;
     exports.presetOf = presetOf;
