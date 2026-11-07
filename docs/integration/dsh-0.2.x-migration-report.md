@@ -9,21 +9,26 @@ No other system (Nexus Native, Sentry, A.R.T.H.U.R., website) was modified.
 
 ## Verdict
 
-**PARTIALLY MIGRATED — the Nexus DSH backend runs on `dsh-v0.2.2-rc.1` and passes its
-verification on native Linux; the UI is only partly restored and several named
-features/tests remain unported.** It is not READY FOR REVIEW as a full migration.
-Windows is UNVERIFIED. CCv2 durable writers remain disabled (unchanged policy).
+**READY FOR REVIEW for the Linux aarch64 scope. NOT release-ready: Linux x86_64, Windows and live-provider
+acceptance are UNVERIFIED.** The Nexus DSH backend, installer, routing, composition, route security, UI plugins
+(Controller panel, Task Control Room, operator gates, engineering profile, composer preference seat,
+workspace-transition guard, branding) and ordinary DSH compaction run on `dsh-v0.2.2-rc.1` and were exercised in a
+real browser against a real server. Against the verified baseline there are **0 regressions**, and the
+`ContextWireProjectorResponsesV2`, `ContextRestrictedDshCompaction`, `NexusControllerPanel` and
+`RegistryInstalledRuntime` suites now pass. CCv2 durable writers remain disabled (policy file untouched; the
+persistence lease still has no external fencing).
 
-What is genuinely working, each verified by the evidence in section D:
+Verified (evidence in sections D and H):
 
-- strict dependency install (`npm ci`, no `--legacy-peer-deps`) on the pinned Node 24.18.1 / npm 11.16 toolchain;
-- clean install and upgrade-in-place of the installer on Linux (aarch64, see limits);
-- real DSH startup through Nexus's own launcher, token-authenticated Web UI, `READY`, stop and restart;
-- the three Nexus agent planes (`aih-engineering`, `aih-deepseek`, `aih-muse`) mount on the real DSH composition, stock presets cannot be selected;
-- controller-owned route selection on the real DSH agent loop (route, provider/model/effort, fail-closed guards);
-- OpenCode Go header, provider-substrate routes, credentials and settings preservation, admission-gated Nexus web routes.
+- strict dependency install (`npm ci`, no `--legacy-peer-deps`) on pinned Node 24.18.1 / npm 11.16; clean install, upgrade-in-place, restart;
+- real DSH startup through Nexus's launcher, token-authenticated Web UI, restart/restoration of a bound task from authoritative records;
+- the three agent planes mount on the real composition; controller-owned route selection on the real agent loop;
+- real-browser acceptance of every named UI surface with displayed state compared to authoritative records (section H);
+- 208-check unauthenticated sweep of all 13 Nexus routes: 0 leaks, 0 mutations;
+- ordinary DSH compaction, flush and restore with `ccv2-durable-mutation-disabled` untouched (7/7).
 
-What is not done is listed precisely in section F.
+UNVERIFIED: Linux x86_64 (committed `setup.sh` rejects aarch64; all runs used a test-only copy), Windows, any live
+provider turn (no credentials/authorization), the legacy model-chooser catalog (needs credentials), the Fedora VM.
 
 ## A. Version migration
 
@@ -97,15 +102,15 @@ provider run); that evaluation is still owed before relying on mid-task re-routi
 | Operator/web route security | Improved (new) | unauthenticated 401, spoofed Host 403, authenticated 200 on the live server; `NexusRouteAdmission` 7/7 |
 | Credentials and settings preservation | Fully working | `CredentialsCompat` 6/6 (DSH migrates a flat file into `refs:`, values identical, Nexus readers still resolve them, mode 600) |
 | Skills runtime | Fully working | `Verify-SkillsRuntime` native boot loaded a fixture skill body on 0.2.2 |
-| Controller Panel / brand / mode selector (UI) | Partially working | the real new UI loaded all three `@nexus/*` bundles; brand mark, Controller panel and the Mode picker rendered (macOS browser). The mode selector was **broken on 0.2.x** (it used the removed `connection.api`) and was ported to `remote.agentPresets`/`remote.settings`; the Overview/Activity/Verification/Files/Engineering views and operator gates were **not clicked through** |
-| Task Control Room views, verification evidence, operator gates, completion authority end to end | Not tested live | controller/task suites on Linux (see D); no live session-driven task was run |
-| Brand cosmetics: page title, favicon, PWA name, hero copy, sidebar width, send-button colour, model-badge guard | **Not ported** | string patches against compiled bundles have no supported equivalent; the page still says "DeepSeek Harness" |
-| Composer preference seat (`nexusComposerPreference`) | **Not ported** | its patch is retired; the supported route is single-slot election of `conversation.input.model` — not implemented |
-| Workspace-transition composer guard | **Not ported / UNVERIFIED** | upstream 0.2.2 added a pending-workspace chip state but does not disable the composer; supported route is a composer block (`useComposerBlock`) — not implemented. Execution root is still the immutable session cwd |
+| Controller Panel / mode selector / Task Control Room / gates / profile (UI) | Fully working in a real browser (Linux server) | section H: every view compared with seeded authoritative records; four real defects found and fixed (session identity, seat priority, slot scope, launcher handoff) |
+| Task Control Room views, verification evidence, operator gates | Fully working (fixture-driven) | Overview/Activity/Verification/Files/Engineering rendered; gate approve wrote the resolved journal record; completion authority stays with the Controller (task status unchanged). A live model-driven task was NOT run |
+| Brand: title, favicon, mark, theme | Restored by supported means | title suffix rewrite + `<link rel=icon>` served behind admission (`@nexus/ui-brand`); hero headline and PWA manifest name are **not** restorable via a supported API (single-owner locale namespace / build-time manifest) - documented gap |
+| Composer preference seat | Restored (supported slot election) | `conversation.input.model` registered at priority -100 (lowest renders); Engineering sessions get the profile selector, DeepSeek-only sessions a model chooser over the per-session ModelDirectory; `NexusComposerSeat` 4/4, browser-verified |
+| Workspace-transition composer guard | Restored (supported composer blocks + version-locked method wrapper) | blocks every known session while any `openWorkspace` is in flight; stale pick cannot unblock a newer one; unsupported host shapes report `unavailable` (never silent); `NexusWorkspaceGuard` 7/7; browser-verified |
 | Per-worker persona/background mode for `deepseek_normal`/`deepseek_deep` | Behaviour changed | options no longer exist upstream; workers inherit the plane persona |
-| Context Compaction V1 | **UNVERIFIED on 0.2.x** | `ContextRestrictedDshCompaction` and the V1 compaction suites still target 0.1.x summarizer/region APIs; not ported |
+| Ordinary DSH compaction (CCv2 disabled) | Fully working | `ContextRestrictedDshCompaction` 7/7 on the real 0.2 engine: `compactNow`, lifecycle markers, `compact-checkpoint` provenance, flush barrier, restore into a fresh store; the V1 `ContextCompaction*` F-series remain red for their baseline reasons (hard-coded `/home/kaloyan` paths, no `pwsh` on PATH) |
 | CCv2 restricted production policy | Unchanged, enabled, proven | `ContextDurableMutationPolicyV2.cjs` untouched; `ContextRestrictedProductionV2` 50/50 and `ContextRestrictedProjectionV2` 13/13 on the installed 0.2.2-rc.1 runtime |
-| CCv2 wire-projector conformance against 0.2 pi-ai | **Failing, not ported** | `ContextWireProjectorResponsesV2` byte-exact bodies/tool-result shape differ (the only regression vs baseline); `ContextCompilerShadowV2` host-path proof was ported and passes (197/0) |
+| CCv2 wire-projector conformance against pi-ai 1.5 | Fixed | `ContextWireProjectorResponsesV2` 83/0; byte conformance verified against the real pi-ai conversion (tool-role results, leading system merge, `<system-reminder>` mid-conversation system turns, foreign thinking dropped) |
 | Windows (PowerShell 5.1 and native) | **UNVERIFIED** | no runner; `Setup.ps1` edits are mirrored but unexecuted |
 | Live provider behaviour, real engineering task, local verification run, session restore of a real task | **NOT RUN** | no provider credentials or benchmark authorized |
 
@@ -160,15 +165,44 @@ node tests/diagnostics/Dsh02OwnershipProbe.mjs <InstallRoot> <out.json>
   retired UI-bundle assertions (replaced by an installer-contract fixture that passes) and did not
   touch the scan.
 
+### Final matrix (clean install, Linux aarch64, per-suite runner, both lanes)
+
+| Lane | Suite rows | Pass | Fail |
+| --- | --- | --- | --- |
+| production | 104 | 86 | 18 |
+| ccv2-lab (non-installed research) | 81 | 43 | 38 |
+| total (183 unique suites; `NexusControllerPanel` and `ContextCompactionF1Loop` appear twice in the table) | 185 | 129 unique | 54 unique |
+
+Classification against the verified baseline (`suites-baseline-linux-aarch64-dsh-0.1.1-rc.2.json`):
+**regressions 0**; fixed: `ContextRestrictedDshCompaction`; absent: `MuseRoutingAuthorityOrdering`,
+`NexusComposerOwnership` (retired with their mechanisms). After the targeted reruns in
+`targeted-reruns-linux-aarch64.json` (`NexusControllerPanel` now PASS, `RegistryInstalledRuntime` 3/3) **52** unique
+suites still fail, **all baseline failures** and none of them hidden:
+
+- ccv2-lab (38): `ccv2-durable-mutation-disabled` active-algorithm suites, lab modules deliberately not installed,
+  and `NEXUS_REQUIRE_CCV2_LIVE_HOST` live-host proofs without a pinned host;
+- production lane (14): `ContextRestrictedProductionV2` / `ContextRestrictedProjectionV2` (cannot run on the
+  installed tree; **pass from the source tree against the installed runtime: 50/50 and 13/13**, plus
+  `ContextRestrictedDshCompaction` 7/7), `Harness` (credential scan flags CCv2 redaction fixtures), and the
+  `ContextCompaction*` V1 F-series (hard-coded `/home/kaloyan/...` runtime paths, `spawnSync pwsh ENOENT`).
+
+The lanes are `scripts/Test-Harness.ps1 -Lane production|ccv2-lab|all` (default `all`; the lane summary is always
+printed) and `RunHarnessSuites.cjs ... --lane`; `tests/HarnessLanes.Tests.cjs` pins the partition and
+`docs/testing/CCV2-LAB-SUITES.md` lists the lab suites. Evidence:
+`suites-production-lane-linux-aarch64-dsh-0.2.2-rc.1.json`, `suites-ccv2-lab-lane-linux-aarch64-dsh-0.2.2-rc.1.json`.
+
+Install/upgrade/restart/settings: clean install on a fresh root completed with only the three environmental local
+checks failing (no DeepSeek credential, launcher not on PATH, no `xdg-open`); `SetupUpgrade`,
+`CredentialsCompat`, `MusePresetCleanInstall`, `MusePresetDependencyClosure`, `SourceCompleteness` pass in the
+production lane; the launcher was stopped and restarted (new pid, new token) with task state restored.
+
 ### Restricted CCv2 production policy (kept enabled, proven on the installed 0.2.2-rc.1 runtime)
 
 The installed-tree harness cannot run these suites (their laboratory modules are deliberately not
 installed — the same on the baseline). Run from the source tree against the installed runtime
 (`AIH_HOST_APP`, pinned `pwsh` on `PATH`): `ContextRestrictedProductionV2` **50/50**,
 `ContextRestrictedProjectionV2` **13/13**, `ContextApplyLockAuthority` pass.
-`ContextRestrictedDshCompaction` fails: its fixture targets the 0.1.x compaction API (summarizer
-result shape, `compactRegion`, session creation lifecycle), so **DSH compaction (V1) behaviour with
-CCv2 writes disabled is UNVERIFIED on 0.2.x**; porting it needs the `SummaryResult` contract.
+`ContextRestrictedDshCompaction` was rewritten for the 0.2 engine and passes 7/7 (see the final matrix).
 `ContextRestrictedInstallV2` was repointed at the new installer but not re-run after that edit.
 
 ### Functional acceptance (real runtime)
@@ -209,6 +243,42 @@ edited.
 `nexus-boot-probe-linux-aarch64.json`, `nexus-boot-probe-darwin.json`,
 `ownership-probe-linux-aarch64.json`, plus the earlier darwin files.
 
+## H. Real-browser acceptance (Phases 2-3)
+
+Environment: Lima VM `nexus-a1-linux`, disposable install, the real launcher (test-only copy on port 3081), the
+Claude desktop built-in browser through an SSH tunnel. No provider credentials; no paid call. Authoritative
+records were produced by `tests/diagnostics/SeedAcceptanceFixture.cjs` (real `status.cjs`/`gate.cjs` code, refuses
+non-disposable roots). Full per-test evidence: `evidence/dsh-0.2.x/browser-acceptance.json`.
+
+| Acceptance test | Result |
+| --- | --- |
+| Controller panel vs records (VERIFYING, TASK-0042, attempt 2/3, 1/2 verification failed, review required) | PASS |
+| Overview / Activity / Verification / Files / Engineering tabs | PASS |
+| Operator gate approve -> resolved journal record (`resolvedBy operator-gui`), task status untouched | PASS |
+| Engineering profile selection -> `engineering-profile: glm-codex` in `nexus-settings.yaml` | PASS |
+| Mode picker -> composer seat flips engineering <-> legacy | PASS (mount); catalog UNVERIFIED (no credentials) |
+| Pending workspace pick: composer replaced with the guard reason, cleared on landing | PASS |
+| Rapid A-then-B selection, session creation during transitions: last pick wins, no stuck block, one session per workspace | PASS |
+| Session switching: only the bound session shows the task; blank/unknown ids show none | PASS |
+| Outage and restart: "Reconnecting...", then restoration from records with a new controller pid | PASS |
+| Unauthenticated sweep: 13 routes x 4 variants x 4 methods = 208 checks, 0 failures, no journal change | PASS |
+| Authenticated routes (cookie): 200 where applicable | PASS |
+
+Defects the real browser found (all fixed, with offline regression tests): the Controller drawer and mode selector read
+`sessions.current`, which DSH 0.2 does not have (the panel showed "No managed task" for a bound session;
+`NexusSessionIdentity`); the seat was registered at the wrong end of the priority order and through a scope that
+does not carry `slots`; the launcher workspace handoff called a non-existent `ctx.workspaces.startSession`.
+
+**Incident to disclose.** A first page load went to host port 3080, which is the user's real Nexus install
+(macOS process started the day before, not by this work), so the Lima port forward did not bind. The page's normal
+startup created one blank session there (`sessions/--Users-kaloyannikolov-AI--/session-85e9a396-...`) and updated
+`workspace.json` / `session_projcache.json`. No file of the install was edited or deleted by this work; the
+blank session is left for the user to remove. All later runs used port 3081 inside the VM.
+
+Cannot be automated/verified here: live model turns and Controller routing on a real request, tool execution,
+Controller-owned completion on a real task (Phase 6, no authorization); the legacy chooser's catalog; Windows and
+x86_64 browser runs.
+
 ## E. CCv2 feasibility appendix
 
 **Verdict: INCONCLUSIVE for the original SIGSTOP campaign; UNSUPPORTED for enforceable external
@@ -247,39 +317,34 @@ reproduces the macOS observations exactly.
 
 ## F. Remaining blockers and follow-ups
 
-Failing or unported tests (not weakened, not hidden):
-- `ContextWireProjectorResponsesV2` — the single regression against the baseline; needs the wire
-  fixtures and the `run_code` tool-result path re-derived on the 0.2 pi-ai/executor;
-- `ContextRestrictedDshCompaction` (and V1 compaction fixtures) — 0.1.x compaction/summarizer API;
-- CCv2 host suites that assert `request.routingAuthority` in their request fixtures
-  (Active/Shadow host suites) — they already fail on the baseline for the closure/restriction reasons
-  and additionally need route attestation re-based on the selection model;
-- `Harness` (pre-existing credential-scan hit on CCv2 redaction fixtures), `NexusControllerPanel`,
-  `RegistryInstalledRuntime` — failing on the baseline for their own reasons, unchanged in kind;
-- `Test-Tiers.ps1` (live provider tiers) writes a DSH `settings.yaml` into a probe home, which DSH
-  0.2.x would import and rename; it needs the Nexus-document treatment before any live run;
-- retired with their mechanism (documented): `MuseRoutingAuthorityOrdering` (the ranking mechanism no
-  longer exists; replaced by `ControllerRouteSelection`), `NexusComposerOwnership` (composer-contract
-  patch retired), `Validate-*Preset`, `Verify-RoutingIntegrityComposition`.
+Not release blockers for Linux aarch64 review, but required before a release claim:
+- Linux x86_64: run the committed `setup.sh` (it rejects aarch64) and this matrix on a genuine x86_64 host - UNVERIFIED; the modified ARM64 test copy is not evidence for it;
+- Windows (PowerShell 5.1 and native install/upgrade/browser) - UNVERIFIED, no runner;
+- Phase 6: one bounded live engineering task (session, Controller routing, tool execution, deterministic verification, Controller-owned completion, restart, UI evidence) needs provider credentials and explicit authorization for paid calls - UNVERIFIED;
+- re-observe the legacy model chooser with credentials (the empty-control fix was applied after the last browser pass);
+- hero headline copy and PWA manifest name cannot be restored through a supported API;
+- the guard wraps `uiWorkspace.openWorkspace` because upstream keeps the pending state private; it is version-locked and reports `unavailable` (console error + `nexusWorkspaceGuard` service) on a different shape, so an upstream change cannot fail open silently, but should be re-checked on every DSH bump (propose an upstream observable);
+- 52 baseline-failing suites remain (38 CCv2 lab, 14 production-lane); the production-lane ones are `ContextRestricted{Production,Projection}V2` on an installed tree (pass from source), `Harness`, and the V1 `ContextCompaction*` F-series with hard-coded paths - none was weakened;
+- `Test-Tiers.ps1` writes a DSH `settings.yaml` into a probe home that 0.2.x would import and rename (needs the Nexus-document treatment before any live run);
+- the user's real install still has an extra blank session from the first mis-targeted page load (section H);
+- `Set-DeepSeekKey.ps1` rewrites the credentials file wholesale and drops DSH's `records:` block (regenerated; invalidates browser sessions).
 
-Product gaps: composer preference seat; brand cosmetics; workspace-transition composer guard;
-worker personas; prompt-cache evaluation of durable selections; UI click-through of the Task
-Control Room views and operator gates; a live end-to-end engineering task with provider.
-
-Platform/process: Windows PowerShell 5.1 and native Windows install/upgrade; x86_64 Linux run of
-the committed installer; the Fedora VM; macOS is not an installer platform.
-
-Security notes: DSH 0.2.x has no server-wide auth for plugin routes (now handled in Nexus);
-`dsh-subagent-codex` and the other plugins are upstream pre-release code; `Set-DeepSeekKey.ps1`
-rewrites the credentials file wholesale, which also drops DSH's `records:` browser-session secret
-(it is regenerated; existing browser sessions are invalidated) — a small hardening follow-up is to
-update only the `refs:` block.
+CCv2: unchanged. `ccv2-durable-mutation-disabled` is enforced, durable generation writers and mutating recovery stay off,
+external writer fencing is UNSUPPORTED by 0.2.2 (section E); the original fencing failure evidence is preserved.
 
 ## G. Final recommendation
 
-**PARTIALLY MIGRATED.** The backend, installer, routing, composition, security of Nexus routes,
-credentials/settings preservation and the real startup path are on `0.2.2-rc.1` and verified on
-Linux. The UI restoration is incomplete (plugin-only; cosmetics, composer seat and the workspace
-guard are not ported), the CCv2 projection suites are red, Windows and x86_64 are unverified, and
-no live provider behaviour was exercised. Do not merge as a complete migration; the next gates are
-the items in F, with the CCv2 fencing question remaining a separate architecture task.
+**READY FOR REVIEW (Linux aarch64 scope); NOT release-ready.** The migration is demonstrably working: installed
+and launched through Nexus's own scripts, exercised in a real browser against authoritative state, secured by an
+admission gate that a 208-check sweep could not breach, with 0 regressions against the baseline and four suites
+turned green. Merge only after the x86_64 and Windows gates and a bounded live task (Phase 6) are run by someone
+with those environments and credentials; keep CCv2 fencing a separate architecture task.
+
+## I. Commits on `feature/nexus-dsh-0.2-migration` (local only, none pushed)
+
+`c8eda89b` migrate runtime to 0.2.2-rc.1; `e3c5ed31` delegation single source, Doctor/profile ports; `9d0b07a3` mode selector
+and shadow host proof; `21970aee` restricted install fixture; `18e9b0ab` report and harness ports; `7d6b35bc` wire projector
+(83/0); `b819b600` workspace-transition guard; `92274bb8` composer seat and loud guard; `f9b43521` branding;
+`62bbf4ab` ordinary compaction with CCv2 disabled (7/7); `695a3b7b` browser-acceptance fixes, sweep, evidence;
+`ac6d817a` production / ccv2-lab lanes; `61321d65` panel and registry suites ported (final commit before this report update).
+Touched areas: `systems/nexus/{config,scripts,ui,tests,docs,runtime}`; no other system was modified.
