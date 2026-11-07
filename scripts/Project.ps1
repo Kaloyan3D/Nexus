@@ -9,6 +9,11 @@ $ErrorActionPreference = 'Stop'
 function Get-AihRelativePath {
     param([string]$Root, [string]$Path)
 
+    # .NET Core (PowerShell 7) has a native relative-path API. The URI fallback is only for Windows
+    # PowerShell 5.1: on macOS an absolute POSIX path parses as a RELATIVE URI, so MakeRelativeUri throws.
+    if ($null -ne ([System.IO.Path].GetMethod('GetRelativePath', [Type[]]@([string], [string])))) {
+        return [System.IO.Path]::GetRelativePath([System.IO.Path]::GetFullPath($Root), [System.IO.Path]::GetFullPath($Path))
+    }
     $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
     $pathValue = [System.IO.Path]::GetFullPath($Path)
     $rootUri = [Uri]$rootPath

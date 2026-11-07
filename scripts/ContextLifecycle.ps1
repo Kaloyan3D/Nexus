@@ -36,6 +36,35 @@ $AihContextOperationSchemaVersion = 1
 # apply-pending  = frozen operation persisted, replacement not yet appended.
 # awaiting-durability = replacement appended in memory, durability unconfirmed.
 $AihContextLifecycleStates = @('inactive', 'eligible', 'checkpoint-ready', 'apply-pending', 'awaiting-durability', 'applied', 'blocked')
+function ConvertTo-AihUtcInstant {
+    # Lease/identity timestamps are written as ISO-8601 strings but ConvertFrom-Json (PowerShell 7) hands
+    # them back as DateTime objects; `[string]$dateTime` is culture-formatted (day/month order differs by
+    # locale), so re-parsing it with the CURRENT culture can swap day and month. Always keep the instant:
+    # DateTime/DateTimeOffset pass through, strings parse with the invariant culture. $null when unreadable.
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [DateTimeOffset]) { return $Value.UtcDateTime }
+    if ($Value -is [datetime]) {
+        $instant = [datetime]$Value
+        if ($instant.Kind -eq [DateTimeKind]::Unspecified) { $instant = [DateTime]::SpecifyKind($instant, [DateTimeKind]::Utc) }
+        return $instant.ToUniversalTime()
+    }
+    $parsed = [DateTime]::MinValue
+    $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+    if ([DateTime]::TryParse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$parsed)) { return $parsed }
+    return $null
+}
+
+function Test-AihRecordedProcessStart {
+    # True when the recorded process start (absent counts as unknown-but-compatible, as before) names the
+    # same instant as the live process start, within 2 seconds.
+    param($Recorded, [datetime]$ActualStartUtc)
+    if ($null -eq $Recorded -or ($Recorded -is [string] -and [string]::IsNullOrWhiteSpace($Recorded))) { return $true }
+    $recordedUtc = ConvertTo-AihUtcInstant $Recorded
+    if ($null -eq $recordedUtc) { return $false }
+    return ([Math]::Abs(($recordedUtc - $ActualStartUtc.ToUniversalTime()).TotalSeconds) -lt 2)
+}
+
 function Get-AihContextLifecycleThreshold {
     param([int]$Override = -1)
     if ($Override -ge 0) {
@@ -155,10 +184,9 @@ function Invoke-AihContextUsageTransaction {
                         if ([int]::TryParse([string]$existing.ownerPid, [ref]$ePid) -and ($ePid -gt 0)) {
                             try {
                                 $proc = Get-Process -Id $ePid -ErrorAction Stop
-                                $started = $proc.StartTime.ToUniversalTime().ToString('o')
                                 $recorded = $null
-                                if ($null -ne $existing.PSObject.Properties['ownerProcessStartUtc']) { $recorded = [string]$existing.ownerProcessStartUtc }
-                                $ownerAlive = ([string]::IsNullOrWhiteSpace($recorded) -or ($started -eq $recorded))
+                                if ($null -ne $existing.PSObject.Properties['ownerProcessStartUtc']) { $recorded = $existing.ownerProcessStartUtc }
+                                $ownerAlive = (Test-AihRecordedProcessStart -Recorded $recorded -ActualStartUtc $proc.StartTime.ToUniversalTime())
                             } catch { $ownerAlive = $false }
                         }
                     }
@@ -1589,20 +1617,19 @@ function Invoke-AihCompactionApplyLockAcquire {
                     return [pscustomobject][ordered]@{ acquired = $false; reason = 'held-by-other-operation' }
                 }
                 $expiry = [DateTime]::MinValue
-                if ($null -ne $existing.PSObject.Properties['expiresAtUtc']) { [void][DateTime]::TryParse([string]$existing.expiresAtUtc, [ref]$expiry) }
+                if ($null -ne $existing.PSObject.Properties['expiresAtUtc']) { $parsedExpiry = ConvertTo-AihUtcInstant $existing.expiresAtUtc; if ($null -ne $parsedExpiry) { $expiry = $parsedExpiry } }
                 if ($expiry -gt [DateTime]::UtcNow) { return [pscustomobject][ordered]@{ acquired = $false; reason = 'held-by-live-owner' } }
                 $renewedAt = [DateTime]::MinValue
-                if ($null -ne $existing.PSObject.Properties['renewedAtUtc']) { [void][DateTime]::TryParse([string]$existing.renewedAtUtc, [ref]$renewedAt) }
+                if ($null -ne $existing.PSObject.Properties['renewedAtUtc']) { $parsedRenewed = ConvertTo-AihUtcInstant $existing.renewedAtUtc; if ($null -ne $parsedRenewed) { $renewedAt = $parsedRenewed } }
                 $ownerPid = 0
                 if ($null -ne $existing.PSObject.Properties['ownerPid']) { [void][int]::TryParse([string]$existing.ownerPid, [ref]$ownerPid) }
                 $ownerAlive = $false
                 if ($ownerPid -gt 0) {
                     try {
                         $proc = Get-Process -Id $ownerPid -ErrorAction Stop
-                        $started = $proc.StartTime.ToUniversalTime().ToString('o')
                         $recorded = $null
-                        if ($null -ne $existing.PSObject.Properties['ownerProcessStartUtc']) { $recorded = [string]$existing.ownerProcessStartUtc }
-                        $ownerAlive = ([string]::IsNullOrWhiteSpace($recorded) -or ($started -eq $recorded))
+                        if ($null -ne $existing.PSObject.Properties['ownerProcessStartUtc']) { $recorded = $existing.ownerProcessStartUtc }
+                        $ownerAlive = (Test-AihRecordedProcessStart -Recorded $recorded -ActualStartUtc $proc.StartTime.ToUniversalTime())
                     } catch { $ownerAlive = $false }
                 }
                 # Takeover requires BOTH expiry AND no defensible liveness:

@@ -107,6 +107,7 @@ $suites = @(
     [ordered]@{ name='AihControllerIdentity'; script='tests/AihControllerIdentity.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='NexusControllerPanel'; script='tests/NexusControllerPanel.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='PlatformSupport'; script='tests/PlatformSupport.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='PlatformPortability'; script='tests/PlatformPortability.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='StartupProviderIsolation'; script='tests/StartupProviderIsolation.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='PowerShellPortability'; script='tests/PowerShellPortability.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='RegistryInstalledRuntime'; script='tests/RegistryInstalledRuntime.Tests.cjs'; executable=$layout.Node; kind='node' },

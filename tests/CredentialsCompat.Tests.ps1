@@ -66,7 +66,7 @@ try {
         Pass "($($case.Name)) Nexus credential readers still resolve both keys after the DSH rewrite"
 
         if (-not (Test-AihIsWindows)) {
-            $mode = (& stat -c '%a' $credentials).Trim()
+            $mode = if ((Get-AihPlatformName) -eq 'macos') { (& stat -f '%Lp' $credentials).Trim() } else { (& stat -c '%a' $credentials).Trim() }
             if ($mode -ne '600') { throw "FAIL: ($($case.Name)) credentials file mode is $mode, expected 600." }
             Pass "($($case.Name)) credentials file keeps owner-only permissions"
         }
