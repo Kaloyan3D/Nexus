@@ -30,7 +30,7 @@
  * (it only affects prompt_cache_retention, never the counted subset).
  */
 
-const RESPONSES_WIRE_REVISION_V1 = 'responses-wire-pi-ai-0.82-dsh-0.1.1-rc.2-v2-reasoning-replay';
+const RESPONSES_WIRE_REVISION_V1 = 'responses-wire-pi-ai-1.5-dsh-0.2.2-rc.1-v3-tool-role-foreign-reasoning-dropped';
 const RESPONSES_API = 'openai-responses';
 // pi-ai constants (dist/api/openai-responses.js, simple-options.js,
 // openai-prompt-cache.js, utils/estimate.js, models.js).
@@ -473,25 +473,42 @@ function toPiMessagesV2(messages) {
   for (const message of messages) {
     if (!isPlainObject(message) || !Array.isArray(message.content)) failWire('input-invalid', 'every message needs content blocks');
     if (message.role === 'system') {
-      out.push({ role: 'user', content: flattenTextV2(message) });
+      // dsh-llm-pi-ai 0.2 appendSharedHistory: a system message after the leading
+      // run reaches a route as a <system-reminder> user message unless the route
+      // offers supportsMidConvoSystemMessages. Nexus routes cannot offer it (the
+      // compat flag is withheld from configuration), so the reminder form is the
+      // only one a Nexus route can produce.
+      const content = flattenTextV2(message);
+      if (content.length > 0) {
+        out.push({ role: 'user', content: '<system-reminder>\n' + content.replaceAll('</system-reminder>', '<\\/system-reminder>') + '\n</system-reminder>' });
+      }
       continue;
     }
+    if (message.role === 'developer') failWire('unsupported-content', 'developer-role messages (tool changes) are not projected');
     if (message.role === 'assistant') {
       out.push(toPiAssistantV2(message));
       continue;
     }
-    if (message.role !== 'user') failWire('unsupported-content', 'unknown message role');
-    const text = flattenTextV2(message);
-    const results = message.content.filter((block) => isPlainObject(block) && block.type === 'tool-result');
-    if (text.length > 0 || results.length === 0) out.push({ role: 'user', content: text });
-    for (const result of results) {
+    if (message.role === 'tool') {
+      // DSH 0.2 tool results are tool-role messages (toolCallId, content blocks, isError).
+      if (typeof message.toolCallId !== 'string') failWire('input-invalid', 'tool message needs toolCallId');
       out.push({
         role: 'toolResult',
-        toolCallId: result.toolCallId,
-        content: [{ type: 'text', text: toolResultTextV2(result.content) || '(no output)' }],
-        isError: result.isError === undefined ? false : result.isError,
+        toolCallId: message.toolCallId,
+        content: [{ type: 'text', text: flattenTextV2(message) || '(no output)' }],
+        isError: message.isError === undefined ? false : message.isError,
       });
+      continue;
     }
+    if (message.role !== 'user') failWire('unsupported-content', 'unknown message role');
+    // The pre-0.2 shape (a user message carrying tool-result blocks) is never
+    // produced by DSH 0.2: the real adapter would post "No result provided" and
+    // an empty user turn for it. Refuse it so a projection can never claim bytes
+    // the adapter would not send.
+    if (message.content.some((block) => isPlainObject(block) && block.type === 'tool-result')) {
+      failWire('unsupported-content', 'user-role tool-result blocks are not a DSH 0.2 request shape; tool results are tool-role messages');
+    }
+    out.push({ role: 'user', content: flattenTextV2(message) });
   }
   return out;
 }
@@ -558,13 +575,16 @@ function transformMessagesV2(route, messages) {
     const content = [];
     for (const block of msg.content) {
       if (block.type === 'thinking') {
-        if (block.redacted) {
-          if (isSameModel) content.push(block);
-          continue;
-        }
-        if (isSameModel && block.thinkingSignature) { content.push(block); continue; }
+        // pi-ai 1.5 transformMessages: thinking from another model is DROPPED
+        // (pi-ai 0.82 re-sent it as visible text). Signatures/encrypted reasoning
+        // are only valid for the producing model, and readable foreign reasoning
+        // must not become part of the next model's visible context. This is the
+        // conservative direction for Nexus reasoning continuity: reasoning never
+        // crosses a model boundary, and only text/tool content is carried over.
+        if (!isSameModel) continue;
+        if (block.redacted || block.thinkingSignature) { content.push(block); continue; }
         if (!block.thinking || block.thinking.trim() === '') continue;
-        content.push(isSameModel ? block : { type: 'text', text: block.thinking });
+        content.push(block);
         continue;
       }
       if (block.type === 'text') {
@@ -743,8 +763,17 @@ function projectResponsesWireV2(input) {
   if (route.reasoningReplay === REASONING_REPLAY_NONE && request.messages.some(assistantHasReasoningV2)) {
     failWire('reasoning-replay-forbidden', 'route forbids historical reasoning replay');
   }
-  const piMessages = toPiMessagesV2(request.messages);
-  const systemPrompt = request.system;
+  // dsh-llm-pi-ai 0.2 splitSystemPrompt: the leading run of system messages is
+  // appended to the system prompt (blank-line separated, empty parts dropped).
+  let leading = 0;
+  const systemParts = [request.system];
+  for (const message of request.messages) {
+    if (message.role !== 'system') break;
+    systemParts.push(flattenTextV2(message));
+    leading += 1;
+  }
+  const systemPrompt = systemParts.filter(Boolean).join('\n\n') || undefined;
+  const piMessages = toPiMessagesV2(request.messages.slice(leading));
   const tools = Array.isArray(request.tools) && request.tools.length > 0
     ? request.tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }))
     : undefined;
