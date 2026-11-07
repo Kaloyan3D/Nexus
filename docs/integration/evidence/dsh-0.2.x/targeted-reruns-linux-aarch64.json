@@ -1,0 +1,10 @@
+{
+  "note": "Suites fixed after the full lane runs; each rerun on the same clean-installed tree (nx-cand) after syncing the changed test files",
+  "reruns": [
+    {"suite": "NexusControllerPanel", "before": "FAIL (baseline FAIL too: stale fixtures, pwsh crash on macOS)", "after": "PASS exit 0 ('PASS: nexus controller panel state layer')", "changes": "fake host provides connection.admit; services lists include uiWorkspace/modelDirectories/sessions; nexus-settings.yaml fixture name; retired NexusComposerOwnership chain removed"},
+    {"suite": "RegistryInstalledRuntime", "before": "FAIL 0/3 (baseline FAIL)", "after": "PASS 3/3", "changes": "controller injects webServer+connection; registry mode list includes engineering-v2-jobs (mode already in config/registry/modes on main); pwsh path captured before the test rewrites AIH_INSTALL_ROOT"},
+    {"suite": "ContextRestrictedProductionV2", "run": "source tree against installed runtime (AIH_HOST_APP), git identity set", "after": "PASS 50/50"},
+    {"suite": "ContextRestrictedProjectionV2", "run": "source tree against installed runtime", "after": "PASS 13/13"},
+    {"suite": "ContextRestrictedDshCompaction", "run": "production lane and source tree", "after": "PASS 7/7 (was FAIL on baseline)"}
+  ]
+}

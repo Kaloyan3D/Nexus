@@ -1,4 +1,5 @@
 'use strict'
+const REAL_PWSH = require('node:path').join(process.env.NEXUS_RUNTIME_ROOT || process.env.AIH_INSTALL_ROOT || require('node:path').join(require('node:os').homedir(), '.local/share/nexus'), 'runtime/pwsh/pwsh') // captured before the test rewrites AIH_INSTALL_ROOT
 
 // Exercise Node's real ESM loader against the installed package, never a
 // rewritten source entrypoint. Installer tests execute their actual copy blocks
@@ -49,7 +50,7 @@ function closure(root) {
   // rest of the Registry directory (EM-04C2; active/selectable/runnable since S10-A, never persisted
   // until an operator saves a configuration)
   const listed = svc.listModes().modes
-  assert.deepEqual(listed.map(m => m.id), ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v3'])
+  assert.deepEqual(listed.map(m => m.id), ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v2-jobs', 'engineering-v3'])
   const adaptive = listed.find(m => m.id === 'engineering-v2-adaptive')
   assert.equal(adaptive.status, 'active')
   assert.equal(adaptive.selectable, true)
@@ -70,10 +71,10 @@ async function main() {
     delete process.env.AIH_INSTALL_ROOT
     const controller = await import(pathToFileURL(probe).href)
     let initialize
-    controller.apply({ inject(names, callback) { assert.deepEqual(names, ['webServer']); initialize = callback } })
+    controller.apply({ inject(names, callback) { assert.deepEqual(names, ['webServer', 'connection']); initialize = callback } })
     const boot = () => {
       const routes = new Map()
-      initialize({ effect(fn) { fn() }, webServer: { register(route) {
+      initialize({ effect(fn) { fn() }, connection: { admit: () => ({ peer: {} }) }, webServer: { register(route) {
         assert.equal(route.kind, 'exact'); assert.ok(!routes.has(route.path)); routes.set(route.path, route.handler); return () => {}
       } } })
       return routes
@@ -99,7 +100,7 @@ async function main() {
         writeHead(code) { status = code }, end(text) { body = JSON.parse(text) }
       })
       assert.equal(status, 200)
-      assert.deepEqual(body.modes.map(m => m.id).sort(), ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v3'])
+      assert.deepEqual(body.modes.map(m => m.id).sort(), ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v2-jobs', 'engineering-v3'])
       // the opt-in adaptive mode is listed honestly: selectable and runnable, but with no saved configuration
       const optIn = body.modes.find(m => m.id === 'engineering-v2-adaptive')
       assert.equal(optIn.selectable, true)
@@ -141,7 +142,7 @@ async function main() {
     const script = path.join(scratch, 'copy-registry.ps1')
     fs.writeFileSync(script, "param($sourceRoot, $installRoot)\n$ErrorActionPreference = 'Stop'\n$layout = @{ Config = (Join-Path $installRoot 'config') }\n" + helper[0] + '\n' + block[0])
     const host = process.env.AIH_PWSH_HOST || (process.platform === 'win32' ? 'powershell.exe'
-      : path.join(os.homedir(), '.local/share/nexus/runtime/pwsh/pwsh'))
+      : REAL_PWSH)
     for (let i = 0; i < 2; i++) execFileSync(host, ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script, repo, root])
     closure(root)
     // Source-root installs must also be safe (Copy-AihSourceFile skips self-copy).

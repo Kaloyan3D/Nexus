@@ -528,7 +528,7 @@ async function main() {
 
       // 11b. webServer becomes available later → the injection callback
       // applies and BOTH routes register (Cordis lifecycle semantics).
-      assert.doesNotThrow(() => injectCallback({ webServer: fakeWebServer, effect(fn) { fn(); return () => {} } }), 'injection callback must apply cleanly once the service exists')
+      assert.doesNotThrow(() => injectCallback({ webServer: fakeWebServer, connection: { admit: () => ({ peer: {} }) }, effect(fn) { fn(); return () => {} } }), 'injection callback must apply cleanly once the service exists')
       assert.equal(captured.length, 33, 'all routes must register after webServer becomes available (30 pre-R5 plus 3 R5 connections endpoints)')
       const paths = captured.map((spec) => spec.path).sort()
       assert.deepEqual(paths, ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/registry/v1/catalog', '/nexus/registry/v1/configuration', '/nexus/registry/v1/connections', '/nexus/registry/v1/connections/check', '/nexus/registry/v1/connections/delete', '/nexus/registry/v1/connections/disable', '/nexus/registry/v1/connections/discover', '/nexus/registry/v1/connections/list', '/nexus/registry/v1/connections/status', '/nexus/registry/v1/eligible', '/nexus/registry/v1/models', '/nexus/registry/v1/models/delete', '/nexus/registry/v1/models/disable', '/nexus/registry/v1/modes', '/nexus/registry/v1/preview', '/nexus/registry/v1/providers', '/nexus/registry/v1/providers/delete', '/nexus/registry/v1/providers/disable', '/nexus/registry/v1/providers/discover', '/nexus/registry/v1/providers/test', '/nexus/registry/v1/routes', '/nexus/registry/v1/routes/delete', '/nexus/registry/v1/routes/disable', '/nexus/registry/v1/routes/evidence', '/nexus/registry/v1/routes/project', '/nexus/registry/v1/routes/verify', '/nexus/registry/v1/validate', '/nexus/workspace-registration.json'])
@@ -629,6 +629,9 @@ async function main() {
       // the service appears AFTER the plugin activated — the deferred
       // injection resolves and the route registers.
       root.provide('webServer', fakeWebServer)
+      await tick(200)
+      assert.equal(registered.length, 0, 'real cordis: with webServer but WITHOUT the connection service no route registers (admission cannot be skipped)')
+      root.provide('connection', { admit: () => ({ peer: {} }) })
       for (let i = 0; i < 60 && registered.length < 5; i++) await tick(50)
       assert.equal(registered.length, 33, 'real cordis: all routes register after webServer becomes available')
       assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/registry/v1/catalog', '/nexus/registry/v1/configuration', '/nexus/registry/v1/connections', '/nexus/registry/v1/connections/check', '/nexus/registry/v1/connections/delete', '/nexus/registry/v1/connections/disable', '/nexus/registry/v1/connections/discover', '/nexus/registry/v1/connections/list', '/nexus/registry/v1/connections/status', '/nexus/registry/v1/eligible', '/nexus/registry/v1/models', '/nexus/registry/v1/models/delete', '/nexus/registry/v1/models/disable', '/nexus/registry/v1/modes', '/nexus/registry/v1/preview', '/nexus/registry/v1/providers', '/nexus/registry/v1/providers/delete', '/nexus/registry/v1/providers/disable', '/nexus/registry/v1/providers/discover', '/nexus/registry/v1/providers/test', '/nexus/registry/v1/routes', '/nexus/registry/v1/routes/delete', '/nexus/registry/v1/routes/disable', '/nexus/registry/v1/routes/evidence', '/nexus/registry/v1/routes/project', '/nexus/registry/v1/routes/verify', '/nexus/registry/v1/validate', '/nexus/workspace-registration.json'])
@@ -699,7 +702,7 @@ async function main() {
     vm.createContext(sandbox)
     vm.runInContext(code, sandbox)
     assert.ok(moduleExports, 'client bundle must export a module')
-    assert.equal(JSON.stringify(moduleExports.inject), JSON.stringify(['slots', 'workspaces']), 'client services')
+    assert.equal(JSON.stringify(moduleExports.inject), JSON.stringify(['slots', 'workspaces', 'uiWorkspace']), 'client services')
 
     const injectedServices = []
     const fakeCtx = {
@@ -721,7 +724,7 @@ async function main() {
       },
     }
     moduleExports.apply(fakeCtx)
-    assert.deepEqual(injectedServices, ['nexusModeState'], 'composer mode ownership rides the shared nexusModeState service')
+    assert.deepEqual(injectedServices, ['nexusModeState', 'modelDirectories', 'sessions'], 'composer mode ownership rides the shared nexusModeState service; the model seat injects modelDirectories + sessions')
     assert.deepEqual(injected.map((i) => i.name), ['shell.overlay', 'conversation.session.header.actions', 'conversation.input.right'])
     assert.equal(registered.length, 3)
     assert.equal(registered[0].spec.name, 'shell.overlay')
@@ -1095,7 +1098,7 @@ async function main() {
 
     // The drawer still renders independently (controller panel intact).
     const Drawer = null // resolved through the mini-core path in group 13; here assert bundle exports
-    assert.equal(JSON.stringify(moduleExports.inject), JSON.stringify(['slots', 'workspaces']))
+    assert.equal(JSON.stringify(moduleExports.inject), JSON.stringify(['slots', 'workspaces', 'uiWorkspace']))
     assert.equal(typeof moduleExports.apply, 'function')
   }
 
@@ -1883,7 +1886,7 @@ async function main() {
       let captured = []
       let injectCallback = null
       plugin.apply({ inject(keys, cb) { injectCallback = cb }, effect() { return () => {} } })
-      injectCallback({ webServer: { register(spec) { captured.push(spec) } }, effect(fn) { fn(); return () => {} } })
+      injectCallback({ webServer: { register(spec) { captured.push(spec) } }, connection: { admit: () => ({ peer: {} }) }, effect(fn) { fn(); return () => {} } })
       const roomRoute = captured.find((spec) => spec.path === '/nexus/control-room.json')
       assert.ok(roomRoute, 'control-room route must register')
       const res = {
@@ -2924,6 +2927,7 @@ async function main() {
       })
       injectCallback({
         webServer: { register(spec) { captured.push(spec) } },
+        connection: { admit: () => ({ peer: {} }) },
         effect(fn) { fn(); return () => {} },
       })
       const engineeringRoute = captured.find((spec) => spec.path === '/nexus/engineering-profile.json')
@@ -3052,7 +3056,7 @@ async function main() {
       // stateful leftovers from earlier cases must never leak into the next
       fs.rmSync(path.join(dataRoot, 'routing'), { recursive: true, force: true })
       fs.rmSync(path.join(dataRoot, 'custom-engineering-profile.json'), { force: true })
-      const files = { 'settings.yaml': settingsText }
+      const files = { 'nexus-settings.yaml': settingsText }
       if (overrides.files) Object.assign(files, overrides.files)
       delete overrides.files
       writeTree(dataRoot, files)
@@ -3487,8 +3491,8 @@ async function main() {
     // editor fields) and in NexusProfiles.Tests.cjs sections 6a/6b.
   }
 
-  require('./NexusComposerOwnership.Tests.cjs')()
-  await require('./NexusModeContract.Tests.cjs')()
+  // NexusComposerOwnership was retired with the 0.1.x composer patch (its contract is now
+  // NexusComposerSeat); NexusModeContract runs as its own harness suite.
   console.log('PASS: nexus controller panel state layer')
 }
 
