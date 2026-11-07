@@ -20,9 +20,19 @@ const ROOT = path.resolve(__dirname, '..')
 let passed = 0
 function pass(name) { passed++; console.log('PASS: ' + name) }
 
+// The default for NEW sessions is saved through the Nexus-owned route (DSH 0.2 pins the preset registry
+// from the home patch, so its settings namespace refuses writes). The sink is per makeModeScope().
+let defaultPostSink = []
+const routeFetch = async (url, init) => {
+  assert.equal(url, '/nexus/mode-default.json')
+  assert.equal(init && init.method, 'POST')
+  defaultPostSink.push(JSON.parse(init.body).preset)
+  return { ok: true, status: 200 }
+}
 function loadModule(relPath, requireMap) {
   let plugin = null
   const sandbox = {
+    fetch: routeFetch,
     window: {
       __ModuleLoader__: {
         load(def) { plugin = def.factory((name) => (requireMap && requireMap[name] !== undefined) ? requireMap[name] : (() => ({}))) },
@@ -48,6 +58,7 @@ function makeModeScope(options) {
   const selectCalls = []
   const modelSelectCalls = []
   const defaultPatches = []
+  defaultPostSink = defaultPatches
   let failSelection = false
   const scope = {
     slots: { inject(_name, fn) { return fn() }, register(spec, component) { scope._registered.push({ spec, component }); return () => {} } },
