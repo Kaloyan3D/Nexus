@@ -205,7 +205,7 @@ foreach ($contract in @(
     'priority: -100',
     'remote.agentPresets.select',
     'modelDirectories.directoryFor',
-    'remote.settings.update',
+    '/nexus/mode-default.json',
     'remote.agentPresets',
     'if (!session.blank)'
 )) {

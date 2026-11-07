@@ -140,11 +140,15 @@ window.__ModuleLoader__.load({
       }
 
       async function persistDefault(id) {
-        // DSH 0.2 Remote methods validate their arity: the third argument is the expected
-        // revision, and an explicit `undefined` is the documented unconditional merge (the
-        // patch touches only `selectedDefault`).
-        const result = await remote.settings.update(AGENT_PRESET_SETTINGS_NS, { selectedDefault: id }, void 0);
-        if (!result.ok) throw new Error(result.error.message || "Failed to persist the Nexus mode.");
+        // DSH 0.2 pins the agent-preset registry from the generated home patch (the settings
+        // namespace refuses writes), so the default for NEW sessions is saved through the
+        // Nexus-owned, admission-gated route that writes nexus-settings.yaml.
+        const response = await fetch("/nexus/mode-default.json", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ preset: id })
+        });
+        if (!response.ok) throw new Error("Failed to persist the Nexus mode (" + response.status + ").");
       }
 
       async function syncModel(sessionId, id, effectiveId) {

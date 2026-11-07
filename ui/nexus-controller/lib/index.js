@@ -626,6 +626,59 @@ function apply(ctx) {
       }
     }
 
+    /** POST /nexus/mode-default.json  { preset }
+     *
+     * Persist the operator's mode choice as the default for NEW sessions. DSH 0.2.x pins the
+     * agent-preset registry from the generated home patch (its settings namespace refuses
+     * writes), so the Nexus-owned nexus-settings.yaml is written through the launcher's own
+     * atomic writer (scripts/NexusModeDefault.ps1). The body carries only a whitelisted preset
+     * id - never a path - and the route is admission-gated like every /nexus/* route.
+     */
+    const MODE_DEFAULT_PRESETS = new Set(['aih-engineering', 'aih-deepseek'])
+    const modeDefaultHandler = async (req, res) => {
+      const respond = (statusCode, body) => {
+        res.writeHead(statusCode, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(JSON.stringify(body))
+      }
+      if (req.method !== 'POST') {
+        respond(405, { ok: false, error: 'method-not-allowed' })
+        return
+      }
+      const request = await readJsonBody(req)
+      const preset = request && typeof request.preset === 'string' ? request.preset : ''
+      if (!MODE_DEFAULT_PRESETS.has(preset)) {
+        respond(400, { ok: false, error: 'unsupported-preset' })
+        return
+      }
+      let payloadPath = null
+      try {
+        payloadPath = writePayloadFile({ preset })
+        const result = await new Promise((resolvePromise) => {
+          execFile(
+            pwshHost,
+            ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'NexusModeDefault.ps1'), '-InstallRoot', installRoot, '-PayloadFile', payloadPath],
+            { timeout: 60000, maxBuffer: 1024 * 1024, windowsHide: true },
+            (error, stdout) => {
+              if (error) { resolvePromise(null); return }
+              try { resolvePromise(JSON.parse((stdout || '').trim())) } catch { resolvePromise(null) }
+            },
+          )
+        })
+        if (!result || result.ok !== true || result.preset !== preset) {
+          respond(500, { ok: false, error: 'mode-default-not-saved' })
+          return
+        }
+        respond(200, { ok: true, preset })
+      } catch {
+        respond(500, { ok: false, error: 'mode-default-failed' })
+      } finally {
+        if (payloadPath) { try { unlinkSync(payloadPath) } catch { /* best-effort cleanup */ } }
+      }
+    }
+
     webCtx.effect(
       () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/controller.json', handler: protect(webCtx, handler) }),
       'nexus-controller: read-only state route',
@@ -649,6 +702,10 @@ function apply(ctx) {
     webCtx.effect(
       () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/workspace-registration.json', handler: protect(webCtx, workspaceRegistrationHandler) }),
       'nexus-controller: Phase 3.1 workspace registration route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/mode-default.json', handler: protect(webCtx, modeDefaultHandler) }),
+      'nexus-controller: default-mode persistence route',
     )
 
     // ── Registry R3 (TASK-0047): Nexus-owned staged configuration API ──

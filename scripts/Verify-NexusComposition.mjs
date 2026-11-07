@@ -9,11 +9,12 @@
 // preset mounted (a failed activation stays visible as `broken`).
 // No provider request is made: this proves composition and activation only.
 //
-// Exit codes: 0 = every Nexus plane mounted and every stock preset is absent;
+// Exit codes: 0 = every Nexus plane mounted, every stock preset is absent and the registry default is the
+// default declared in nexus-settings.yaml;
 // 1 = composition failure; 2 = usage error. The process always exits itself.
 
 import { createRequire } from 'node:module'
-import { writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -46,7 +47,12 @@ try {
   evidence.stockPresetsPresent = STOCK.filter((id) => byId.has(id))
   const inspections = registry.inspectCompositions()
   evidence.compositions = inspections.map((c) => ({ preset: c.presetId ?? c.agentPreset ?? c.id ?? null, keys: Object.keys(c), modules: (c.modules ?? c.activeModules ?? []).length, leakedServices: c.leakedServices ?? [] }))
-  evidence.ok = NEXUS_PLANES.every((id) => evidence.planes[id] === 'mounted') && evidence.stockPresetsPresent.length === 0 && evidence.defaultPreset === 'aih-engineering'
+  // The composition's default must be exactly the default the Nexus settings declare (the operator's
+  // saved choice, one of the Nexus planes), not a hard-coded plane.
+  const settingsFile = [join(root, 'data', 'nexus-settings.yaml'), join(root, 'config', 'settings.yaml')].find((file) => existsSync(file))
+  const declared = settingsFile ? (appRequire('js-yaml').load(readFileSync(settingsFile, 'utf8')) || {})['agent-presets']?.default : undefined
+  evidence.expectedDefaultPreset = declared ?? null
+  evidence.ok = NEXUS_PLANES.every((id) => evidence.planes[id] === 'mounted') && evidence.stockPresetsPresent.length === 0 && NEXUS_PLANES.includes(declared) && evidence.defaultPreset === declared
 } catch (error) {
   evidence.ok = false
   evidence.error = String(error && error.stack ? error.stack : error).slice(0, 2000)

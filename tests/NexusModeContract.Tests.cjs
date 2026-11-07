@@ -11,7 +11,11 @@ const path = require('node:path')
 const vm = require('node:vm')
 async function main() {
   let plugin
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../ui/nexus-mode-selector/lib/client.js'),'utf8'),{window:{__ModuleLoader__:{load(def){plugin=def.factory(()=>({}))}}}})
+  // The default for NEW sessions is saved through the Nexus-owned route (DSH 0.2 pins the preset
+  // registry from the home patch, so its settings namespace refuses writes).
+  const fetchCalls = []
+  const fetchStub = async (url, init) => { fetchCalls.push({ url, method: init && init.method, body: JSON.parse((init && init.body) || '{}') }); return { ok: true, status: 200 } }
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../ui/nexus-mode-selector/lib/client.js'),'utf8'),{fetch:fetchStub,window:{__ModuleLoader__:{load(def){plugin=def.factory(()=>({}))}}}})
   let current = {current:'s',byId:{s:{id:'s',blank:true,projectionValues:{agentPreset:'aih-engineering'}}}}
   const subscribers = new Set(), calls = [], registered = [], settingsWrites = []
   let failLoad = false, rejectSelection = false
@@ -47,7 +51,8 @@ async function main() {
   await switching
   assert.equal(current.byId.s.projectionValues.agentPreset,'aih-deepseek','host-confirmed preset reaches the session summary through the projection')
   assert.equal(scope.nexusModeState.getSnapshot().current,'aih-deepseek')
-  assert.ok(settingsWrites.length >= 1 && settingsWrites[settingsWrites.length-1].patch.selectedDefault === 'aih-deepseek', 'the chosen mode is persisted as the registry selectedDefault')
+  assert.equal(settingsWrites.length, 0, 'the refused DSH preset-registry settings namespace is no longer written')
+  assert.ok(fetchCalls.length >= 1 && fetchCalls[fetchCalls.length-1].url === '/nexus/mode-default.json' && fetchCalls[fetchCalls.length-1].method === 'POST' && fetchCalls[fetchCalls.length-1].body.preset === 'aih-deepseek', 'the chosen mode is persisted through the Nexus default-mode route')
   await controls.select('aih-engineering')
   assert.equal(current.byId.s.projectionValues.agentPreset,'aih-engineering')
   current={current:undefined,byId:{}}
