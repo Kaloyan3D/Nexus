@@ -7,6 +7,8 @@
  * only: oversize-mandatory => null/KEEP, never truncation/split.
  */
 const assert = require('node:assert/strict');
+// DSH 0.2.x removed `session.events`; read the log through the single supported adapter.
+const { sessionEvents: eventsOf } = require('../config/Dsh-SessionEvents.cjs');
 const fs = require('node:fs');
 const path = require('node:path');
 const repoRoot = path.resolve(__dirname, '..');
@@ -25,7 +27,7 @@ const { Session } = dsh;
 const OPTS = { maxTailNodes: 6, maxTailChars: 6000, minShadowed: 1 };
 function tailCharsOf(session, cut) {
   let total = 0;
-  for (const seq of cut.retainedSeqs) total += JSON.stringify(session.events[seq].data).length;
+  for (const seq of cut.retainedSeqs) total += JSON.stringify(eventsOf(session)[seq].data).length;
   return total;
 }
 function textSession(texts) {
@@ -90,10 +92,10 @@ function calibratedSession(wantTotal) {
   const append = (t, d, o) => s.append(t, d, o);
   append('user/message', { role: 'user', content: [{ type: 'text', text: 'bulk' }], source: { kind: 'user' } }, { surfaceOp: 'append' });
   append('assistant/message', { turn: 2, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'GIANT' + 'Z'.repeat(100000) }] }, source: { kind: 'model' } }, { surfaceOp: 'append' });
-  const before = s.events.length;
+  const before = eventsOf(s).length;
   const cut = compaction.balancedRetainCut(s, OPTS);
   check(cut === null, 'F9-D: 100k node => KEEP');
-  check(s.events.length === before, 'F9-D: zero mutation on KEEP');
+  check(eventsOf(s).length === before, 'F9-D: zero mutation on KEEP');
 }
 // Normal multi-node 1700+1800+2000=5500 compacts; +1500 older excluded.
 {

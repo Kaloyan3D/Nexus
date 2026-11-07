@@ -19,6 +19,8 @@
  */
 
 const assert = require('node:assert/strict');
+// DSH 0.2.x removed `session.events`; read the log through the single supported adapter.
+const { sessionEvents: eventsOf } = require('../config/Dsh-SessionEvents.cjs');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -137,7 +139,7 @@ pass('BEFORE: model projection carries the full historical bulk');
 const observedEffectiveInput = 145000;
 assert.ok(observedEffectiveInput >= 120000);
 pass('BEFORE: observed root effective input is above the 120000 threshold');
-const rawLogLengthBefore = session.events.length;
+const rawLogLengthBefore = eventsOf(session).length;
 
 // AFTER: controller-owned checkpoint through the bridge freeze helper plus
 // the supported replace seam (same call order as maybeApplyContextCompaction).
@@ -179,7 +181,7 @@ for (const segment of frozenSegments) {
     role: 'user',
     content: [{ type: 'text', text: checkpointText }],
     source: { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', taskId: 'TASK-0004', operationId: OPERATION_ID },
-  }, { surfaceOp: { op: 'replace', start: segment.start, end: segment.end }, sourceEventSeqs: segment.sourceEventSeqs });
+  }, { surfaceOp: { op: 'replace', startSeq: segment.start, endSeq: segment.end }, sourceEventSeqs: segment.sourceEventSeqs });
   appendedSeqs.push(node.seq);
 }
 // F1 path B: the CURRENT authoritative snapshot is refreshed after the
@@ -201,7 +203,7 @@ assert.ok(afterText.includes('Final report: TASK-0004 complete'));
 pass('AFTER: continuity tail survives alongside the checkpoint');
 assert.ok(afterText.includes('supersedes earlier runtime-context snapshots'));
 pass('FIRST request after compaction retains authoritative dynamic policy (F1)');
-assert.equal(session.events.length, rawLogLengthBefore + frozenSegments.length + 1);
+assert.equal(eventsOf(session).length, rawLogLengthBefore + frozenSegments.length + 1);
 pass('user-visible session log remains intact (append-only, nothing deleted)');
 // F2/F5 reconciliation by operation identity: the landed node is found via
 // findReplacementByOperation; a retry must reconcile, never re-append.

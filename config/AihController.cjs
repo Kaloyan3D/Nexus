@@ -1829,8 +1829,10 @@ function apply(ctx) {
       }
       const dshSession = loadDshSessionModule()
       if (!dshSession || typeof dshSession.Session.fromRestore !== 'function') return false
+      // The full persisted header is the restore contract (DSH 0.2 validates every field, e.g.
+      // version 4 and the isSeeded flag); a partial copy would make every restore proof fail.
       const header = session.header && typeof session.header === 'object'
-        ? JSON.parse(JSON.stringify({ version: session.header.version, id: session.header.id, createdAt: session.header.createdAt, cwd: session.header.cwd }))
+        ? JSON.parse(JSON.stringify(session.header))
         : null
       if (!header || header.version === undefined || !header.id) return false
       const seed = JSON.parse(JSON.stringify(sessionReader.sessionEvents(session)))
@@ -2238,7 +2240,7 @@ function apply(ctx) {
       }
       const appendedSeqs = []
       for (const segment of remainingSegments) {
-        const node = session.append('user/message', message, { surfaceOp: { op: 'replace', start: segment.start, end: segment.end }, sourceEventSeqs: segment.sourceEventSeqs })
+        const node = session.append('user/message', message, { surfaceOp: { op: 'replace', startSeq: segment.start, endSeq: segment.end }, sourceEventSeqs: segment.sourceEventSeqs })
         appendedSeqs.push(node.seq)
       }
       const transitionedPending = await lifecycleCli('transition', binding, [], { to: 'awaiting-durability', reason: 'replacement appended in memory; durability unconfirmed', sessionId }).then(() => true).catch((error) => {

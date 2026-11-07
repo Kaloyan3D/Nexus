@@ -16,6 +16,8 @@
  */
 
 const assert = require('node:assert/strict');
+// DSH 0.2.x removed `session.events`; read the log through the single supported adapter.
+const { sessionEvents: eventsOf } = require('../config/Dsh-SessionEvents.cjs');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -83,7 +85,7 @@ async function main() {
     const segs = prod.splitRangeAroundOwned(session, cut.shadowedSeqs, prod.runtimeContextSeqsOf(session));
     const flat = [];
     for (const sg of segs) for (const sq of sg.sourceEventSeqs) flat.push(sq);
-    const op = cli('freeze-operation', { workspace, taskInstanceId, sessionId, replacementStart: flat[0], replacementEnd: flat[flat.length - 1], sourceEventSeqs: flat, segments: segs, completionBoundarySeq: session.events.length - 1, repositoryId: wsIdentity.repositoryId, checkoutId: wsIdentity.checkoutId, checkpointPath: cp.path });
+    const op = cli('freeze-operation', { workspace, taskInstanceId, sessionId, replacementStart: flat[0], replacementEnd: flat[flat.length - 1], sourceEventSeqs: flat, segments: segs, completionBoundarySeq: eventsOf(session).length - 1, repositoryId: wsIdentity.repositoryId, checkoutId: wsIdentity.checkoutId, checkpointPath: cp.path });
     check(op && op.operationId, 'F5-slow setup: frozen operation persisted');
     cli('transition', { workspace, taskInstanceId, to: 'apply-pending', reason: 'f5slow', sessionId });
     // Process A: production pre-step with a REAL 8s persistence delay
@@ -93,7 +95,7 @@ async function main() {
     const ctxA = harness.makeCtx({
       flushImpl: async (liveSession) => {
         await new Promise((r) => setTimeout(r, 8000));
-        durableBytes = JSON.stringify(liveSession.events);
+        durableBytes = JSON.stringify(eventsOf(liveSession));
         return true;
       },
     });
@@ -137,17 +139,17 @@ async function main() {
     const heldMs = Date.now() - lockTakenAt;
     check(heldMs > 3000, 'F5-slow: hold outlasted the original lease (' + heldMs + 'ms)');
     // Exactly one semantic application: one operationId record set.
-    const replacements = session.events.filter((e) => e.type === 'user/message' && e.data && e.data.source && e.data.source.operationId === op.operationId);
+    const replacements = eventsOf(session).filter((e) => e.type === 'user/message' && e.data && e.data.source && e.data.source.operationId === op.operationId);
     check(replacements.length >= 1, 'F5-slow: exactly one semantic application (' + replacements.length + ' segment node(s))');
     // Monotonic valid sequence: seqs strictly increase with log order.
     let monotonic = true;
-    for (let i = 0; i < session.events.length; i += 1) {
-      if (session.events[i].seq !== i) { monotonic = false; break; }
+    for (let i = 0; i < eventsOf(session).length; i += 1) {
+      if (eventsOf(session)[i].seq !== i) { monotonic = false; break; }
     }
     check(monotonic, 'F5-slow: JSONL sequence strictly valid/monotonic');
     // Fresh public restore in a new process shape (same-process restore of
     // the exact persisted-bytes form the backend would hold).
-    const header = { version: 0, id: sessionId, createdAt: Date.now(), cwd: workspace };
+    const header = JSON.parse(JSON.stringify(session.header)); // DSH 0.2: the full persisted header is the restore contract
     const seed = JSON.parse(durableBytes).map((e, i) => Object.assign({}, e, { seq: i }));
     let restored = null;
     try {
@@ -155,7 +157,7 @@ async function main() {
     } catch (e) {
       check(false, 'F5-slow: fresh restore succeeds (failed: ' + e.message + ')');
     }
-    check(restored && restored.events.length === seed.length + 1, 'F5-slow: fresh public DSH restore PASS');
+    check(restored && eventsOf(restored).length === seed.length + 1, 'F5-slow: fresh public DSH restore PASS');
     const snap = cli('snapshot', { workspace, taskInstanceId });
     check(snap.state === 'applied', 'F5-slow: final lifecycle APPLIED (got ' + snap.state + ')');
   } finally {

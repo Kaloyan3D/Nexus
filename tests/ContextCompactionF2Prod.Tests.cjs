@@ -20,6 +20,8 @@
  */
 
 const assert = require('node:assert/strict');
+// DSH 0.2.x removed `session.events`; read the log through the single supported adapter.
+const { sessionEvents: eventsOf } = require('../config/Dsh-SessionEvents.cjs');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -92,7 +94,7 @@ function seedReadyGeneration(g, sessionId, session, operationSpec) {
 }
 
 function checkpointAppends(session) {
-  return session.events.filter((e) => e.type === 'user/message' && e.data && e.data.source && e.data.source.form === 'context-checkpoint');
+  return eventsOf(session).filter((e) => e.type === 'user/message' && e.data && e.data.source && e.data.source.form === 'context-checkpoint');
 }
 
 async function drivePreStep(g, session, sessionId, promptText) {
@@ -150,7 +152,7 @@ async function main() {
       const segs = prod.splitRangeAroundOwned(session, liveCut.shadowedSeqs, prod.runtimeContextSeqsOf(session));
       const flatFromSegs = [];
       for (const sg of segs) for (const sq of sg.sourceEventSeqs) flatFromSegs.push(sq);
-      harness.pwshFile(g.CLI, ['-Action', 'freeze-operation', '-TaskId', g.taskId], { workspace: g.workspace, taskInstanceId: g.taskInstanceId, sessionId: 'sess-f2-WRONG', replacementStart: flatFromSegs[0], replacementEnd: flatFromSegs[flatFromSegs.length - 1], sourceEventSeqs: flatFromSegs, segments: segs, completionBoundarySeq: session.events.length - 1, repositoryId: g.wsIdentity.repositoryId, checkoutId: g.wsIdentity.checkoutId });
+      harness.pwshFile(g.CLI, ['-Action', 'freeze-operation', '-TaskId', g.taskId], { workspace: g.workspace, taskInstanceId: g.taskInstanceId, sessionId: 'sess-f2-WRONG', replacementStart: flatFromSegs[0], replacementEnd: flatFromSegs[flatFromSegs.length - 1], sourceEventSeqs: flatFromSegs, segments: segs, completionBoundarySeq: eventsOf(session).length - 1, repositoryId: g.wsIdentity.repositoryId, checkoutId: g.wsIdentity.checkoutId });
       harness.pwshFile(g.CLI, ['-Action', 'transition', '-TaskId', g.taskId], { workspace: g.workspace, taskInstanceId: g.taskInstanceId, to: 'apply-pending', reason: 'f2', sessionId: 'sess-f2-WRONG' });
       const before = checkpointAppends(session).length;
       const { state } = await drivePreStep(g, session, 'sess-f2-right', 'hello');
@@ -164,11 +166,11 @@ async function main() {
     try {
       const session = buildTaskASession(dsh, 'sess-f2-race', g.workspace, 'R4');
       seedReadyGeneration(g, 'sess-f2-race', session, null);
-      const boundaryAtComplete = session.events.length - 1;
+      const boundaryAtComplete = eventsOf(session).length - 1;
       // Task B lands BEFORE the freeze is persisted (the race window).
       session.append('user/message', harness.identifiedUserMessage('Task B intent RACE-B4'), { surfaceOp: 'append' });
       session.append('assistant/message', harness.identifiedAssistantMessage('B noted', 3, 1), { surfaceOp: 'append' });
-      const taskBSeqs = session.events.filter((e) => JSON.stringify(e.data).includes('RACE-B4') || JSON.stringify(e.data).includes('B noted')).map((e) => e.seq);
+      const taskBSeqs = eventsOf(session).filter((e) => JSON.stringify(e.data).includes('RACE-B4') || JSON.stringify(e.data).includes('B noted')).map((e) => e.seq);
       check(taskBSeqs.length === 2, 'F2-race setup: Task B events present');
       // Freeze constrained to the completion boundary (production behavior).
       const liveCut = prod.balancedRetainCut(session, { maxTailNodes: 6, maxTailChars: 6000, minShadowed: 1 });
@@ -196,7 +198,7 @@ async function main() {
       const segs = prod.splitRangeAroundOwned(session, liveCut.shadowedSeqs, owned);
       const flat = [];
       for (const sg of segs) for (const sq of sg.sourceEventSeqs) flat.push(sq);
-      seedReadyGeneration(g, 'sess-f2-crash', session, { replacementStart: flat[0], replacementEnd: flat[flat.length - 1], sourceEventSeqs: flat, segments: segs, completionBoundarySeq: session.events.length - 1, repositoryId: g.wsIdentity.repositoryId, checkoutId: g.wsIdentity.checkoutId });
+      seedReadyGeneration(g, 'sess-f2-crash', session, { replacementStart: flat[0], replacementEnd: flat[flat.length - 1], sourceEventSeqs: flat, segments: segs, completionBoundarySeq: eventsOf(session).length - 1, repositoryId: g.wsIdentity.repositoryId, checkoutId: g.wsIdentity.checkoutId });
       const { state } = await drivePreStep(g, session, 'sess-f2-crash', 'follow-up');
       check(state === 'applied', 'F2-crash: valid operation applies (got ' + state + ')');
       const derived = JSON.stringify(session.deriveMessages());
@@ -218,7 +220,7 @@ async function runTamperMatrix(dsh, prod) {
     const segs = prod.splitRangeAroundOwned(session, liveCut.shadowedSeqs, owned);
     const flat = [];
     for (const sg of segs) for (const sq of sg.sourceEventSeqs) flat.push(sq);
-    return { flat, segs, boundary: session.events.length - 1 };
+    return { flat, segs, boundary: eventsOf(session).length - 1 };
   };
   const freezeWith = (gg, sid, spec) => harness.pwshFile(gg.CLI, ['-Action', 'freeze-operation', '-TaskId', gg.taskId], Object.assign({ workspace: gg.workspace, taskInstanceId: gg.taskInstanceId, sessionId: sid, checkpointPath: 'cp.json', repositoryId: gg.wsIdentity.repositoryId, checkoutId: gg.wsIdentity.checkoutId }, spec));
   const opPath = (gg) => path.join(gg.workspace, '.ai-harness', 'runs', gg.taskId, 'context-compaction-operation.json');
@@ -255,12 +257,12 @@ async function runTamperMatrix(dsh, prod) {
   await runCase('wrong-checkpoint', (gg) => rewriteOp(gg, (d) => { d.checkpointPath = ''; }));
   await runCase('duplicate-seq', (gg) => rewriteOp(gg, (d) => { d.sourceEventSeqs = [d.sourceEventSeqs[0], d.sourceEventSeqs[0]].concat(d.sourceEventSeqs.slice(1)); }));
   await runCase('unordered-seqs', (gg) => rewriteOp(gg, (d) => { d.sourceEventSeqs = d.sourceEventSeqs.slice().reverse(); d.replacementStart = d.sourceEventSeqs[0]; d.replacementEnd = d.sourceEventSeqs[d.sourceEventSeqs.length - 1]; }));
-  await runCase('beyond-boundary', (gg, op, session) => rewriteOp(gg, (d) => { d.sourceEventSeqs = d.sourceEventSeqs.concat([session.events.length + 50]); }));
+  await runCase('beyond-boundary', (gg, op, session) => rewriteOp(gg, (d) => { d.sourceEventSeqs = d.sourceEventSeqs.concat([eventsOf(session).length + 50]); }));
   await runCase('wrong-start', (gg) => rewriteOp(gg, (d) => { d.replacementStart = d.replacementStart + 1000; }));
   await runCase('wrong-end', (gg) => rewriteOp(gg, (d) => { d.replacementEnd = d.replacementEnd + 1000; }));
   await runCase('union-mismatch', (gg) => rewriteOp(gg, (d) => { const last = d.segments[d.segments.length - 1]; last.sourceEventSeqs = last.sourceEventSeqs.slice(0, -1); last.end = last.sourceEventSeqs[last.sourceEventSeqs.length - 1]; }));
   await runCase('endpoint-mismatch', (gg) => rewriteOp(gg, (d) => { d.segments[0].end = d.segments[0].end + 1000; }));
-  await runCase('foreign-seq', (gg, op, session) => rewriteOp(gg, (d) => { d.segments[0].sourceEventSeqs = [session.events.length + 77].concat(d.segments[0].sourceEventSeqs.slice(1)); }));
+  await runCase('foreign-seq', (gg, op, session) => rewriteOp(gg, (d) => { d.segments[0].sourceEventSeqs = [eventsOf(session).length + 77].concat(d.segments[0].sourceEventSeqs.slice(1)); }));
   await runCase('missing-segments', (gg) => rewriteOp(gg, (d) => { d.segments = []; }));
   await runCase('malformed-json', (gg) => { fs.writeFileSync(opPath(gg), '{not json'); });
   await runCase('operationId-mismatch-readable', (gg, op) => rewriteOp(gg, (d) => { d.operationId = String(d.operationId).replace(/^ccop_/, 'ccop_deadbeef'); }));

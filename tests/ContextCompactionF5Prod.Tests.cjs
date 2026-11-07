@@ -19,6 +19,8 @@
  */
 
 const assert = require('node:assert/strict');
+// DSH 0.2.x removed `session.events`; read the log through the single supported adapter.
+const { sessionEvents: eventsOf } = require('../config/Dsh-SessionEvents.cjs');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -84,7 +86,7 @@ async function main() {
     const segs = prod.splitRangeAroundOwned(session, cut.shadowedSeqs, prod.runtimeContextSeqsOf(session));
     const flat = [];
     for (const sg of segs) for (const sq of sg.sourceEventSeqs) flat.push(sq);
-    const op = cli('freeze-operation', { workspace, taskInstanceId, sessionId, replacementStart: flat[0], replacementEnd: flat[flat.length - 1], sourceEventSeqs: flat, segments: segs, completionBoundarySeq: session.events.length - 1, repositoryId: wsIdentity.repositoryId, checkoutId: wsIdentity.checkoutId, checkpointPath: cp.path });
+    const op = cli('freeze-operation', { workspace, taskInstanceId, sessionId, replacementStart: flat[0], replacementEnd: flat[flat.length - 1], sourceEventSeqs: flat, segments: segs, completionBoundarySeq: eventsOf(session).length - 1, repositoryId: wsIdentity.repositoryId, checkoutId: wsIdentity.checkoutId, checkpointPath: cp.path });
     check(op && op.operationId, 'F5 setup: frozen operation persisted');
     cli('transition', { workspace, taskInstanceId, to: 'apply-pending', reason: 'f5', sessionId });
     const frozenBefore = JSON.stringify(op);
@@ -98,7 +100,7 @@ async function main() {
     const ctx = harness.makeCtx({
       flushImpl: async (liveSession) => {
         if (flushDown) throw new Error('simulated persistence outage');
-        if (!dropWrites) durableBytes = JSON.stringify(liveSession.events);
+        if (!dropWrites) durableBytes = JSON.stringify(eventsOf(liveSession));
         return true;
       },
     });
@@ -142,7 +144,7 @@ async function main() {
     const opAfter = cli('read-operation', { workspace, taskInstanceId });
     check(JSON.stringify(Object.assign({}, opAfter, { createdAtUtc: null })) === JSON.stringify(Object.assign({}, JSON.parse(frozenBefore), { createdAtUtc: null })), 'F5: frozen operation unchanged throughout');
     // No duplicate replacement records for one operationId.
-    const checkpoints = session.events.filter((e) => e.type === 'user/message' && e.data && e.data.source && e.data.source.operationId === op.operationId);
+    const checkpoints = eventsOf(session).filter((e) => e.type === 'user/message' && e.data && e.data.source && e.data.source.operationId === op.operationId);
     const landedNow = prod.findReplacementByOperation(session, op.operationId);
     check(landedNow, 'F5: replacement durably present after recovery');
     check(checkpoints.length >= 1, 'F5: replacement record exists (' + checkpoints.length + ' segment node(s))');
