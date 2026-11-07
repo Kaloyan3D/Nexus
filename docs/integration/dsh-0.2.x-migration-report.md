@@ -557,3 +557,51 @@ Tree equivalence (checked immediately after the transplant, before this section 
 - Tests: the release-candidate results in sections D, H and J were executed on the monorepo tree **before** the transplant and are unchanged. After the transplant only one run was made: a fresh Linux aarch64 VM install and the
   real `Test-Harness.ps1 -Lane production` on the transplanted tree: 105 rows, 103 pass, the same two failures as in J9 (`ContextRestrictedProductionV2`, `Harness`). No other platform was re-validated.
 
+## L. Native macOS arm64 support (separate work, added after the transplant)
+
+Everything in sections A-K was validated on Linux aarch64 (Lima VM). This section is **new work executed natively on macOS 27.2 arm64**
+(Darwin 27.2.0) in an isolated install (`~/Nexus-DSH-0.2.2-Test`, port 3081, its own `HOME`, data root, sessions and workspaces), next to a running
+DSH 0.1.1-rc.2 install on port 3080 that was not touched (same pid and start time before and after; no write under `~/.local/share/nexus`).
+
+Versions: DSH `0.2.2-rc.1`, Node `v24.18.1` (darwin-arm64, pinned and SHA-256 verified), PowerShell `7.5.3` (osx-arm64, pinned), `npm ci` from the lockfile, git 2.x.
+The existing 0.1.1 install uses a Node v26 binary and no pinned PowerShell, driven by `Nexus.app`; it served only as a compatibility reference (no sessions or credentials read).
+
+### L1. PowerShell diagnosis
+
+The crash was real and not a Nexus bug: Homebrew's `pwsh` 7.6.9 (on .NET 10.0.403, macOS 27.2) dies at startup with
+`System.IO.FileLoadException: The given assembly name was invalid ... System.Collections.Concurrent, Version=10.0.0.0 ... PublicKeyT<garbage>` in
+`AssemblyNameParser.Parse` (corrupted marshalled assembly name). The **pinned PowerShell 7.5.3 (.NET 9) runs correctly on the same machine**, so Nexus simply provisions and uses its own `runtime/pwsh`
+as it does on Linux. The global PowerShell was not modified.
+
+### L2. What had to change for macOS (all verified natively, none changes Linux/Windows results)
+
+| Area | Problem on macOS | Fix |
+| --- | --- | --- |
+| Installer | `setup.sh` accepted only Linux x86_64; wrote launchers into the shared `~/.local/bin` (would replace another install's) | Darwin arm64 target (`darwin-arm64` Node, `osx-arm64` PowerShell), `sha256sum` or `shasum`, `--user-bin`/`AIH_USER_BIN`; helpers moved to `scripts/lib/aih-platform.sh` with `tests/aih-platform.Tests.sh` |
+| Launcher | hard-coded port 3080 and OAuth URL | `-Port`/`AIH_PORT` (1024-65535), `AIH_OAUTH_BASE_URL`; defaults unchanged |
+| Process identity | `Test-AihTrackedProcessIdentity` read `/proc` (Linux only), so the launcher reported FAILED although the server was up | use .NET `Process.Path`/`StartTime` on macOS |
+| Project detection | an absolute POSIX path is a *relative* `[Uri]` on macOS, so `MakeRelativeUri` threw: no workspace files, "no deterministic verification commands" | `Path.GetRelativePath` when available (URI path kept for Windows PowerShell 5.1) |
+| Lease/lock timestamps | `ConvertFrom-Json` returns `DateTime`, `[string]` re-parsed with the current culture swapped day and month (bg-BG/en-GB): a live lock holder looked expired and a second process could take the compaction apply lock (`ContextCompactionXProc`, `F5Slow`); the live-owner check also compared an ISO string with a culture-formatted one, so it never matched (latent on Linux too) | `ConvertTo-AihUtcInstant`, `Test-AihRecordedProcessStart` (instants, invariant parsing) |
+| JSON | a PSObject-wrapped number under a comma-decimal culture serialized as `{}` | value types serialize as themselves |
+| Doctor / browser | checked `xdg-open` and `~/.local/bin` only | `open` on macOS, `AIH_USER_BIN` |
+| Tests | GNU `stat -c`, `ps -o sid`, hard-coded "linux" expectations | portable helpers; new `PlatformPortability` suite (24 assertions, all platforms) |
+| Mode picker | after DSH rejected a preset change the picker kept showing the refused mode and retried on every update | reverts to the session's real preset, clears the stage (`NexusModeContract`) |
+
+### L3. Results
+
+- Native production lane (real `Test-Harness.ps1`, pinned pwsh, private `HOME`/`TMPDIR`): **106 rows, 104 pass**; the two failures are the same as on Linux (`ContextRestrictedProductionV2` needs the lab modules the installer omits, `Harness` credential-shaped fake fixtures).
+  Before the fixes the first native run had 11 failures; the extra 9 were the macOS defects above plus a missing git identity in the isolated `HOME`.
+- Linux regression check of the same tree (VM): production 103/105 (same two), CCv2 lab 68/81 (same 13): unchanged.
+- Real browser on the native server (127.0.0.1:3081): READY and identity (server pid and VM-free data path inside the test root); Controller panel and all Control Room tabs against seeded records; operator gates (stale 409, unknown action 422, missing ids 400, foreign session 404;
+  one real Reject and one real Approve, one ledger row each; Approve with failing verification did not complete the task); DeepSeek-only mode with the 6-model chooser, default-mode persistence (settings + verified patch via native pwsh/node) and restart restoration
+  (default "aih-deepseek", sessions, Control Room and gate state restored); Engineering profile selection persisted (`muse-spark-1.3-contributor`); the Muse plane applied to a blank session on first selection after restart; workspace registration through the launcher handoff (PowerShell route) for two workspaces;
+  workspace transitions with a 1.5 s response delay proxy (A to B to A plus New Session mid-pick: composer locked 0.3-5.2 s, unlocked once on the last workspace); authenticated/unauthenticated sweep: 14 routes, 280 checks, 0 failures, state unchanged, unauthenticated mode-default write 401.
+- Isolation: every session, setting and ledger lives under the test root; nothing was written under `~/.local/share/nexus` or `~/.local/bin`. DSH's default workspace resolves to the existing empty `~/Documents/deepseek-harness/default-workspace` (OS Documents folder), referenced but unmodified.
+  The test install's OAuth URL and the `sol-local` provider URL point at an unused port so it can never reach the other install's OAuth proxy; a placeholder key and a dead proxy kept it off the network. No real model turn was run.
+
+### L4. Remaining limitations (macOS)
+
+- **DSH 0.2.2-rc.1 allows one agent-preset change per session per server process.** The second change fails with `dsh-scope: scope key is already bound to a parent` (reproduced on Linux too; the registry deletes the binding on agent disposal but keeps the scope parent). Nexus now shows the true state; switch modes at most once per session, or start a new session / restart. Not fixable in Nexus; should be reported upstream.
+- The web "Add workspace" folder dialog did not open on macOS (the menu item stays disabled); workspaces were added through `aih -Open <path>` / the `?nexus-open=` handoff, which works. Not investigated further.
+- ripgrep is optional and absent; the doctor reports it (reference search degrades). No live provider, no Windows, no Intel Mac.
+- `--user-bin` and `AIH_PORT` are new options; the Windows installer and Linux defaults are untouched.
