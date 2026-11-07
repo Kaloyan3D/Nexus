@@ -1,0 +1,1468 @@
+{
+ "summary": {
+  "base": "http://127.0.0.1:3081",
+  "routes": 13,
+  "checks": 208,
+  "failures": 0,
+  "deniedAll": true,
+  "admittedWithCookie": "not-run"
+ },
+ "results": [
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "no-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "no-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "no-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "no-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "forged-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "forged-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "forged-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "forged-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "query-token-only",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "query-token-only",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "query-token-only",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "query-token-only",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "foreign-origin",
+   "method": "GET",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "foreign-origin",
+   "method": "POST",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "foreign-origin",
+   "method": "PUT",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-favicon.svg",
+   "variant": "foreign-origin",
+   "method": "DELETE",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "no-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "no-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "no-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "no-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "forged-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "forged-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "forged-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "forged-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "query-token-only",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "query-token-only",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "query-token-only",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "query-token-only",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "foreign-origin",
+   "method": "GET",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "foreign-origin",
+   "method": "POST",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "foreign-origin",
+   "method": "PUT",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/assets/nexus-mark.png",
+   "variant": "foreign-origin",
+   "method": "DELETE",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "no-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "no-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "no-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "no-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "forged-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "forged-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "forged-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "forged-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "query-token-only",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "query-token-only",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "query-token-only",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "query-token-only",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "foreign-origin",
+   "method": "GET",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "foreign-origin",
+   "method": "POST",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "foreign-origin",
+   "method": "PUT",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/control-room.json",
+   "variant": "foreign-origin",
+   "method": "DELETE",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "no-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "no-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "no-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "no-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "forged-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "forged-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "forged-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "forged-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "query-token-only",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "query-token-only",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "query-token-only",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "query-token-only",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "foreign-origin",
+   "method": "GET",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "foreign-origin",
+   "method": "POST",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "foreign-origin",
+   "method": "PUT",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/controller.json",
+   "variant": "foreign-origin",
+   "method": "DELETE",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "no-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "no-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "no-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "no-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "forged-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "forged-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "forged-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "forged-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "query-token-only",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "query-token-only",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "query-token-only",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "query-token-only",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "foreign-origin",
+   "method": "GET",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "foreign-origin",
+   "method": "POST",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "foreign-origin",
+   "method": "PUT",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile-action.json",
+   "variant": "foreign-origin",
+   "method": "DELETE",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "no-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "no-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "no-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "no-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "forged-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "forged-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "forged-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "forged-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "query-token-only",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "query-token-only",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "query-token-only",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "query-token-only",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "foreign-origin",
+   "method": "GET",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "foreign-origin",
+   "method": "POST",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "foreign-origin",
+   "method": "PUT",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/engineering-profile.json",
+   "variant": "foreign-origin",
+   "method": "DELETE",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "no-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "no-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "no-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "no-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "forged-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "forged-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "forged-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "forged-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "query-token-only",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "query-token-only",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "query-token-only",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "query-token-only",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "foreign-origin",
+   "method": "GET",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "foreign-origin",
+   "method": "POST",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "foreign-origin",
+   "method": "PUT",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/gate-action.json",
+   "variant": "foreign-origin",
+   "method": "DELETE",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "no-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "no-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "no-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "no-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "forged-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "forged-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "forged-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "forged-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "query-token-only",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "query-token-only",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "query-token-only",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "query-token-only",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "foreign-origin",
+   "method": "GET",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "foreign-origin",
+   "method": "POST",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "foreign-origin",
+   "method": "PUT",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/configuration",
+   "variant": "foreign-origin",
+   "method": "DELETE",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "no-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "no-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "no-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "no-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "forged-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "forged-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "forged-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "forged-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "query-token-only",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "query-token-only",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "query-token-only",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "query-token-only",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "foreign-origin",
+   "method": "GET",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "foreign-origin",
+   "method": "POST",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "foreign-origin",
+   "method": "PUT",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/eligible",
+   "variant": "foreign-origin",
+   "method": "DELETE",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "no-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "no-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "no-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "no-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "forged-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "forged-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "forged-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "forged-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "query-token-only",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "query-token-only",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "query-token-only",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "query-token-only",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "foreign-origin",
+   "method": "GET",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "foreign-origin",
+   "method": "POST",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "foreign-origin",
+   "method": "PUT",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/modes",
+   "variant": "foreign-origin",
+   "method": "DELETE",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "no-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "no-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "no-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "no-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "forged-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "forged-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "forged-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "forged-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "query-token-only",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "query-token-only",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "query-token-only",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "query-token-only",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "foreign-origin",
+   "method": "GET",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "foreign-origin",
+   "method": "POST",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "foreign-origin",
+   "method": "PUT",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/preview",
+   "variant": "foreign-origin",
+   "method": "DELETE",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "no-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "no-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "no-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "no-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "forged-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "forged-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "forged-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "forged-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "query-token-only",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "query-token-only",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "query-token-only",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "query-token-only",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "foreign-origin",
+   "method": "GET",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "foreign-origin",
+   "method": "POST",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "foreign-origin",
+   "method": "PUT",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/registry/v1/validate",
+   "variant": "foreign-origin",
+   "method": "DELETE",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "no-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "no-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "no-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "no-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "forged-cookie",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "forged-cookie",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "forged-cookie",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "forged-cookie",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "query-token-only",
+   "method": "GET",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "query-token-only",
+   "method": "POST",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "query-token-only",
+   "method": "PUT",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "query-token-only",
+   "method": "DELETE",
+   "status": 401,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "foreign-origin",
+   "method": "GET",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "foreign-origin",
+   "method": "POST",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "foreign-origin",
+   "method": "PUT",
+   "status": 403,
+   "ok": true
+  },
+  {
+   "route": "/nexus/workspace-registration.json",
+   "variant": "foreign-origin",
+   "method": "DELETE",
+   "status": 403,
+   "ok": true
+  }
+ ]
+}

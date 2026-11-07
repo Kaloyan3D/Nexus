@@ -31,13 +31,13 @@ const sessions = { subagentAddress: (id) => (id === 'child' ? { parent: 'p' } : 
 const ctx = {
   slots: { inject(_n, fn) { fn() }, register(spec, component) { registered.push({ spec, component }); return () => {} } },
   provide() {}, effect() {}, workspaces: undefined,
-  inject(names, fn) { fn({ slots: this.slots, modelDirectories: this.modelDirectories, sessions, provide() {}, effect() {}, nexusModeState: undefined }) },
+  inject(names, fn) { const all = { modelDirectories: this.modelDirectories, sessions, nexusModeState: undefined }; const scope = { provide() {}, effect() {} }; for (const n of names) scope[n] = all[n]; fn(scope) },
   modelDirectories,
 }
 plugin.apply(ctx)
 const seat = registered.find((r) => r.spec.name === 'conversation.input.model')
 assert.ok(seat, 'controller registers the composer model seat')
-assert.ok(seat.spec.priority > 0, 'Nexus seat outranks upstream ModelSelect (priority 0)')
+assert.ok(seat.spec.priority < 0, 'Nexus seat shadows upstream ModelSelect (slot shadowing is ascending; lowest priority renders; upstream is 0)')
 assert.equal(typeof seat.component, 'function')
 pass('controller occupies conversation.input.model through the supported slot registry with election priority')
 

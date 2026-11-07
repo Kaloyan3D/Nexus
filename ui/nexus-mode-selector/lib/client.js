@@ -38,7 +38,13 @@ window.__ModuleLoader__.load({
 
     function currentSession(scope) {
       const state = scope.sessions.list.getSnapshot();
-      return state.current === void 0 ? void 0 : state.byId[state.current];
+      // DSH 0.2.x has no `state.current`: the displayed session is the main-view-retained one.
+      if (typeof state.current === "string" && state.byId[state.current]) return state.byId[state.current];
+      for (const id of Object.keys(state.byId || {})) {
+        const entry = state.byId[id];
+        if (entry && entry.retainedBy && (entry.retainedBy.mainView || 0) > 0) return entry;
+      }
+      return void 0;
     }
 
     function displayedPreset(session, fallback) {

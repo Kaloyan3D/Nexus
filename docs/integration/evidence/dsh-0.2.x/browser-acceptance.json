@@ -1,0 +1,33 @@
+{
+  "run": "2026-11-07, Lima VM nexus-a1-linux (Ubuntu aarch64), disposable install ~/nx-cand, real launcher (port 3081 via a test-only aih copy; host 3080 is the user's real install and was NOT the target)",
+  "browser": "Claude desktop built-in browser against the live DSH 0.2.2-rc.1 web server (SSH tunnel)",
+  "credentials": "none configured; no provider call was made (Phase 6 UNVERIFIED)",
+  "defectsFoundAndFixed": [
+    "Controller drawer/mode selector read sessions.current, which DSH 0.2 does not have -> panel polled session= and showed 'No managed task' for a bound session (fixed: main-view-retained session; tests/NexusSessionIdentity.Tests.cjs)",
+    "Composer preference seat registered with priority 100; slot shadowing is ascending (lowest renders) so upstream ModelSelect stayed (fixed: -100; tests/NexusComposerSeat.Tests.cjs)",
+    "Composer seat registered through scope.slots inside a nested inject that only carries listed names (TypeError swallowed) (fixed: ctx.slots)",
+    "Launcher workspace handoff called ctx.workspaces.startSession (does not exist in 0.2) (fixed: ctx.uiWorkspace.startSession)",
+    "Legacy model chooser rendered an empty control when the saved selection was absent from the catalog (fixed, not yet re-observed in browser)"
+  ],
+  "acceptance": [
+    {"test": "branding", "result": "PASS", "evidence": "document.title 'Nexus' (upstream 'DeepSeek Harness' rewritten by suffix); favicon link /nexus/assets/nexus-favicon.svg 200 image/svg+xml; upstream icons demoted; hero headline 'Into the Unknown' is NOT restorable by a supported API (locale namespace is single-owner) - documented gap"},
+    {"test": "composer preference seat (Normal Engineering)", "result": "PASS", "evidence": "upstream 'Select model' absent; data-nexus-preference-owner=profiles, composer mode engineering; Profile popover populated from /nexus/engineering-profile.json"},
+    {"test": "mode picker -> legacy seat", "result": "PASS (mount) / UNVERIFIED (catalog)", "evidence": "switching to DeepSeek Only flips the seat to legacy/upstream-model and mounts the Nexus model chooser; no provider catalog without credentials"},
+    {"test": "Controller panel", "result": "PASS", "evidence": "VERIFYING, TASK-0042, attempt 2/3, verification 1/2 failed, review required, git master 2 files; all equal the seeded authoritative records"},
+    {"test": "Overview / Activity / Verification / Files / Engineering tabs", "result": "PASS", "evidence": "Overview fields, Activity (attempt started, routed DeepSeek V4 Flash max, operator gate opened), Verification (typecheck PASS, tests FAIL 'npm test: 1 failing'), Files (master, ?? acceptance-note.txt), Engineering registry modes"},
+    {"test": "operator gate approve", "result": "PASS", "evidence": "UI 'Gate approved'; data/completion/gates.jsonl resolved record resolvedBy operator-gui, gate-actions.jsonl entry; task status unchanged (Controller owns completion)"},
+    {"test": "engineering profile selection", "result": "PASS", "evidence": "select glm-codex -> /nexus/engineering-profile.json preferredProfile glm-codex and data/nexus-settings.yaml 'engineering-profile: glm-codex'"},
+    {"test": "workspace transition guard (pending pick)", "result": "PASS", "evidence": "immediately after picking wsB the composer was replaced and body text contained the guard reason; cleared within 1.5 s when the session landed"},
+    {"test": "rapid repeated selection A then B", "result": "PASS", "evidence": "final chip wsB, composer editable, no stuck block; workspace.json: wsB has exactly one session, wsA two (bound + blank from New Session)"},
+    {"test": "session switching / exact bindings", "result": "PASS", "evidence": "controller.json: bound session -> TASK-0042 (gate approved); blank wsA, blank wsB and an unknown id -> binding null"},
+    {"test": "outage and restart", "result": "PASS", "evidence": "server killed: UI shows 'Reconnecting…' and 'Detail state unavailable'; relaunched via launcher (new pid 33046, new token): task, gate and session restored from authoritative records"},
+    {"test": "unauthenticated endpoint sweep", "result": "PASS", "evidence": "tests/diagnostics/NexusAuthSweep.cjs: 13 routes x 4 variants x 4 methods = 208 checks, 0 failures; no gate journal change; see auth-sweep-unauthenticated.json"},
+    {"test": "authenticated routes", "result": "PASS", "evidence": "with the browser cookie: controller.json 200, control-room.json 200, engineering-profile.json 200, registry/v1/modes 200, assets 200 (png/svg), gate-action and workspace-registration 405 on GET"}
+  ],
+  "incident": "A first page load hit host port 3080, which is the user's REAL Nexus install (PID 96363, not started by this work). The page performed its normal startup (blank session created under ~/.local/share/nexus/data/sessions/--Users-kaloyannikolov-AI--/session-85e9a396-..., workspace.json and session_projcache.json updated). No nexus file was edited, nothing was deleted; the blank session remains for the user to remove.",
+  "cannotBeAutomatedOrVerified": [
+    "live model turns, Controller routing on a real request, tool execution and Controller-owned completion (no credentials / no authorization)",
+    "the legacy model chooser catalog (needs provider credentials)",
+    "Windows and Linux x86_64 browser runs"
+  ]
+}
