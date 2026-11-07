@@ -232,8 +232,17 @@ window.__ModuleLoader__.load({
           await settleAppliedMode(session, id, effectiveId);
         } catch (error) {
           engineAutoApplyFailed = true;
+          // The host refused the change (for example DSH 0.2.2-rc.1 rejects re-binding a session's
+          // preset scope a second time). The session keeps its previous preset, so the picker must
+          // show THAT truth, not the refused choice, and the stage must not retry on every update.
+          staged = void 0;
           if (!disposed) {
-            store.patch({ busy: false, error: error instanceof Error ? error.message : String(error) });
+            const actual = currentSession(scope);
+            store.patch({
+              busy: false,
+              current: actual === void 0 ? fallback : displayedPreset(actual, fallback),
+              error: error instanceof Error ? error.message : String(error)
+            });
           }
         } finally {
           applying = false;

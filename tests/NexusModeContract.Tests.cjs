@@ -55,6 +55,18 @@ async function main() {
   assert.ok(fetchCalls.length >= 1 && fetchCalls[fetchCalls.length-1].url === '/nexus/mode-default.json' && fetchCalls[fetchCalls.length-1].method === 'POST' && fetchCalls[fetchCalls.length-1].body.preset === 'aih-deepseek', 'the chosen mode is persisted through the Nexus default-mode route')
   await controls.select('aih-engineering')
   assert.equal(current.byId.s.projectionValues.agentPreset,'aih-engineering')
+  // A host refusal (DSH 0.2.2-rc.1 rejects re-binding a session's preset scope a second time) must leave the
+  // picker showing the session's REAL preset with the error, and must not retry on later session updates.
+  rejectSelection=true
+  const beforeRefusal=calls.length
+  await controls.select('aih-deepseek')
+  assert.equal(calls.length,beforeRefusal+1,'exactly one refused attempt')
+  assert.equal(scope.nexusModeState.getSnapshot().current,'aih-engineering','the picker reverts to the preset the session really carries')
+  assert.ok(scope.nexusModeState.getSnapshot().error,'the refusal is visible')
+  project('s','aih-engineering')
+  await new Promise(resolve=>setTimeout(resolve,20))
+  assert.equal(calls.length,beforeRefusal+1,'a refused stage is not retried on every session update')
+  rejectSelection=false
   current={current:undefined,byId:{}}
   const before=calls.length
   await controls.select('aih-deepseek')
