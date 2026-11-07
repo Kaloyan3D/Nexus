@@ -95,6 +95,10 @@ function ConvertTo-AihJsonSafe {
     # for a plain string, which would serialize {Length: n} instead of the
     # value. Serialize the string value itself, never its reflection members.
     if ($Value -is [string]) { return $Value }
+    # Numbers, booleans, dates and other value types serialize as themselves. Under a culture whose
+    # decimal separator is a comma (for example bg-BG/en-BG) a numeric literal can arrive PSObject-wrapped,
+    # which would otherwise satisfy the pscustomobject test below and serialize as an empty object.
+    if ($Value -is [ValueType]) { return $Value }
     if ($Value -is [Collections.Specialized.OrderedDictionary] -or $Value -is [Collections.IDictionary]) {
         $output = [ordered]@{}
         foreach ($entry in ([Collections.IDictionary]$Value).GetEnumerator()) {
@@ -139,7 +143,20 @@ function Get-AihVersions {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "AI Harness version manifest is missing: $path"
     }
-    Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+    $versions = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+    # An independent installation (for example a test install running next to another Nexus) picks
+    # its own server port and OAuth service URL through the environment; the manifest defaults stay.
+    if (-not [string]::IsNullOrWhiteSpace($env:AIH_PORT)) {
+        $port = 0
+        if (-not [int]::TryParse($env:AIH_PORT, [ref]$port) -or $port -lt 1024 -or $port -gt 65535) {
+            throw "AIH_PORT must be an integer between 1024 and 65535 (got '$($env:AIH_PORT)')."
+        }
+        $versions.HarnessUrl = "http://127.0.0.1:$port"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:AIH_OAUTH_BASE_URL)) {
+        $versions.OAuthBaseUrl = $env:AIH_OAUTH_BASE_URL.TrimEnd('/')
+    }
+    return $versions
 }
 
 function Get-AihCodexAuthFile {

@@ -5,6 +5,8 @@ param(
     [switch]$Open,
     [switch]$EnableCodexSubagent,
     [switch]$Restart,
+    # Server port for this launch (default: config/versions.json, normally 3080). Equivalent to AIH_PORT.
+    [ValidateRange(0, 65535)][int]$Port = 0,
     [Parameter(Position = 0)][string]$WorkspacePath
 )
 
@@ -20,6 +22,7 @@ $env:AIH_INSTALL_ROOT = $InstallRoot
 . (Join-Path $PSScriptRoot 'Routing.ps1')
 . (Join-Path $PSScriptRoot 'ControlRoom.ps1')
 . (Join-Path $PSScriptRoot 'Workspace.ps1')
+if ($Port -gt 0) { $env:AIH_PORT = [string]$Port }
 $layout = Get-AihLayout $InstallRoot
 $versions = Get-AihVersions $InstallRoot
 $routingPolicy = Get-AihRoutingPolicy $layout.RoutingPolicy
@@ -163,7 +166,7 @@ $stdoutLog = Join-Path $layout.Logs 'dsh.out.log'
 $stderrLog = Join-Path $layout.Logs 'dsh.err.log'
 $launchTime = [DateTime]::UtcNow
 if (-not $resumingStartup) {
-    $arguments = @($layout.Dsh, 'web', '--no-open', '--port', '3080')
+    $arguments = @($layout.Dsh, 'web', '--no-open', '--port', [string]([uri]$webUrl).Port)
     # The server has a neutral runtime directory. Every actual command/file/git
     # operation resolves its cwd from the immutable session header; Nexus never
     # uses process.chdir() or launch-directory switching.

@@ -175,7 +175,8 @@ function Test-AihTrackedProcessIdentity {
         if ([int]$Process.Id -ne [int]$State.Pid) { return $false }
         if ($null -eq $State.ProcessStartedAtUtc -or [string]::IsNullOrWhiteSpace([string]$State.ProcessStartedAtUtc)) { return $false }
         $expectedStart = ([datetime]$State.ProcessStartedAtUtc).ToUniversalTime()
-        if (Test-AihIsWindows) {
+        # .NET exposes the executable path and start time for any process on Windows AND macOS (Linux needs procfs).
+        if ((Test-AihIsWindows) -or (Get-AihPlatformName) -eq 'macos') {
             if ([System.IO.Path]::GetFullPath($Process.Path) -ne [System.IO.Path]::GetFullPath($ExpectedExecutable)) { return $false }
             $actualStart = $Process.StartTime.ToUniversalTime()
             return [Math]::Abs(($actualStart - $expectedStart).TotalSeconds) -lt 2

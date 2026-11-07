@@ -81,13 +81,14 @@ if (-not (Test-AihIsWindows)) {
     Add-Check 'Node executable' $nodeOk $(if ($nodeOk) { $nodeExecutable } else { 'missing; run the Nexus installer (./setup.sh)' })
     $pathValue = [string]$env:PATH
     $userHome = if (-not [string]::IsNullOrWhiteSpace($env:HOME)) { $env:HOME } else { [Environment]::GetFolderPath('UserProfile') }
-    $launcherDir = Join-Path $userHome '.local/bin'
+    $launcherDir = if (-not [string]::IsNullOrWhiteSpace($env:AIH_USER_BIN)) { $env:AIH_USER_BIN } else { Join-Path $userHome '.local/bin' }
     $pathHasLauncherDir = ($pathValue -split ':') -contains $launcherDir
     Add-Check 'launcher directory on PATH' $pathHasLauncherDir $(if ($pathHasLauncherDir) { $launcherDir } else { "$launcherDir is not on PATH; add it to your shell profile (see docs/linux.md)" })
-    $xdgOpen = Get-Command 'xdg-open' -ErrorAction SilentlyContinue
-    Add-Check 'xdg-open (browser)' ($null -ne $xdgOpen) $(if ($null -ne $xdgOpen) { 'present; aih -Open can launch a browser' } else { 'missing; aih -Open prints the URL instead' })
+    $openerName = Get-AihBrowserOpenerName
+    $xdgOpen = Get-Command $openerName -ErrorAction SilentlyContinue
+    Add-Check "$openerName (browser)" ($null -ne $xdgOpen) $(if ($null -ne $xdgOpen) { 'present; aih -Open can launch a browser' } else { 'missing; aih -Open prints the URL instead' })
     $rg = Get-Command 'rg' -ErrorAction SilentlyContinue
-    Add-Check 'ripgrep (optional context engine)' ($null -ne $rg) $(if ($null -ne $rg) { 'present; reference search enabled' } else { 'not installed; reference search degrades (pacman -S ripgrep)' })
+    Add-Check 'ripgrep (optional context engine)' ($null -ne $rg) $(if ($null -ne $rg) { 'present; reference search enabled' } else { 'not installed; reference search degrades (install ripgrep with your package manager)' })
 }
 
 if (-not $Offline -and -not $deepSeekOnly -and (Test-Path -LiteralPath (Get-AihCodexAuthFile))) {

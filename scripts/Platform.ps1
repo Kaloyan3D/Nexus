@@ -423,6 +423,12 @@ function Start-AihDetachedProcess {
     return Start-Process @startParams
 }
 
+function Get-AihBrowserOpenerName {
+    # The desktop URL opener per platform: `open` on macOS, `xdg-open` on Linux.
+    if ((Get-AihPlatformName) -eq 'macos') { return 'open' }
+    return 'xdg-open'
+}
+
 function Open-AihUrlInBrowser {
     param([Parameter(Mandatory = $true)][string]$Url)
 
@@ -430,14 +436,14 @@ function Open-AihUrlInBrowser {
         Start-Process $Url | Out-Null
         return
     }
-    $xdgOpen = Get-Command 'xdg-open' -ErrorAction SilentlyContinue
+    $xdgOpen = Get-Command (Get-AihBrowserOpenerName) -ErrorAction SilentlyContinue
     if ($null -ne $xdgOpen) {
         Start-Process -FilePath $xdgOpen.Source -ArgumentList @($Url) | Out-Null
         return
     }
     # Fail soft: the URL is always printed by the caller, so a headless or
     # unusual desktop environment just needs to copy it manually.
-    Write-Warning "No browser opener found (xdg-open missing). Open this URL manually: " + $Url
+    Write-Warning ("No browser opener found ($(Get-AihBrowserOpenerName) missing). Open this URL manually: " + $Url)
 }
 
 function Get-AihUnixPermissionPlan {
