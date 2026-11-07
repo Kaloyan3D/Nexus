@@ -27,6 +27,16 @@
 # unsupported or malformed encoding, conversion failure, missing artifact,
 # digest that is not 64 hexadecimal characters, or a computed digest
 # mismatch. Checksum verification is never skipped.
+# SHA-256 of a file with whichever tool the platform ships (GNU sha256sum on Linux,
+# `shasum -a 256` on macOS). Prints only the hex digest.
+aih_sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
 aih_manifest_to_utf8() {
   _manifest=$1
   if [ ! -r "$_manifest" ]; then
@@ -94,7 +104,7 @@ aih_verify_sha256_impl() {
     echo "Nexus installer: checksum manifest does not contain '$_name'. Refusing an unverified download." >&2
     exit 1
   fi
-  _actual=$(sha256sum "$_archive" | awk '{print $1}')
+  _actual=$(aih_sha256_of "$_archive")
   if [ "$_actual" != "$_expected" ]; then
     echo "Nexus installer: SHA256 mismatch for '$_name' (expected $_expected, got $_actual)." >&2
     exit 1
