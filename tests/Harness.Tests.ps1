@@ -527,137 +527,38 @@ Assert-Aih (Test-Path -LiteralPath $nexusUiPackage) 'Nexus UI package installed 
 $homePatch = Join-Path $layout.Data 'cordis.patch.yml'
 $homePatchText = Get-Content -Raw -Encoding UTF8 -LiteralPath $homePatch
 Assert-Aih ($homePatchText.Contains('nexus-ui-brand') -and $homePatchText.Contains('ui-brand-official') -and $homePatchText.Contains('disabled: true')) 'home patch composes Nexus brand and disables the official DeepSeek brand'
-$distDir = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-web-frontend/dist'
-Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $distDir 'index.html')).Contains('<title>Nexus</title>')) 'dist index title is Nexus'
-Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $distDir 'favicon.svg')).Contains('#7C5CFF')) 'dist favicon is the Nexus mark'
-$distManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $distDir 'manifest.webmanifest') | ConvertFrom-Json
-Assert-Aih ([string]$distManifest.name -eq 'Nexus' -and [string]$distManifest.short_name -eq 'Nexus') 'PWA manifest identity is Nexus'
-$rendererBundle = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-renderer/lib/client.js'
-Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath $rendererBundle).Contains('const productTitle = "Nexus"')) 'runtime document title is Nexus'
-Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-layout/lib/client.js')).Contains('panels.sidebar === 0 ? 288 : panels.sidebar')) 'expanded sidebar default is 288px'
-$liveConversation = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js')
-Assert-Aih ($liveConversation.Contains('background:var(--dsw-alias-button-primary-fill);color:#fff')) 'composer send button uses violet primary'
-Assert-Aih ($liveConversation.Contains('#7C5CFF') -and -not $liveConversation.Contains('#6187D8')) 'hero glow tinted violet'
-Assert-Aih ($liveConversation.Contains('const inert = pendingWorkspaceId !== void 0 || sessionId === void 0 || hero && chipTitle === void 0;')) 'live UI blocks old-session submission during workspace transition'
-Assert-Aih ((Test-Path -LiteralPath (Join-Path $distDir 'assets/nexus-logo.png')) -and (Test-Path -LiteralPath (Join-Path $distDir 'assets/nexus-mark.png'))) 'Nexus brand assets served from dist'
+# DSH 0.2.x: Nexus UI is delivered ONLY as supported plugins. The compiled-bundle
+# patches this block used to assert (dist title/favicon/manifest, renderer title,
+# sidebar width, send-button colour, hero glow, workspace-transition guard, brand
+# assets in dist) were retired with Patch-NexusUi.ps1; see the migration report.
+# The installer contract is asserted instead, on a disposable root.
+$brandAssetPlugin = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'ui/nexus-ui/lib/index.js')
+Assert-Aih ($brandAssetPlugin.Contains('/nexus/assets/') -and $brandAssetPlugin.Contains('connection.admit') -or $brandAssetPlugin.Contains('admit(req)')) 'brand assets are served by the plugin host half behind connection admission'
 
 $fixture = New-Fixture 'nexus-ui'
 try {
-    $fixtureApp = Join-Path $fixture 'app/node_modules/@deepseek-ai'
-    $fixtureFrontend = Join-Path $fixtureApp 'dsh-web-frontend'
-    $fixtureDist = Join-Path $fixtureFrontend 'dist'
-    New-Item -ItemType Directory -Force -Path $fixtureDist | Out-Null
-    [IO.File]::WriteAllText((Join-Path $fixtureFrontend 'package.json'), '{"name":"@deepseek-ai/dsh-web-frontend","version":"0.1.1-rc.2"}', [Text.UTF8Encoding]::new($false))
-    # Non-ASCII copy strings are read from patch-copy.json (explicit UTF-8) —
-    # never inlined as literals — because a BOM-less script file is decoded with
-    # the system ANSI codepage by Windows PowerShell 5.1, which would corrupt
-    # the fixture on non-UTF-8 codepages. The fixture must mirror the pinned
-    # bundle byte-for-byte on every machine.
-    $fixtureCopy = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'ui/nexus-ui/patch-copy.json') | ConvertFrom-Json
-    # Fixture files deliberately use CRLF line endings to prove the patch is line-ending tolerant.
-    [IO.File]::WriteAllText((Join-Path $fixtureDist 'index.html'), "<!doctype html>`r`n<html><head><title>DeepSeek Harness</title></head><body></body></html>", [Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $fixtureDist 'favicon.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>', [Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $fixtureDist 'manifest.webmanifest'), '{"id":"/","name":"DeepSeek Harness","short_name":"DSH","display":"fullscreen"}', [Text.UTF8Encoding]::new($false))
-    $fixtureRenderer = Join-Path $fixtureApp 'dsh-client-ui-renderer/lib'
-    New-Item -ItemType Directory -Force -Path $fixtureRenderer | Out-Null
-    [IO.File]::WriteAllText((Join-Path $fixtureRenderer 'client.js'), "const productTitle = ""DeepSeek Harness"";`r`n", [Text.UTF8Encoding]::new($false))
-    $fixtureConversation = Join-Path $fixtureApp 'dsh-client-ui-conversation/lib'
-    New-Item -ItemType Directory -Force -Path $fixtureConversation | Out-Null
-    $conversationFixture = $fixtureCopy.heroHeadline[0].from + ",`r`n" + $fixtureCopy.heroHeadline[1].from + "`r`nconst inert = sessionId === void 0 || hero && chipTitle === void 0;`r`nbackground:var(--dsw-alias-button-info-fill);color:#fff`r`nvar(--dsw-alias-button-info-hover)`r`n#6187D8`r`n"
-    [IO.File]::WriteAllText((Join-Path $fixtureConversation 'client.js'), $conversationFixture, [Text.UTF8Encoding]::new($false))
-    $fixtureLayout = Join-Path $fixtureApp 'dsh-client-ui-layout/lib'
-    New-Item -ItemType Directory -Force -Path $fixtureLayout | Out-Null
-    [IO.File]::WriteAllText((Join-Path $fixtureLayout 'client.js'), "const w = { sidebar: 280, details: 0 };`r`nd.sidebar = d.sidebar === 0 ? 280 : 0;`r`nconst w = panels.sidebar === 0 ? 280 : panels.sidebar;`r`n", [Text.UTF8Encoding]::new($false))
-    $fixtureModelSel = Join-Path $fixtureApp 'dsh-client-ui-model-selection/lib'
-    New-Item -ItemType Directory -Force -Path $fixtureModelSel | Out-Null
-    [IO.File]::WriteAllText((Join-Path $fixtureModelSel 'client.js'), "const x = effortLabel !== void 0 && (0, react_jsx_runtime.jsx)(`"span`", {`r`n", [Text.UTF8Encoding]::new($false))
-    $composerContract = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'ui/nexus-ui/composer-contract.json') | ConvertFrom-Json
-    foreach ($composerPatch in $composerContract.patches) {
-        $composerPackage = Join-Path $fixtureApp $composerPatch.package
-        [IO.File]::WriteAllText((Join-Path $composerPackage 'package.json'), '{"version":"0.1.1-rc.2"}', [Text.UTF8Encoding]::new($false))
-        [IO.File]::AppendAllText((Join-Path $composerPackage 'lib/client.js'), "`r`n" + $composerPatch.before.Replace("`n", "`r`n"), [Text.UTF8Encoding]::new($false))
+    foreach ($directory in @('scripts', 'ui')) { Copy-Item -LiteralPath (Join-Path $InstallRoot $directory) -Destination (Join-Path $fixture $directory) -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path (Join-Path $fixture 'data') | Out-Null
+    $fixtureApp = Join-Path $fixture 'app/node_modules/@deepseek-ai/sentinel'
+    New-Item -ItemType Directory -Force -Path $fixtureApp | Out-Null
+    [IO.File]::WriteAllText((Join-Path $fixtureApp 'client.js'), 'upstream-bundle-bytes', [Text.UTF8Encoding]::new($false))
+    $sentinelHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureApp 'client.js')).Hash
+
+    & (Join-Path $fixture 'scripts/Install-NexusUi.ps1') -InstallRoot $fixture -SourceRoot $fixture
+    foreach ($plugin in @('ui-brand', 'controller', 'mode-selector')) {
+        Assert-Aih (Test-Path -LiteralPath (Join-Path $fixture "data/profiles/node_modules/@nexus/$plugin/package.json")) "fixture: @nexus/$plugin installed into the profile module fallback"
     }
-    $fixtureModels = Join-Path $fixtureApp 'dsh-client-ui-settings-models/lib'
-    New-Item -ItemType Directory -Force -Path $fixtureModels | Out-Null
-    # Build the welcome-notice block from the exact copy strings in patch-copy.json so the
-    # fixture mirrors the pinned bundle byte-for-byte (including the literal backslash-n sequences).
-    # The zh continue label is composed from codepoints so the fixture stays
-    # byte-faithful on any ANSI codepage (patch-copy.json carries no key for it
-    # and the patcher never rewrites it).
-    $zhContinue = '"' + [string][char]0x7EE7 + [string][char]0x7EED + '"'
-    $noticeBlock = "const WELCOME_NOTICE_COPY = {`r`n`t`t`tzh: {`r`n`t`t`t`ttitle: " + $fixtureCopy.welcomeNotice.titleZh.from + ",`r`n`t`t`t`tbody: " + $fixtureCopy.welcomeNotice.bodyZh.from + "`r`n`t`t`t`tcontinueLabel: " + $zhContinue + "`r`n`t`t`t},`r`n`t`t`ten: {`r`n`t`t`t`ttitle: " + $fixtureCopy.welcomeNotice.titleEn.from + ",`r`n`t`t`t`tbody: " + $fixtureCopy.welcomeNotice.bodyEn.from + "`r`n`t`t`t`tcontinueLabel: ""Continue""`r`n`t`t`t}`r`n`t`t};"
-    [IO.File]::WriteAllText((Join-Path $fixtureModels 'client.js'), $noticeBlock, [Text.UTF8Encoding]::new($false))
-    $fixtureData = Join-Path $fixture 'data'
-    New-Item -ItemType Directory -Force -Path (Join-Path $fixtureData 'profiles/node_modules') | Out-Null
-    [IO.File]::WriteAllText((Join-Path $fixtureData 'nexus-settings.yaml'), "agent-default-model:`r`n  provider: flash-max-direct`r`n", [Text.UTF8Encoding]::new($false))
+    Assert-Aih ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureApp 'client.js')).Hash -eq $sentinelHash) 'fixture: the installer never touches upstream bundles'
+    $first = (Get-ChildItem -LiteralPath (Join-Path $fixture 'data/profiles/node_modules/@nexus') -File -Recurse | Sort-Object FullName | ForEach-Object { (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash }) -join ':'
+    & (Join-Path $fixture 'scripts/Install-NexusUi.ps1') -InstallRoot $fixture -SourceRoot $fixture
+    $second = (Get-ChildItem -LiteralPath (Join-Path $fixture 'data/profiles/node_modules/@nexus') -File -Recurse | Sort-Object FullName | ForEach-Object { (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash }) -join ':'
+    Assert-Aih ($first -eq $second) 'fixture: repeated UI plugin install is byte-idempotent'
 
-    & (Join-Path $InstallRoot 'scripts/Patch-NexusUi.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot
-    if ($LASTEXITCODE -ne 0) { throw 'Nexus UI patch failed on the fixture' }
-    Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureDist 'index.html')).Contains('<title>Nexus</title>')) 'fixture: dist title patched'
-    Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureDist 'favicon.svg')).Contains('#7C5CFF')) 'fixture: favicon replaced with Nexus mark'
-    $fixtureManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureDist 'manifest.webmanifest') | ConvertFrom-Json
-    Assert-Aih ([string]$fixtureManifest.name -eq 'Nexus') 'fixture: manifest name patched'
-    Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureRenderer 'client.js')).Contains('const productTitle = "Nexus"')) 'fixture: renderer title patched'
-    $fixtureConversationText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureConversation 'client.js')
-    Assert-Aih ($fixtureConversationText.Contains($fixtureCopy.heroHeadline[0].to) -and $fixtureConversationText.Contains($fixtureCopy.heroHeadline[1].to)) 'fixture: hero headlines patched (en + zh)'
-    Assert-Aih ($fixtureConversationText.Contains('const inert = pendingWorkspaceId !== void 0 || sessionId === void 0 || hero && chipTitle === void 0;')) 'fixture: workspace transition blocks submission to the previous session'
-    $fixtureLayoutText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureLayout 'client.js')
-    Assert-Aih ($fixtureLayoutText.Contains('sidebar: 288,') -and $fixtureLayoutText.Contains('d.sidebar === 0 ? 288 : 0')) 'fixture: sidebar default width patched to 288'
-    Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureModelSel 'client.js')).Contains('!modelLabel.toUpperCase().endsWith(effortLabel.toUpperCase())')) 'fixture: model effort dedupe patched'
-    Assert-Aih ($fixtureConversationText.Contains('background:var(--dsw-alias-button-primary-fill);color:#fff') -and $fixtureConversationText.Contains('var(--dsw-alias-button-primary-hover)') -and $fixtureConversationText.Contains('#7C5CFF') -and -not $fixtureConversationText.Contains('#6187D8')) 'fixture: send button violet + glow tinted'
-    Assert-Aih ((Test-Path -LiteralPath (Join-Path $fixtureDist 'assets/nexus-logo.png')) -and (Test-Path -LiteralPath (Join-Path $fixtureDist 'assets/nexus-mark.png'))) 'fixture: brand assets copied to dist'
-    $fixtureModelsText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureModels 'client.js')
-    Assert-Aih ($fixtureModelsText.Contains('About Nexus') -and $fixtureModelsText.Contains($fixtureCopy.welcomeNotice.titleZh.to) -and -not $fixtureModelsText.Contains('Internal Testing Notice')) 'fixture: welcome notice patched'
-    Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureData 'nexus-settings.yaml')).Contains('preference: dark')) 'fixture: dark theme default added'
-    Assert-Aih (Test-Path -LiteralPath (Join-Path $fixtureData 'profiles/node_modules/@nexus/ui-brand/package.json')) 'fixture: Nexus package installed'
-
-    $firstIndex = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureDist 'index.html')
-    $firstModels = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureModels 'client.js')
-    $firstRenderer = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureRenderer 'client.js')
-    $firstConversation = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureConversation 'client.js')
-    $firstLayout = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureLayout 'client.js')
-    & (Join-Path $InstallRoot 'scripts/Patch-NexusUi.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot
-    if ($LASTEXITCODE -ne 0) { throw 'Nexus UI patch failed on the second run' }
-    $secondIndex = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureDist 'index.html')
-    $secondModels = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureModels 'client.js')
-    $secondRenderer = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureRenderer 'client.js')
-    $secondConversation = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureConversation 'client.js')
-    $secondLayout = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureLayout 'client.js')
-    Assert-Aih ($firstIndex.Hash -eq $secondIndex.Hash -and $firstModels.Hash -eq $secondModels.Hash -and $firstRenderer.Hash -eq $secondRenderer.Hash -and $firstConversation.Hash -eq $secondConversation.Hash -and $firstLayout.Hash -eq $secondLayout.Hash) 'fixture: Nexus patch is idempotent (second run changes nothing)'
-
-    $modelSeatPath = Join-Path $fixtureModelSel 'client.js'
-    $modelSeatText = Get-Content -Raw -Encoding UTF8 -LiteralPath $modelSeatPath
-    $modelSeatContract = $composerContract.patches | Where-Object { $_.package -eq 'dsh-client-ui-model-selection' }
-    foreach ($invalidSeat in @('changed', 'duplicate', 'mixed')) {
-        $brokenSeat = switch ($invalidSeat) {
-            'changed' { $modelSeatText.Replace('}, NexusModelPreference));', '}, UnexpectedPreference));') }
-            'duplicate' { $modelSeatText + "`n" + $modelSeatContract.after }
-            'mixed' { $modelSeatText + "`n" + $modelSeatContract.before }
-        }
-        [IO.File]::WriteAllText($modelSeatPath, $brokenSeat, [Text.UTF8Encoding]::new($false))
-        $rejectedSeat = $false
-        try { & (Join-Path $InstallRoot 'scripts/Patch-NexusComposer.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot }
-        catch { $rejectedSeat = $true }
-        Assert-Aih $rejectedSeat "fixture: composer patch rejects $invalidSeat upstream contract"
-        Assert-Aih ((Get-FileHash -LiteralPath (Join-Path $fixtureConversation 'client.js')).Hash -eq $secondConversation.Hash) 'fixture: failed composer preflight leaves conversation bundle unchanged'
-    }
-    [IO.File]::WriteAllText($modelSeatPath, $modelSeatText, [Text.UTF8Encoding]::new($false))
-    $modelSeatManifest = Join-Path (Split-Path -Parent $fixtureModelSel) 'package.json'
-    [IO.File]::WriteAllText($modelSeatManifest, '{"version":"0.1.2"}', [Text.UTF8Encoding]::new($false))
-    $rejectedVersion = $false
-    try { & (Join-Path $InstallRoot 'scripts/Patch-NexusComposer.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot }
-    catch { $rejectedVersion = $true }
-    Assert-Aih $rejectedVersion 'fixture: composer patch rejects an unpinned package version'
-    [IO.File]::WriteAllText($modelSeatManifest, '{"version":"0.1.1-rc.2"}', [Text.UTF8Encoding]::new($false))
-
-    # Fail-closed: when the pinned upstream structure changes, the patch must refuse.
-    [IO.File]::WriteAllText((Join-Path $fixtureRenderer 'client.js'), "const productTitle = ""Something Else"";`r`n", [Text.UTF8Encoding]::new($false))
+    # Fail closed: an incomplete plugin source refuses the install.
+    Remove-Item -LiteralPath (Join-Path $fixture 'ui/nexus-controller/lib/client.js') -Force
     $refused = $false
-    try {
-        & (Join-Path $InstallRoot 'scripts/Patch-NexusUi.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot
-    }
-    catch { $refused = $true }
-    Assert-Aih $refused 'fixture: Nexus patch fails closed on changed upstream structure'
+    try { & (Join-Path $fixture 'scripts/Install-NexusUi.ps1') -InstallRoot $fixture -SourceRoot $fixture } catch { $refused = $true }
+    Assert-Aih $refused 'fixture: the UI installer fails closed on an incomplete plugin source'
 }
 finally {
     if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force }

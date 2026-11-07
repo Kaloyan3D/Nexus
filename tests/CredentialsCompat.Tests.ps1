@@ -27,7 +27,7 @@ function Link-Directory([string]$Link, [string]$Target) {
     if (Test-AihIsWindows) { New-Item -ItemType Junction -Path $Link -Target $Target | Out-Null }
     else { New-Item -ItemType SymbolicLink -Path $Link -Target $Target | Out-Null }
 }
-$fakeDeepSeek = 'sk-FAKE-compat-test-not-a-credential'
+$fakeDeepSeek = 'FAKE-compat-deepseek-placeholder'
 $fakeOpenCode = 'fake-opencode-compat-value'
 
 try {
