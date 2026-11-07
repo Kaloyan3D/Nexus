@@ -995,7 +995,7 @@ function applyCompactionOperationV2(session, operation, payloadText, durableOp) 
       ? { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId: operation.operationId, generation: operation.checkpointGeneration, taskInstanceId: operation.taskInstanceId }
       : { kind: 'plugin', plugin: 'aih-controller', form: 'context-continuation', operationId: operation.operationId, generation: operation.checkpointGeneration };
     const node = session.append('user/message', v2UserMessageNode(text, source), {
-      surfaceOp: { op: 'replace', startSeq: segment.start, endSeq: segment.end },
+      surfaceOp: { op: 'replace', start: segment.start, end: segment.end }, // CCv2 laboratory writer (disabled in production): kept at its original op shape; DSH 0.2 requires { startSeq, endSeq } - port before any re-enable
       sourceEventSeqs: segment.sourceEventSeqs.slice(),
     });
     landed.push({ seq: node.seq, role: segment.role, segmentIndex: index });
@@ -1021,7 +1021,7 @@ function retryMissingSegmentsV2(session, operation, payloadText, durableOp, miss
       ? { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId: operation.operationId, generation: operation.checkpointGeneration, taskInstanceId: operation.taskInstanceId }
       : { kind: 'plugin', plugin: 'aih-controller', form: 'context-continuation', operationId: operation.operationId, generation: operation.checkpointGeneration };
     const node = session.append('user/message', v2UserMessageNode(text, source), {
-      surfaceOp: { op: 'replace', startSeq: segment.start, endSeq: segment.end },
+      surfaceOp: { op: 'replace', start: segment.start, end: segment.end }, // CCv2 laboratory writer (disabled in production): kept at its original op shape; DSH 0.2 requires { startSeq, endSeq } - port before any re-enable
       sourceEventSeqs: segment.sourceEventSeqs.slice(),
     });
     landed.push({ seq: node.seq, role: segment.role, segmentIndex: index });
