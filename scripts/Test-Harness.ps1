@@ -9,7 +9,14 @@ param(
     # explicit host executable (e.g. the PowerShell 7 lane on Windows).
     # Production resolution (Get-AihPowerShellHost: powershell.exe on Windows,
     # pinned pwsh on POSIX) is untouched when this is omitted.
-    [string]$PowerShellExecutable
+    [string]$PowerShellExecutable,
+    # Suite lane. 'production' = suites for what the installed product ships and
+    # enforces (includes the CCv2 durable-mutation RESTRICTION suites); 'ccv2-lab' =
+    # deliberately NON-installed CCv2 research suites (active/durable machinery that the
+    # product keeps disabled); 'all' (default) runs both. Nothing is deleted or weakened:
+    # the lab lane is runnable on demand and its size is always printed. See
+    # docs/testing/CCV2-LAB-SUITES.md.
+    [ValidateSet('production','ccv2-lab','all')][string]$Lane = 'all'
 )
 
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent $PSScriptRoot }
@@ -206,6 +213,7 @@ $suites = @(
     [ordered]@{ name='NexusWorkspaceGuard'; script='tests/NexusWorkspaceGuard.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='NexusComposerSeat'; script='tests/NexusComposerSeat.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='NexusSessionIdentity'; script='tests/NexusSessionIdentity.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='HarnessLanes'; script='tests/HarnessLanes.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='PlatformDetachedLifecycle'; script='tests/PlatformDetachedLifecycle.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='PreferredRouteContract'; script='tests/PreferredRouteContract.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='RoutingIntegrity'; script='tests/RoutingIntegrity.Tests.cjs'; executable=$layout.Node; kind='node' },
@@ -214,6 +222,23 @@ $suites = @(
     [ordered]@{ name='VisualCaptureTarget'; script='tests/VisualCaptureTarget.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='VisualPacketIntegrity'; script='tests/VisualPacketIntegrity.Tests.ps1'; executable=$powershell; kind='powershell' }
 )
+
+# ---- Suite lanes (see docs/testing/CCV2-LAB-SUITES.md) ----
+# The lab lane is exactly the CCv2 research suites: any suite whose name carries the V2 /
+# DeepseekV4 tokenizer / R1 real-session markers, EXCEPT the ContextRestricted* suites, which
+# enforce the shipped restriction (and ordinary DSH compaction with CCv2 disabled) and are
+# production. tests/HarnessLanes.Tests.cjs pins this partition.
+function Get-AihSuiteLane([string]$Name) {
+    if ($Name -like 'ContextRestricted*') { return 'production' }
+    if ($Name -match 'V2' -or $Name -like 'ContextR1RealSessionContracts' -or $Name -like 'ContextTokenizerDeepseekV4*' -or $Name -like 'ContextCompilerActiveDeepseekV4') { return 'ccv2-lab' }
+    return 'production'
+}
+foreach ($suite in $suites) { $suite['lane'] = Get-AihSuiteLane $suite.name }
+$labCount = @($suites | Where-Object { $_.lane -eq 'ccv2-lab' }).Count
+$productionCount = @($suites | Where-Object { $_.lane -eq 'production' }).Count
+if ($Lane -ne 'all') { $suites = @($suites | Where-Object { $_.lane -eq $Lane }) }
+Write-Host ('HARNESS LANE: {0} | production suites {1} | ccv2-lab suites {2} | running {3}' -f $Lane, $productionCount, $labCount, $suites.Count)
+if ($Lane -eq 'production') { Write-Host ('NOTE: {0} CCv2 lab suites are not run in this lane; run -Lane ccv2-lab (docs/testing/CCV2-LAB-SUITES.md).' -f $labCount) }
 
 # Active durable CCv2 is deliberately disabled in shipped production. Retain
 # the original algorithm assertions in a private, explicitly labelled fixture;

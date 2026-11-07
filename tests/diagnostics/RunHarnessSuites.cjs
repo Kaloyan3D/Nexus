@@ -3,7 +3,7 @@
 // RunHarnessSuites.cjs — runs the suites listed in scripts/Test-Harness.ps1
 // one by one against an INSTALLED tree and records a per-suite verdict.
 //
-//   node tests/diagnostics/RunHarnessSuites.cjs <InstallRoot> <out.json> [tmpDir] [nameRegex]
+//   node tests/diagnostics/RunHarnessSuites.cjs <InstallRoot> <out.json> [tmpDir] [nameRegex] [--lane production|ccv2-lab|all]
 //
 // Why not just Test-Harness.ps1: it has no resume, and a few suites leak large
 // temp trees (Intelligence tree fixtures, CCv2 research checkouts). This runner
@@ -17,7 +17,11 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 
-const [installRootArg, outPath, tmpArg, filter] = process.argv.slice(2)
+const args = process.argv.slice(2)
+const laneIndex = args.indexOf('--lane')
+const lane = laneIndex >= 0 ? args.splice(laneIndex, 2)[1] : 'all'
+const [installRootArg, outPath, tmpArg, filter] = args
+const { suiteLane } = require('../lib/SuiteLane.cjs')
 if (!installRootArg || !outPath) { console.error('usage: RunHarnessSuites.cjs <InstallRoot> <out.json> [tmpDir] [nameRegex]'); process.exit(2) }
 const root = path.resolve(installRootArg)
 const tmpRoot = path.resolve(tmpArg || path.join(os.tmpdir(), 'harness-suites-' + process.pid))
@@ -35,6 +39,7 @@ if (suites.length === 0) { console.error('no suites parsed from Test-Harness.ps1
 const results = []
 for (const suite of suites) {
   if (filter && !new RegExp(filter).test(suite.name)) continue
+  if (lane !== 'all' && suiteLane(suite.name) !== lane) continue
   const started = Date.now()
   const scratch = fs.mkdtempSync(path.join(tmpRoot, 'suite-'))
   const env = {
@@ -52,7 +57,7 @@ for (const suite of suites) {
   const passes = lines.filter((line) => /^\s*(PASS|OK)\b/.test(line.replace(/\x1b\[[0-9;]*m/g, ''))).length
   const firstFailure = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, '')).find((line) => /(^|\s)(FAIL|Error|AssertionError|Exception)\b/.test(line)) || ''
   results.push({
-    name: suite.name, kind: suite.kind, status: run.status, signal: run.signal || null,
+    lane: suiteLane(suite.name), name: suite.name, kind: suite.kind, status: run.status, signal: run.signal || null,
     verdict: run.status === 0 ? 'PASS' : 'FAIL', passLines: passes, ms: Date.now() - started,
     firstFailure: firstFailure.trim().slice(0, 240),
     tail: lines.filter(Boolean).slice(-3).join(' | ').slice(0, 300),
