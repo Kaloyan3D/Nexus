@@ -1,0 +1,148 @@
+{
+  "dshVersion": "0.2.2-rc.1",
+  "node": "v26.13.0",
+  "platform": "darwin",
+  "experiments": {
+    "E1_suspended_holder": {
+      "observations": [
+        {
+          "step": "live holder",
+          "successorWriteOpen": "SessionAlreadyOwnedError"
+        },
+        {
+          "step": "holder SIGSTOP + 4s (any short Nexus lease would have expired)",
+          "successorWriteOpen": "SessionAlreadyOwnedError"
+        },
+        {
+          "step": "holder SIGCONT, resumed append of seq 2 (no external fence supplied)",
+          "holderResult": "append-ok 2"
+        },
+        {
+          "step": "holder SIGKILL",
+          "successorWriteOpen": "acquired"
+        }
+      ]
+    },
+    "E2_forfeited_lock_stale_handle": {
+      "observations": [
+        {
+          "step": "stale handle append seq 2 (conflicts with successor seq 2)",
+          "result": "accepted"
+        },
+        {
+          "step": "stale handle flush",
+          "result": "accepted"
+        },
+        {
+          "step": "successor append seq 3 after stale attempts",
+          "result": "accepted"
+        }
+      ],
+      "lockFilePresent": true,
+      "ownershipLostReferencesInJsonlBackend": 0,
+      "logAfterStaleWrites": "SessionPersistenceCorruptionError",
+      "logAfterStaleWritesMessage": "session \"e2\": stored log is corrupt: Error: corrupt session log: invalid committed event at line 4: released v2 row 3 has seq gap (expected 3, got 2) (raw log: /var/folders/fh/6fzmcgms1qx7p24nrzcpq4h40000gn/T/dsh02-own-e"
+    },
+    "E3_api_surface": {
+      "handleMembers": [
+        "access",
+        "append",
+        "assertOpen",
+        "batchTimer",
+        "buffered",
+        "chain",
+        "close",
+        "closing",
+        "drainBuffered",
+        "drainLive",
+        "drainPaused",
+        "draining",
+        "enqueueChain",
+        "enqueueLive",
+        "ensureLease",
+        "flush",
+        "header",
+        "id",
+        "inheritedEventCount",
+        "lease",
+        "observedLength",
+        "persistContiguous",
+        "read",
+        "readCurrent",
+        "readPrimed",
+        "run",
+        "state",
+        "storage"
+      ],
+      "appendArity": 2,
+      "flushArity": 1,
+      "fenceLikeMemberNames": [
+        "ensureLease",
+        "lease"
+      ],
+      "persistenceStoreMembers": [
+        "acquireLease",
+        "acquireWriteLease",
+        "appendLines",
+        "assertLogParentAllowsAbsence",
+        "assertStoredIdentity",
+        "assertUsableRoot",
+        "checkRootEncoding",
+        "create",
+        "currentHeader",
+        "decodeStoredLog",
+        "encodeEventBatch",
+        "encodeMaterialization",
+        "encodingMismatch",
+        "ensureRootEncoding",
+        "exists",
+        "findLog",
+        "findOppositeGenerationInDirectory",
+        "flush",
+        "generationFailure",
+        "hasPendingSession",
+        "historicalCorpusRevision",
+        "legacyLayout",
+        "list",
+        "listArtifacts",
+        "listGenerations",
+        "listProjectDirs",
+        "listSessionDirs",
+        "loadStoredMigration",
+        "locate",
+        "mapSessionDirectories",
+        "materialize",
+        "materializePosix",
+        "materializeWin32",
+        "memoizeStoredLog",
+        "open",
+        "oppositeCompression",
+        "persistBatch",
+        "persistHeader",
+        "prepareStoredMigration",
+        "publishStoredMigration",
+        "readFirstLine",
+        "readFirstZstdLine",
+        "readGenerationHeader",
+        "readStoredLog",
+        "readZstdPrefix",
+        "rejectExistingLog",
+        "rejectLegacyFlatArtifact",
+        "rejectOppositeArtifact",
+        "releaseHandle",
+        "repair",
+        "requireStoredLog",
+        "resolveCurrentLog",
+        "resolveGenerationInDirectory",
+        "rollbackAppend",
+        "sameFile",
+        "stat",
+        "syncDirPosix",
+        "truncateTornTail",
+        "validateSourceIdentity",
+        "waitForPreparation",
+        "writeSyncedTempFile"
+      ]
+    }
+  }
+}

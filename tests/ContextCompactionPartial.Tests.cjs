@@ -10,6 +10,8 @@
  */
 
 const assert = require('node:assert/strict');
+// DSH 0.2.x removed `session.events`; read the log through the single supported adapter.
+const { sessionEvents: eventsOf } = require('../config/Dsh-SessionEvents.cjs');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -79,7 +81,7 @@ async function main() {
     check(segs && segs.length >= 2, 'partial setup: operation has >=2 segments (got ' + (segs && segs.length) + ')');
     const flat = [];
     for (const sg of segs) for (const sq of sg.sourceEventSeqs) flat.push(sq);
-    const op = cli('freeze-operation', { workspace, taskInstanceId, sessionId, replacementStart: flat[0], replacementEnd: flat[flat.length - 1], sourceEventSeqs: flat, segments: segs, completionBoundarySeq: session.events.length - 1, repositoryId: wsIdentity.repositoryId, checkoutId: wsIdentity.checkoutId, checkpointPath: cp.path });
+    const op = cli('freeze-operation', { workspace, taskInstanceId, sessionId, replacementStart: flat[0], replacementEnd: flat[flat.length - 1], sourceEventSeqs: flat, segments: segs, completionBoundarySeq: eventsOf(session).length - 1, repositoryId: wsIdentity.repositoryId, checkoutId: wsIdentity.checkoutId, checkpointPath: cp.path });
     check(op && op.operationId, 'partial setup: frozen operation persisted');
     cli('transition', { workspace, taskInstanceId, to: 'apply-pending', reason: 'partial', sessionId });
     // Crash after landing ONLY the first exact segment (same message shape
@@ -89,9 +91,9 @@ async function main() {
       id: harness.newMessageId(), role: 'user',
       content: [{ type: 'text', text: '<nexus-context-checkpoint task="T"/>' }],
       source: { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId: op.operationId },
-    }, { surfaceOp: { op: 'replace', start: first.start, end: first.end }, sourceEventSeqs: first.sourceEventSeqs });
+    }, { surfaceOp: { op: 'replace', startSeq: first.start, endSeq: first.end }, sourceEventSeqs: first.sourceEventSeqs });
     check(landedOne && typeof landedOne.seq === 'number', 'partial setup: first segment landed');
-    const countAfterFirst = session.events.length;
+    const countAfterFirst = eventsOf(session).length;
     // Task B arrives before the retry.
     session.append('user/message', harness.identifiedUserMessage('Task B intent PARTIAL-B'), { surfaceOp: 'append' });
     session.append('assistant/message', harness.identifiedAssistantMessage('B noted', 3, 1), { surfaceOp: 'append' });
@@ -104,7 +106,7 @@ async function main() {
     await preStep({ agent, messages: [prompt()], step: 1, turn: 5 }, async () => ({ kind: 'enter', messages: [] }));
     const snap = cli('snapshot', { workspace, taskInstanceId });
     check(snap.state === 'applied', 'partial: retry completes to APPLIED (got ' + snap.state + ')');
-    const replacements = session.events.filter((e) => e.type === 'user/message' && e.data && e.data.source && e.data.source.operationId === op.operationId);
+    const replacements = eventsOf(session).filter((e) => e.type === 'user/message' && e.data && e.data.source && e.data.source.operationId === op.operationId);
     check(replacements.length === segs.length, 'partial: exactly one node per frozen segment, no duplicates (got ' + replacements.length + ' for ' + segs.length + ' segments)');
     const frozenAfter = JSON.stringify(cli('read-operation', { workspace, taskInstanceId }));
     check(JSON.parse(frozenAfter).sourceEventSeqs.length === flat.length, 'partial: frozen sourceEventSeqs unchanged');

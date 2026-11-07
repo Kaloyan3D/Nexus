@@ -18,13 +18,17 @@
  */
 
 const assert = require('node:assert/strict');
+// DSH 0.2.x removed `session.events`; read the log through the single supported adapter.
+const { sessionEvents: eventsOf } = require('../config/Dsh-SessionEvents.cjs');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
 const harness = require('./lib/ContextCompactionProdHarness.cjs');
 
-const HOST_APP = '/home/kaloyan/.local/share/nexus/app/node_modules/@deepseek-ai';
+// The installation under test first (harness-provided root), then the historical developer location.
+const HOST_APP = [process.env.AIH_HOST_APP, process.env.AIH_TOOLCHAIN_ROOT && path.join(process.env.AIH_TOOLCHAIN_ROOT, 'app'), '/home/kaloyan/.local/share/nexus/app']
+  .filter(Boolean).map((root) => path.join(root, 'node_modules', '@deepseek-ai')).find((dir) => fs.existsSync(path.join(dir, 'dsh-agent-loop', 'lib', 'index.js'))) || '/home/kaloyan/.local/share/nexus/app/node_modules/@deepseek-ai';
 const loopLib = require(path.join(HOST_APP, 'dsh-agent-loop', 'lib', 'index.js'));
 const promptLib = require(path.join(HOST_APP, 'dsh-system-prompt', 'lib', 'index.js'));
 const agentLib = require(path.join(HOST_APP, 'dsh-agent', 'lib', 'index.js'));
@@ -110,8 +114,8 @@ function makeProjection(session, emitCtx) {
   };
   const surface = new Set(session.surface.nodes);
   const state = { retained: undefined };
-  for (let index = session.events.length - 1; index >= 0; index -= 1) {
-    const event = session.events[index];
+  for (let index = eventsOf(session).length - 1; index >= 0; index -= 1) {
+    const event = eventsOf(session)[index];
     if (!event || event.type !== 'user/message' || !isOwned(event.data)) continue;
     if (state.retained === undefined || state.retained === null) state.retained = state.retained === undefined ? null : state.retained;
     state.retained = state.retained === undefined ? null : state.retained;
@@ -215,7 +219,7 @@ async function main() {
     const segs = prod.splitRangeAroundOwned(session, cut.shadowedSeqs, owned);
     const flat = [];
     for (const sg of segs) for (const sq of sg.sourceEventSeqs) flat.push(sq);
-    cli('freeze-operation', { workspace, taskInstanceId, sessionId, replacementStart: flat[0], replacementEnd: flat[flat.length - 1], sourceEventSeqs: flat, segments: segs, completionBoundarySeq: session.events.length - 1, repositoryId: wsIdentity.repositoryId, checkoutId: wsIdentity.checkoutId, checkpointPath: cp.path });
+    cli('freeze-operation', { workspace, taskInstanceId, sessionId, replacementStart: flat[0], replacementEnd: flat[flat.length - 1], sourceEventSeqs: flat, segments: segs, completionBoundarySeq: eventsOf(session).length - 1, repositoryId: wsIdentity.repositoryId, checkoutId: wsIdentity.checkoutId, checkpointPath: cp.path });
     cli('transition', { workspace, taskInstanceId, to: 'apply-pending', reason: 'f1loop', sessionId });
     // Wiring: fake ctx for the bridge (flush OK, no sessionPersistence
     // surface -> restore-validity fallback path), REAL systemPrompt text
@@ -274,17 +278,17 @@ async function main() {
     const request3 = session.deriveMessages();
     check(authoritativeRuntimeCount(request3, 'NEW-B') === 1, 'F1 next step: still exactly 1 current authoritative snapshot');
     // Fresh-process restore of the full log.
-    const header = { version: 0, id: sessionId, createdAt: Date.now(), cwd: workspace };
-    const seed = JSON.parse(JSON.stringify(session.events));
+    const header = JSON.parse(JSON.stringify(session.header)); // DSH 0.2: the full persisted header is the restore contract
+    const seed = JSON.parse(JSON.stringify(eventsOf(session)));
     let restored = null;
     try {
       restored = dsh.Session.fromRestore(sessionId, seed, header);
     } catch (e) {
       check(false, 'F1 restore: fresh restore succeeds (failed: ' + e.message + ')');
     }
-    check(restored && restored.events.length === seed.length + 1, 'F1 restore: fresh-process restore PASS');
+    check(restored && eventsOf(restored).length === seed.length + 1, 'F1 restore: fresh-process restore PASS');
     let missingId = 0;
-    for (const ev of restored.events) {
+    for (const ev of eventsOf(restored)) {
       if (ev.type === 'user/message' && (!ev.data || typeof ev.data.id !== 'string' || ev.data.id === '')) missingId += 1;
     }
     check(missingId === 0, 'F1 restore: no anonymous messages (missing: ' + missingId + ')');

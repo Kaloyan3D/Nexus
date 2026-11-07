@@ -13,6 +13,8 @@
  */
 
 const assert = require('node:assert/strict');
+// DSH 0.2.x removed `session.events`; read the log through the single supported adapter.
+const { sessionEvents: eventsOf } = require('../config/Dsh-SessionEvents.cjs');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -87,7 +89,7 @@ function applyFrozen(session, frozen, operationId) {
   const seqs = [];
   for (const segment of frozen.segments) {
     const node = session.append('user/message', checkpointNode(operationId),
-      { surfaceOp: { op: 'replace', start: segment.start, end: segment.end }, sourceEventSeqs: segment.sourceEventSeqs });
+      { surfaceOp: { op: 'replace', startSeq: segment.start, endSeq: segment.end }, sourceEventSeqs: segment.sourceEventSeqs });
     seqs.push(node.seq);
   }
   return seqs;
@@ -97,7 +99,7 @@ function applyFrozen(session, frozen, operationId) {
   const OP = 'ccop_f2_000000000000000000000001';
   const session = buildTaskASession('f2-crash');
   const frozen = freezeLikeBridge(session);
-  const logBefore = session.events.length;
+  const logBefore = eventsOf(session).length;
   applyFrozen(session, frozen, OP); // replacement lands; process dies before APPLIED
   // Task B follow-up work arrives after the crash.
   session.append('user/message', userMsg('Task B intent: migrate billing'), { surfaceOp: 'append' });
@@ -111,10 +113,10 @@ function applyFrozen(session, frozen, operationId) {
   assert.ok(!frozen.flat.some((seq) => liveNodes.includes(seq)), 'F2: frozen seqs fully shadowed');
   pass('F2: frozen boundary fully landed (no partial shadow)');
   // The retry decision: reconcile-applied WITHOUT appending again.
-  const countBefore = session.events.length;
+  const countBefore = eventsOf(session).length;
   const landedAgain = compaction.findReplacementByOperation(session, OP);
   assert.ok(landedAgain && landedAgain.seq === landed.seq, 'F2: retry resolves the same node');
-  assert.equal(session.events.length, countBefore, 'F2: reconcile appends nothing');
+  assert.equal(eventsOf(session).length, countBefore, 'F2: reconcile appends nothing');
   pass('F2: retry reconciles, never re-appends');
   const derived = JSON.stringify(session.deriveMessages());
   assert.ok(derived.includes('Task B intent: migrate billing'), 'F2: Task B intent survives');
@@ -126,7 +128,7 @@ function applyFrozen(session, frozen, operationId) {
   // node; with longer Task B work it swallows Task B itself). Restoring
   // live-range recomputation breaks this assertion.
   const freshCut = compaction.balancedRetainCut(session, { maxTailNodes: 6, maxTailChars: 6000, minShadowed: 1 });
-  const taskBSeqs = session.events.filter((e) => JSON.stringify(e.data).includes('migrate billing') || JSON.stringify(e.data).includes('billing rows')).map((e) => e.seq);
+  const taskBSeqs = eventsOf(session).filter((e) => JSON.stringify(e.data).includes('migrate billing') || JSON.stringify(e.data).includes('billing rows')).map((e) => e.seq);
   assert.ok(!frozen.flat.some((seq) => taskBSeqs.includes(seq)), 'F2: frozen range predates Task B');
   pass('F2: frozen operation never adopts later Task B events');
   const escapes = !freshCut || freshCut.shadowedSeqs.some((seq) => !frozen.flat.includes(seq));
@@ -154,17 +156,17 @@ function applyFrozen(session, frozen, operationId) {
   const OP = 'ccop_race_0000000000000000000001';
   const session = buildTaskASession('concurrent-apply');
   const frozen = freezeLikeBridge(session);
-  const countBefore = session.events.length;
+  const countBefore = eventsOf(session).length;
   // Attempt 1 appends the frozen segments.
   applyFrozen(session, frozen, OP);
-  const countAfterFirst = session.events.length;
+  const countAfterFirst = eventsOf(session).length;
   assert.ok(countAfterFirst > countBefore, 'race: first attempt appends');
   // Attempt 2 (concurrent duplicate) reconciles by operationId: the landed
   // node exists, so no second append happens (inflight join + reconcile).
   const landed = compaction.findReplacementByOperation(session, OP);
   assert.ok(landed, 'race: second attempt sees the landed operation');
-  assert.equal(session.events.length, countAfterFirst, 'race: no duplicate append');
-  const checkpoints = session.events.filter((e) => e.type === 'user/message' && e.data && e.data.source && e.data.source.operationId === OP);
+  assert.equal(eventsOf(session).length, countAfterFirst, 'race: no duplicate append');
+  const checkpoints = eventsOf(session).filter((e) => e.type === 'user/message' && e.data && e.data.source && e.data.source.operationId === OP);
   assert.ok(checkpoints.length >= 1 && checkpoints.length <= frozen.segments.length, 'race: at most one semantic operation effective');
   pass('concurrent: duplicate pre-step joins one effective operation');
   const derived = JSON.stringify(session.deriveMessages());
@@ -206,7 +208,7 @@ function applyFrozen(session, frozen, operationId) {
   for (const segment of frozen.segments) {
     let balance = 0;
     for (const seq of segment.sourceEventSeqs) {
-      balance += compaction.toolCallDeltaOfSurfaceEvent(session.events[seq]);
+      balance += compaction.toolCallDeltaOfSurfaceEvent(eventsOf(session)[seq]);
       assert.ok(balance >= 0, 'balance: no result without a call inside a segment');
     }
     assert.equal(balance, 0, 'balance: segment closes with no open call');

@@ -1,3 +1,9 @@
+> **DSH 0.2.x status.** Nexus UI is delivered only as supported client/host plugins
+> (`@nexus/ui-brand`, `@nexus/controller`, `@nexus/mode-selector`) installed by
+> `scripts/Install-NexusUi.ps1`. The string patches of compiled upstream bundles described
+> below (title, favicon, manifest, brand copy, layout, colours, composer seat) were retired
+> and are not ported; see `docs/integration/dsh-0.2.x-migration-report.md` section C/F.
+
 # Nexus UI — architecture decisions
 
 Phase 1 of the Nexus rebrand turns the installed DeepSeek Harness (DSH) web

@@ -20,6 +20,14 @@
  */
 
 const durablePolicyV2 = require('./ContextDurableMutationPolicyV2.cjs');
+const { sessionEvents } = require('./Dsh-SessionEvents.cjs');
+
+// DSH 0.2.x removed `session.events`; the supported synchronous reader is the single
+// Nexus adapter (Dsh-SessionEvents.cjs). A missing or malformed log fails closed (null).
+function eventsOf(session) {
+  const events = sessionEvents(session);
+  return Array.isArray(events) ? events : null;
+}
 
 const ROOT_ENGINE_ROLES = Object.freeze(['muse_main', 'engineer_normal', 'engineer_deep']);
 
@@ -105,8 +113,9 @@ function surfaceNodesOf(session) {
 }
 
 function eventBySeq(session, seq) {
-  if (!session || !Array.isArray(session.events)) return null;
-  const event = session.events[seq];
+  const events = eventsOf(session);
+  if (!events) return null;
+  const event = events[seq];
   return event && event.seq === seq ? event : null;
 }
 
@@ -177,8 +186,9 @@ function isRuntimeContextMessage(event) {
 
 function runtimeContextSeqsOf(session) {
   const seqs = [];
-  if (!session || !Array.isArray(session.events)) return seqs;
-  for (const event of session.events) {
+  const events = eventsOf(session);
+  if (!events) return seqs;
+  for (const event of events) {
     if (isRuntimeContextMessage(event) && typeof event.seq === 'number') seqs.push(event.seq);
   }
   return seqs;
@@ -238,9 +248,10 @@ function splitRangeAroundOwned(session, shadowedSeqs, ownedSeqs) {
 }
 
 function findReplacementByOperation(session, operationId) {
-  if (!session || !Array.isArray(session.events) || typeof operationId !== 'string' || operationId === '') return null;
-  for (let index = session.events.length - 1; index >= 0; index -= 1) {
-    const event = session.events[index];
+  const events = eventsOf(session);
+  if (!events || typeof operationId !== 'string' || operationId === '') return null;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
     if (!event || event.type !== 'user/message') continue;
     const source = event.data && event.data.source;
     if (!source || source.kind !== 'plugin' || source.plugin !== 'aih-controller') continue;
@@ -368,10 +379,11 @@ function checkpointProvenanceValid(checkpoint, binding) {
 }
 
 function lastTextOfRole(session, role, maxChars) {
-  if (!session || !Array.isArray(session.events) || (role !== 'user' && role !== 'assistant')) return '';
+  const events = eventsOf(session);
+  if (!events || (role !== 'user' && role !== 'assistant')) return '';
   const bound = Number.isFinite(Number(maxChars)) ? Math.max(64, Math.trunc(Number(maxChars))) : 4000;
-  for (let index = session.events.length - 1; index >= 0; index -= 1) {
-    const event = session.events[index];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
     if (!event) continue;
     if (role === 'user' && event.type !== 'user/message') continue;
     if (role === 'assistant' && event.type !== 'assistant/message') continue;
@@ -409,9 +421,10 @@ function compareStepId(a, b) {
   return 0;
 }
 function maxStepIdOfSession(session) {
-  if (!session || !Array.isArray(session.events)) return '';
+  const events = eventsOf(session);
+  if (!events) return '';
   let best = '';
-  for (const event of session.events) {
+  for (const event of events) {
     if (!event || !event.data) continue;
     const turn = event.data.turn;
     const step = event.data.step;
@@ -733,8 +746,9 @@ function textContentOfEvent(event) {
 
 function nexusReplacementEventsOf(session, operationId) {
   const found = [];
-  if (!session || !Array.isArray(session.events)) return found;
-  for (const event of session.events) {
+  const events = eventsOf(session);
+  if (!events) return found;
+  for (const event of events) {
     if (!event || event.type !== 'user/message') continue;
     const source = event.data && event.data.source;
     if (!source || source.kind !== 'plugin' || source.plugin !== 'aih-controller') continue;
@@ -981,7 +995,7 @@ function applyCompactionOperationV2(session, operation, payloadText, durableOp) 
       ? { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId: operation.operationId, generation: operation.checkpointGeneration, taskInstanceId: operation.taskInstanceId }
       : { kind: 'plugin', plugin: 'aih-controller', form: 'context-continuation', operationId: operation.operationId, generation: operation.checkpointGeneration };
     const node = session.append('user/message', v2UserMessageNode(text, source), {
-      surfaceOp: { op: 'replace', start: segment.start, end: segment.end },
+      surfaceOp: { op: 'replace', start: segment.start, end: segment.end }, // CCv2 laboratory writer (disabled in production): kept at its original op shape; DSH 0.2 requires { startSeq, endSeq } - port before any re-enable
       sourceEventSeqs: segment.sourceEventSeqs.slice(),
     });
     landed.push({ seq: node.seq, role: segment.role, segmentIndex: index });
@@ -1007,7 +1021,7 @@ function retryMissingSegmentsV2(session, operation, payloadText, durableOp, miss
       ? { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId: operation.operationId, generation: operation.checkpointGeneration, taskInstanceId: operation.taskInstanceId }
       : { kind: 'plugin', plugin: 'aih-controller', form: 'context-continuation', operationId: operation.operationId, generation: operation.checkpointGeneration };
     const node = session.append('user/message', v2UserMessageNode(text, source), {
-      surfaceOp: { op: 'replace', start: segment.start, end: segment.end },
+      surfaceOp: { op: 'replace', start: segment.start, end: segment.end }, // CCv2 laboratory writer (disabled in production): kept at its original op shape; DSH 0.2 requires { startSeq, endSeq } - port before any re-enable
       sourceEventSeqs: segment.sourceEventSeqs.slice(),
     });
     landed.push({ seq: node.seq, role: segment.role, segmentIndex: index });

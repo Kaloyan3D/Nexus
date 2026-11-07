@@ -20,9 +20,19 @@ const ROOT = path.resolve(__dirname, '..')
 let passed = 0
 function pass(name) { passed++; console.log('PASS: ' + name) }
 
+// The default for NEW sessions is saved through the Nexus-owned route (DSH 0.2 pins the preset registry
+// from the home patch, so its settings namespace refuses writes). The sink is per makeModeScope().
+let defaultPostSink = []
+const routeFetch = async (url, init) => {
+  assert.equal(url, '/nexus/mode-default.json')
+  assert.equal(init && init.method, 'POST')
+  defaultPostSink.push(JSON.parse(init.body).preset)
+  return { ok: true, status: 200 }
+}
 function loadModule(relPath, requireMap) {
   let plugin = null
   const sandbox = {
+    fetch: routeFetch,
     window: {
       __ModuleLoader__: {
         load(def) { plugin = def.factory((name) => (requireMap && requireMap[name] !== undefined) ? requireMap[name] : (() => ({}))) },
@@ -48,19 +58,26 @@ function makeModeScope(options) {
   const selectCalls = []
   const modelSelectCalls = []
   const defaultPatches = []
+  defaultPostSink = defaultPatches
   let failSelection = false
   const scope = {
     slots: { inject(_name, fn) { return fn() }, register(spec, component) { scope._registered.push({ spec, component }); return () => {} } },
-    connection: {
-      api: {
-        agentPresets: {
-          async list() { return { result: { ok: true, value: { presets: opts.installedPresets || [{ id: 'aih-engineering', name: 'Normal Engineering', isDefault: true }, { id: 'aih-deepseek', name: 'DeepSeek Only' }, { id: 'aih-muse', name: 'Muse Agent Plane' }] } } } },
-          async select(arg) { if (failSelection) return { result: { ok: false, error: { message: 'refused' } } }; selectCalls.push(arg); return { result: { ok: true, value: { agentPreset: arg.agentPreset } } } },
+    // DSH 0.2.x: the selector talks to the injectable Remote namespaces.
+    remote: {
+      $on() { return () => {} },
+      agentPresets: {
+        async list() { return { ok: true, value: { presets: opts.installedPresets || [{ id: 'aih-engineering', name: 'Normal Engineering', isDefault: true }, { id: 'aih-deepseek', name: 'DeepSeek Only' }, { id: 'aih-muse', name: 'Muse Agent Plane' }] } } },
+        async select(sessionId, preset) {
+          if (failSelection) return { ok: false, error: { message: 'refused', details: {} } }
+          selectCalls.push({ sessionId, agentPreset: preset })
+          // The host confirms through the session projection; reproduce that push.
+          state.byId = { ...state.byId, [sessionId]: { ...state.byId[sessionId], agentPreset: preset } }
+          for (const fn of subscribers) fn()
+          return { ok: true, value: preset }
         },
-        settings: { async update(arg) { defaultPatches.push(arg.patch.default); return { result: { ok: true, value: {} } } } },
       },
+      settings: { async update(_ns, patch) { defaultPatches.push(patch.selectedDefault); return { ok: true, value: {} } } },
     },
-    remote: { $on() { return () => {} } },
     sessions: {
       list: {
         getSnapshot: () => state,
@@ -72,6 +89,8 @@ function makeModeScope(options) {
       },
     },
     modelDirectories: { directoryFor() { return { load: async () => {}, select: async (value) => { modelSelectCalls.push(value) }, store: { getSnapshot: () => ({ current: null }) } } } },
+    'remote.agentPresets': null,
+    'remote.settings': null,
     inject(names, fn) { if (names.every((name) => Object.hasOwn(this, name))) fn(this) },
     get(name) { return this[name] },
     provide(name, value) { this[name] = value },
@@ -84,6 +103,8 @@ function makeModeScope(options) {
     _defaultPatches: defaultPatches,
     _newSession(session) { state.byId[session.id] = session; state.current = session.id; for (const fn of subscribers) fn() },
   }
+  scope['remote.agentPresets'] = scope.remote.agentPresets
+  scope['remote.settings'] = scope.remote.settings
   return scope
 }
 

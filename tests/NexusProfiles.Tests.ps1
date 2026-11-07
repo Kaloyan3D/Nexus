@@ -47,7 +47,7 @@ try{
 
     foreach($name in @('routing-policy.json','engineering-profiles.json','model-registry.json','nexus-profiles.json','muse-profiles.json')){Copy-AihConfigFile $name $fixture}
     New-Item -ItemType Directory -Force -Path (Join-Path $fixture 'data')|Out-Null
-    [IO.File]::WriteAllText((Join-Path $fixture 'data/settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $fixture 'data/nexus-settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
     $custom=[ordered]@{
         schemaVersion=1;profileId='custom';displayName='Custom';roles=[ordered]@{
             primaryEngineer=[ordered]@{model='glm-5.3-flash';reasoning='high'}
@@ -114,7 +114,7 @@ try{
     $museSelect=$museSelectRaw|ConvertFrom-Json
     Assert-AihEqual $museSelect.ok $true 'select Muse succeeds'
     Assert-AihEqual $museSelect.profileId 'muse-spark-1.3-contributor' 'select Muse reports the persisted user-facing Profile preference'
-    $settingsAfterMuseSelect=Get-Content -Raw (Join-Path $fixture 'data/settings.yaml')
+    $settingsAfterMuseSelect=Get-Content -Raw (Join-Path $fixture 'data/nexus-settings.yaml')
     Assert-AihTrue ([regex]::IsMatch($settingsAfterMuseSelect,'(?m)^engineering-profile:\s*muse-spark-1\.3-contributor')) 'Muse selection writes the settings key'
 
     # Unknown ids still fail closed (unchanged Dual-era behavior)
@@ -126,7 +126,7 @@ try{
     $dualSelectRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $fixture -ProfileId 'deepseek-codex'
     $dualSelect=$dualSelectRaw|ConvertFrom-Json
     Assert-AihTrue ([bool]$dualSelect.ok -and $dualSelect.profileId -eq 'deepseek-codex') 'Dual built-ins remain selectable'
-    $settingsAfterDualSelect=Get-Content -Raw (Join-Path $fixture 'data/settings.yaml')
+    $settingsAfterDualSelect=Get-Content -Raw (Join-Path $fixture 'data/nexus-settings.yaml')
     Assert-AihTrue ([regex]::IsMatch($settingsAfterDualSelect,'(?m)^engineering-profile:\s*deepseek-codex')) 'Dual selection still writes the settings key'
 
     # save-custom workflow unchanged: role-based, engine dual, never touching Muse
@@ -141,7 +141,7 @@ try{
     $savedCustomRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action save-custom -InstallRoot $fixture -PayloadFile $customPayloadPath
     $savedCustom=$savedCustomRaw|ConvertFrom-Json
     Assert-AihTrue ($null-ne$savedCustom.roles -and $savedCustom.roles.primaryEngineer.model -eq 'glm-5.3-flash') 'save-custom still persists operator role bindings'
-    $settingsAfterCustomSave=Get-Content -Raw (Join-Path $fixture 'data/settings.yaml')
+    $settingsAfterCustomSave=Get-Content -Raw (Join-Path $fixture 'data/nexus-settings.yaml')
     Assert-AihTrue ([regex]::IsMatch($settingsAfterCustomSave,'(?m)^engineering-profile:\s*custom')) 'save-custom still sets the preferred profile to custom'
     $stateScript2=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $fixture
     $editorState2=$stateScript2|ConvertFrom-Json
@@ -163,12 +163,12 @@ try{
         $selMuseCatalogEntry.selectable=$true
         $selMuseCatalogEntry.runnable=$false
         $selCatalog|ConvertTo-Json -Depth 10|Set-Content -Encoding UTF8 -LiteralPath (Join-Path $selFixture 'config/nexus-profiles.json')
-        [IO.File]::WriteAllText((Join-Path $selFixture 'data/settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $selFixture 'data/nexus-settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
 
         $selRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $selFixture -ProfileId 'muse-spark-1.3-contributor'
         $selResult=$selRaw|ConvertFrom-Json
         Assert-AihTrue ([bool]$selResult.ok -and $selResult.profileId -eq 'muse-spark-1.3-contributor') 'hypothetical selectable Muse is NOT rejected for being Muse (selectable-only gate)'
-        $selSettingsText=Get-Content -Raw (Join-Path $selFixture 'data/settings.yaml')
+        $selSettingsText=Get-Content -Raw (Join-Path $selFixture 'data/nexus-settings.yaml')
         Assert-AihTrue ([regex]::IsMatch($selSettingsText,'(?m)^engineering-profile:\s*muse-spark-1\.3')) 'selectable Muse selection writes the preferred profile key'
         $selStateRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $selFixture
         $selState=$selStateRaw|ConvertFrom-Json
@@ -194,7 +194,7 @@ try{
         New-Item -ItemType Directory -Force -Path (Join-Path $nomuseFixture 'config')|Out-Null
         New-Item -ItemType Directory -Force -Path (Join-Path $nomuseFixture 'data')|Out-Null
         foreach($name in @('routing-policy.json','engineering-profiles.json','model-registry.json','nexus-profiles.json')){Copy-AihConfigFile $name $nomuseFixture}
-        [IO.File]::WriteAllText((Join-Path $nomuseFixture 'data/settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $nomuseFixture 'data/nexus-settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
         $nomuseStateRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $nomuseFixture
         $nomuseState=$nomuseStateRaw|ConvertFrom-Json
         Assert-AihTrue (@($nomuseState.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3-contributor'}).Count -eq 0) 'missing Muse registry leaves the Muse entry unresolved (omitted, not muse:null)'
@@ -209,12 +209,12 @@ try{
         New-Item -ItemType Directory -Force -Path (Join-Path $missingCatalogFixture 'config')|Out-Null
         New-Item -ItemType Directory -Force -Path (Join-Path $missingCatalogFixture 'data')|Out-Null
         foreach($name in @('routing-policy.json','engineering-profiles.json','model-registry.json','muse-profiles.json')){Copy-AihConfigFile $name $missingCatalogFixture}
-        [IO.File]::WriteAllText((Join-Path $missingCatalogFixture 'data/settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
-        $missingBefore=Get-Content -Raw (Join-Path $missingCatalogFixture 'data/settings.yaml')
+        [IO.File]::WriteAllText((Join-Path $missingCatalogFixture 'data/nexus-settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
+        $missingBefore=Get-Content -Raw (Join-Path $missingCatalogFixture 'data/nexus-settings.yaml')
         $missingRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $missingCatalogFixture -ProfileId 'deepseek-codex'
         $missingResult=$missingRaw|ConvertFrom-Json
         Assert-AihEqual $missingResult.error 'nexus-profile-catalog-unavailable' 'missing Nexus catalog rejects selection of a known Dual profile'
-        Assert-AihTrue ((Get-Content -Raw (Join-Path $missingCatalogFixture 'data/settings.yaml')) -eq $missingBefore) 'missing Nexus catalog rejection leaves settings unchanged'
+        Assert-AihTrue ((Get-Content -Raw (Join-Path $missingCatalogFixture 'data/nexus-settings.yaml')) -eq $missingBefore) 'missing Nexus catalog rejection leaves settings unchanged'
     }finally{if(Test-Path -LiteralPath $missingCatalogFixture){Remove-Item -LiteralPath $missingCatalogFixture -Recurse -Force}}
 
     $corruptCatalogFixture=Join-Path ([IO.Path]::GetTempPath()) ('nexus-profiles-corruptcat-'+[guid]::NewGuid().ToString('N'))
@@ -223,12 +223,12 @@ try{
         New-Item -ItemType Directory -Force -Path (Join-Path $corruptCatalogFixture 'data')|Out-Null
         foreach($name in @('routing-policy.json','engineering-profiles.json','model-registry.json','muse-profiles.json')){Copy-AihConfigFile $name $corruptCatalogFixture}
         @{schemaVersion=999;profiles=@()}|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 -LiteralPath (Join-Path $corruptCatalogFixture 'config/nexus-profiles.json')
-        [IO.File]::WriteAllText((Join-Path $corruptCatalogFixture 'data/settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
-        $corruptBefore=Get-Content -Raw (Join-Path $corruptCatalogFixture 'data/settings.yaml')
+        [IO.File]::WriteAllText((Join-Path $corruptCatalogFixture 'data/nexus-settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
+        $corruptBefore=Get-Content -Raw (Join-Path $corruptCatalogFixture 'data/nexus-settings.yaml')
         $corruptRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $corruptCatalogFixture -ProfileId 'deepseek-codex'
         $corruptResult=$corruptRaw|ConvertFrom-Json
         Assert-AihEqual $corruptResult.error 'nexus-profile-catalog-unavailable' 'corrupt Nexus catalog rejects selection of a known Dual profile'
-        Assert-AihTrue ((Get-Content -Raw (Join-Path $corruptCatalogFixture 'data/settings.yaml')) -eq $corruptBefore) 'corrupt Nexus catalog rejection leaves settings unchanged'
+        Assert-AihTrue ((Get-Content -Raw (Join-Path $corruptCatalogFixture 'data/nexus-settings.yaml')) -eq $corruptBefore) 'corrupt Nexus catalog rejection leaves settings unchanged'
     }finally{if(Test-Path -LiteralPath $corruptCatalogFixture){Remove-Item -LiteralPath $corruptCatalogFixture -Recurse -Force}}
 
     Write-Host "Nexus controller profile foundation tests passed: $script:passed"

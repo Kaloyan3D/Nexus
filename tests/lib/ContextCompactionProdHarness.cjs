@@ -97,8 +97,15 @@ function loadBridge() {
 }
 
 function loadDshSession() {
-  const cand = '/home/kaloyan/.local/share/nexus/app/node_modules/@deepseek-ai/dsh-session/lib/index.js';
-  return require(cand);
+  // The installation under test first (AIH_TOOLCHAIN_ROOT / NEXUS_RUNTIME_ROOT / DSH_HOME's install),
+  // then the historical developer location. The module is never taken from an unrelated install
+  // when the harness provides its own root.
+  const roots = [process.env.AIH_TOOLCHAIN_ROOT, process.env.NEXUS_RUNTIME_ROOT, process.env.DSH_HOME ? path.dirname(path.resolve(process.env.DSH_HOME)) : '', '/home/kaloyan/.local/share/nexus'].filter(Boolean);
+  for (const root of roots) {
+    const cand = path.join(root, 'app', 'node_modules', '@deepseek-ai', 'dsh-session', 'lib', 'index.js');
+    if (fs.existsSync(cand)) return require(cand);
+  }
+  throw new Error('no DSH session module found under: ' + roots.join(', '));
 }
 
 // Production-faithful DSH message builders: every message carries a stable
@@ -112,12 +119,13 @@ function newMessageId() {
   return 'msg-' + Math.random().toString(16).slice(2) + Date.now().toString(16);
 }
 function identifiedToolResult(callId, text, turn, step) {
-  return { turn, step, message: { id: newMessageId(), role: 'user', source: { kind: 'tool', callId }, content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text }] }] } };
+  return { turn, step, message: { id: newMessageId(), role: 'tool', toolCallId: callId, source: { kind: 'tool', callId }, content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text }] }] } };
 }
 function identifiedAssistantMessage(text, turn, step, contentOrNull) {
   const content = contentOrNull || [{ type: 'text', text }];
   const modelSource = { kind: 'model', provider: 'fixture-provider', model: 'fixture-model' };
-  return { turn, step, message: { id: newMessageId(), role: 'assistant', content: content, source: modelSource }, source: modelSource };
+  // DSH 0.2 restore validates assistant settlement fields: a settled message carries its (here empty) stream.
+  return { turn, step, stream: [], message: { id: newMessageId(), role: 'assistant', content: content, source: modelSource }, source: modelSource };
 }
 function seedBinding(dataRoot, sessionId, binding) {
   const p = path.join(dataRoot, 'routing', 'session-bindings.json');

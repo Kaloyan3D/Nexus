@@ -76,7 +76,7 @@ function New-AihOpenCodeFixture{
         '            xhigh: xhigh'
     )
     $settingsWithMuseKey=@('engineering-profile: muse-spark-1.3-contributor') + $settings
-    [IO.File]::WriteAllText((Join-Path $fixtureRoot 'data/settings.yaml'),(($settingsWithMuseKey -join [Environment]::NewLine)+[Environment]::NewLine),[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $fixtureRoot 'data/nexus-settings.yaml'),(($settingsWithMuseKey -join [Environment]::NewLine)+[Environment]::NewLine),[Text.UTF8Encoding]::new($false))
     return $fixtureRoot
 }
 Write-Host "===== SUITE MuseOpenCodeGo ===="

@@ -27,7 +27,8 @@ window.__ModuleLoader__.load({
       })
     });
     const SUPPORTED_MODES = new Set(Object.keys(MODE_SELECTIONS));
-    const AGENT_PRESET_SETTINGS_NS = "agent-presets";
+    // DSH 0.2.x: the preset registry owns this settings namespace; the user default is its `selectedDefault`.
+    const AGENT_PRESET_SETTINGS_NS = "agent-preset-registry";
 
     function presetOf(session) {
       if (session && typeof session.agentPreset === "string") return session.agentPreset;
@@ -37,7 +38,13 @@ window.__ModuleLoader__.load({
 
     function currentSession(scope) {
       const state = scope.sessions.list.getSnapshot();
-      return state.current === void 0 ? void 0 : state.byId[state.current];
+      // DSH 0.2.x has no `state.current`: the displayed session is the main-view-retained one.
+      if (typeof state.current === "string" && state.byId[state.current]) return state.byId[state.current];
+      for (const id of Object.keys(state.byId || {})) {
+        const entry = state.byId[id];
+        if (entry && entry.retainedBy && (entry.retainedBy.mainView || 0) > 0) return entry;
+      }
+      return void 0;
     }
 
     function displayedPreset(session, fallback) {
@@ -91,8 +98,8 @@ window.__ModuleLoader__.load({
     }
 
     function createModeController(scope) {
-      // Pinned DSH separates RPC (connection.api) from events (remote.$on).
-      const api = scope.get("connection").api;
+      // DSH 0.2.x: unary RPC and events both live on `ctx.remote` (`remote.<namespace>.<method>`).
+      const remote = scope.remote;
       const store = createModeStore({ options: [], current: "", busy: false, error: null });
       let fallback = "";
       let staged;
@@ -108,7 +115,7 @@ window.__ModuleLoader__.load({
 
       async function load() {
         try {
-        const { result } = await api.agentPresets.list({});
+        const result = await remote.agentPresets.list();
         if (disposed) return;
         if (!result.ok) {
           store.patch({ error: result.error.message || "Unable to read Nexus modes." });
@@ -133,8 +140,15 @@ window.__ModuleLoader__.load({
       }
 
       async function persistDefault(id) {
-        const { result } = await api.settings.update({ ns: AGENT_PRESET_SETTINGS_NS, patch: { default: id } });
-        if (!result.ok) throw new Error(result.error.message || "Failed to persist the Nexus mode.");
+        // DSH 0.2 pins the agent-preset registry from the generated home patch (the settings
+        // namespace refuses writes), so the default for NEW sessions is saved through the
+        // Nexus-owned, admission-gated route that writes nexus-settings.yaml.
+        const response = await fetch("/nexus/mode-default.json", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ preset: id })
+        });
+        if (!response.ok) throw new Error("Failed to persist the Nexus mode (" + response.status + ").");
       }
 
       async function syncModel(sessionId, id, effectiveId) {
@@ -211,16 +225,24 @@ window.__ModuleLoader__.load({
         store.patch({ busy: true, error: null });
         try {
           if (presetOf(session) !== effectiveId) {
-            const { result } = await api.agentPresets.select({ sessionId: session.id, agentPreset: effectiveId });
+            const result = await remote.agentPresets.select(session.id, effectiveId);
             if (!result.ok) throw new Error(result.error.message || "Failed to apply the Nexus mode.");
-            scope.sessions.noteAgentPreset(session.id, result.value.agentPreset);
           }
           engineAutoApplyFailed = false;
           await settleAppliedMode(session, id, effectiveId);
         } catch (error) {
           engineAutoApplyFailed = true;
+          // The host refused the change (for example DSH 0.2.2-rc.1 rejects re-binding a session's
+          // preset scope a second time). The session keeps its previous preset, so the picker must
+          // show THAT truth, not the refused choice, and the stage must not retry on every update.
+          staged = void 0;
           if (!disposed) {
-            store.patch({ busy: false, error: error instanceof Error ? error.message : String(error) });
+            const actual = currentSession(scope);
+            store.patch({
+              busy: false,
+              current: actual === void 0 ? fallback : displayedPreset(actual, fallback),
+              error: error instanceof Error ? error.message : String(error)
+            });
           }
         } finally {
           applying = false;
@@ -318,14 +340,98 @@ window.__ModuleLoader__.load({
       });
     }
 
+    // DSH 0.2.x workspace-transition composer guard (replaces the retired 0.1.x
+    // compiled-bundle patch). Selecting a workspace is asynchronous: until
+    // uiWorkspace.openWorkspace() settles, the chip shows the TARGET workspace
+    // while the composer is still bound to the CURRENT session, so a fast submit
+    // would execute in the wrong workspace. Upstream 0.2.2 keeps that pending
+    // state private to the conversation component, so the only observable seam is
+    // the public openWorkspace() call itself. This wraps that one method on the
+    // uiWorkspace service instance (version-locked: it refuses to wrap anything but
+    // a function with the 0.2.x signature) and raises a supported composer block
+    // (ctx.conversation.blocks) on every known session for the bounded window.
+    //   - exact bindings: no session accepts input while ANY pick is in flight, so
+    //     a message can never reach a session whose workspace is not the displayed one;
+    //   - stale-state rejection: each pick takes a monotonically increasing token;
+    //     only the newest pick may clear the block, a superseded pick settling late
+    //     cannot unblock a newer pending pick;
+    //   - fail closed: the block is cleared in `finally` (success, rejection and
+    //     supersession alike) and also when the guard is disposed.
+    const WORKSPACE_GUARD_REASON = "Switching workspace… the composer unlocks when the selected workspace's session is open.";
+    function createWorkspaceTransitionGuard({ uiWorkspace, blocks, sessions, reason = WORKSPACE_GUARD_REASON }) {
+      // An unsupported host shape cannot be guarded. It is NEVER silent: the guard
+      // reports status "unavailable" with the reason (logged by apply() and published
+      // on the nexusWorkspaceGuard service) so the gap is observable and testable.
+      const unavailable = (why) => ({ status: "unavailable", reason: why, dispose() {}, pending: () => false });
+      if (!uiWorkspace || typeof uiWorkspace.openWorkspace !== "function") return unavailable("uiWorkspace.openWorkspace is not a function");
+      if (!blocks || typeof blocks.set !== "function") return unavailable("conversation.blocks.set is not a function");
+      if (!sessions || !sessions.list || typeof sessions.list.getSnapshot !== "function") return unavailable("sessions.list.getSnapshot is not a function");
+      const original = uiWorkspace.openWorkspace;
+      let token = 0;
+      let latest = 0;
+      let active = false;
+      const blocked = new Set();
+      const knownIds = () => {
+        const snapshot = sessions && sessions.list ? sessions.list.getSnapshot() : undefined;
+        return snapshot && snapshot.byId ? Object.keys(snapshot.byId) : [];
+      };
+      const raise = () => {
+        for (const id of knownIds()) {
+          if (blocked.has(id)) continue;
+          blocked.add(id);
+          blocks.set(id, { reason });
+        }
+      };
+      const release = () => {
+        for (const id of [...blocked]) blocks.set(id, undefined);
+        blocked.clear();
+      };
+      let unsubscribe = () => {};
+      if (sessions && sessions.list && typeof sessions.list.subscribe === "function") {
+        // Sessions created while a pick is pending are blocked too.
+        unsubscribe = sessions.list.subscribe(() => { if (active) raise(); });
+      }
+      uiWorkspace.openWorkspace = function guardedOpenWorkspace(...args) {
+        const mine = ++token;
+        latest = mine;
+        active = true;
+        raise();
+        let result;
+        try { result = original.apply(this, args); } catch (error) { result = Promise.reject(error); }
+        return Promise.resolve(result).finally(() => {
+          if (latest !== mine) return;
+          active = false;
+          release();
+        });
+      };
+      return {
+        status: "active",
+        pending: () => active,
+        dispose() {
+          unsubscribe();
+          if (uiWorkspace.openWorkspace && uiWorkspace.openWorkspace.name === "guardedOpenWorkspace") uiWorkspace.openWorkspace = original;
+          active = false;
+          release();
+        }
+      };
+    }
+
     const inject = ["slots"];
     function apply(ctx) {
+      ctx.inject(["uiWorkspace", "conversation", "sessions"], (scope) => {
+        const guard = createWorkspaceTransitionGuard({ uiWorkspace: scope.uiWorkspace, blocks: scope.conversation && scope.conversation.blocks, sessions: scope.sessions });
+        if (guard.status !== "active") console.error("Nexus workspace-transition guard UNAVAILABLE: " + guard.reason);
+        scope.provide("nexusWorkspaceGuard", { status: guard.status, reason: guard.reason || null, pending: guard.pending });
+        scope.effect(() => guard.dispose, "nexus-mode-selector: workspace-transition composer guard");
+      });
       ctx.inject([
         "slots",
         "sessions",
         "modelDirectories",
-        "connection",
-        "remote"
+        "remote",
+        // DSH 0.2.x: each Remote namespace is its own injectable service.
+        "remote.agentPresets",
+        "remote.settings"
       ], (scope) => {
         const controller = createModeController(scope);
         // Phase M2.1 (TASK-0038): publish this picker's authoritative client
@@ -364,6 +470,7 @@ window.__ModuleLoader__.load({
     }
 
     exports.apply = apply;
+    exports.createWorkspaceTransitionGuard = createWorkspaceTransitionGuard;
     exports.inject = inject;
     exports.MODE_SELECTIONS = MODE_SELECTIONS;
     exports.presetOf = presetOf;

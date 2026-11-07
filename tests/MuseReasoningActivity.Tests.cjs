@@ -405,7 +405,11 @@ async function main() {
       );
       const dualDoc = JSON.parse(fs.readFileSync(statePathFor(installRoot, testBinding(installRoot, 'TASK-7060', 'inst-dual')), 'utf8'));
       assert.equal(dualDoc.museActivity, undefined);
-      const composition = fs.readFileSync(path.join(repoRoot, 'data', '.agent-presets', 'aih-engineering', 'agent.cordis.yml'), 'utf8');
+      // DSH 0.2.x: the Engineering plane is a preset row in the generated home patch.
+      const homePatchText = fs.readFileSync(path.join(repoRoot, 'data', 'cordis.patch.yml'), 'utf8');
+      const engineeringBlock = /^[ \t]*- id: preset-aih-engineering[ \t]*$([\s\S]*?)(?=^[ \t]*- id: preset-aih-|^# ---- END NEXUS GENERATED|$(?![\s\S]))/m.exec(homePatchText);
+      assert.ok(engineeringBlock, 'the Engineering plane preset row must be declared in the home patch');
+      const composition = engineeringBlock[1];
       assert.ok(!composition.includes('Muse-ReasoningActivity.cjs'));
       assert.ok(!composition.includes('muse_update_reasoning_state'));
       assert.deepEqual(governor.DEFAULT_MUSE_PHASE_EFFORT, { discover: 'medium', diagnose: 'high', design: 'high', implement: 'medium', verify: 'medium', recover: 'high', review: 'high' });

@@ -372,7 +372,7 @@ function buildEngineeringProfileState(options) {
     readFile = defaultReadFile,
     nowUtc = () => new Date().toISOString(),
   } = options || {}
-  const settingsText = readJsonSafeText(settingsPath || (dataRoot ? path.join(dataRoot, 'settings.yaml') : null), readFile)
+  const settingsText = readJsonSafeText(settingsPath || (dataRoot ? path.join(dataRoot, 'nexus-settings.yaml') : null), readFile)
   const profiles = loadProfilesDocument(
     profilesPath || (installRoot ? path.join(installRoot, 'config', 'engineering-profiles.json') : null),
     customProfilePath || (dataRoot ? path.join(dataRoot, 'custom-engineering-profile.json') : null),

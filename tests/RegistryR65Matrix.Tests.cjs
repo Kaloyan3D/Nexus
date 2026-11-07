@@ -73,7 +73,7 @@ await check('R6.5 opencode muse route parity under staged opencode config', asyn
   try { fs.symlinkSync(path.join(repoRoot, 'config'), path.join(root, 'config'), 'dir'); }
   catch (e) { console.log('SKIP: opencode fixture needs a config symlink: ' + String((e && e.message) || e)); return; }
   fs.mkdirSync(path.join(root, 'data'), { recursive: true });
-  fs.copyFileSync(path.join(repoRoot, 'config', 'settings.yaml'), path.join(root, 'data', 'settings.yaml'));
+  fs.copyFileSync(path.join(repoRoot, 'config', 'settings.yaml'), path.join(root, 'data', 'nexus-settings.yaml'));
   const ws = tmpDir('r65-ws-oc-');
   const d = await runRoute(['-Description', 'Harden contributor tool boundary', '-Workspace', ws, '-InstallRoot', root, '-Preset', 'aih-muse', '-ProfileId', 'muse-spark-1.3-contributor-opencode', '-DryRun'], 'opencode');
   assert.equal(d.provider, 'opencode-go');

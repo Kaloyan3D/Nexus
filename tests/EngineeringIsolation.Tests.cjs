@@ -101,7 +101,7 @@ async function main() {
     let mismatchAdvanced = false
     const changedToMuse = { ...session, events: [{ type: 'agent-preset/selected', data: { agentPreset: 'aih-muse' } }] }
     await assert.rejects(
-      () => requestHandler({ agent: { session: changedToMuse } }, async () => { mismatchAdvanced = true; return upstreamDeepSeek }),
+      () => requestHandler({ agent: { session: changedToMuse, options: upstreamDeepSeek } }, async () => { mismatchAdvanced = true; return upstreamDeepSeek }),
       (error) => error && error.code === 'engine-binding-violation',
     )
     assert.equal(mismatchAdvanced, false)

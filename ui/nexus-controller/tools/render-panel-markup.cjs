@@ -166,7 +166,7 @@ async function main() {
   let liveModelNames = {}
   try {
     const yaml = requireFromApp('js-yaml')
-    const document = yaml.load(fs.readFileSync(path.join(ROOT, 'data', 'settings.yaml'), 'utf8'))
+    const document = yaml.load(fs.readFileSync(path.join(ROOT, 'data', 'nexus-settings.yaml'), 'utf8'))
     const providers = document['llm-pi-ai'] && document['llm-pi-ai'].providers
     for (const [providerId, provider] of Object.entries(providers || {})) {
       for (const model of provider.models || []) {

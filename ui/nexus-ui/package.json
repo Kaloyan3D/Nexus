@@ -33,6 +33,7 @@
     "lib/index.js",
     "lib/client.js",
     "nexus-favicon.svg",
+    "assets/nexus-favicon.svg",
     "patch-copy.json"
   ]
 }

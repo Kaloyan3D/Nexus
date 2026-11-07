@@ -39,7 +39,7 @@ llm-pi-ai:
       reasoning: high
       compat:
         thinkingFormat: deepseek
-'@|Set-Content -Path (Join-Path $fixture 'data/settings.yaml') -Encoding UTF8
+'@|Set-Content -Path (Join-Path $fixture 'data/nexus-settings.yaml') -Encoding UTF8
     # git repo in the workspace (detector reads changed files via git)
     Push-Location $workspace
     try{ git init | Out-Null; git config user.email t@t.local; git config user.name t; New-Item -ItemType Directory -Path (Join-Path $workspace 'apps') -Force|Out-Null; 'base' | Set-Content (Join-Path $workspace 'apps/README.md'); git add -A; git commit -m base | Out-Null }finally{ Pop-Location }
@@ -406,7 +406,7 @@ exit 3
 
     # ── 8. REGRESSION: reviewer/solver/routing unchanged ─────────────────────
     Assert-Aih ((@(Get-AihCompatibleModelsForRole (Get-AihModelRegistry (Join-Path $fixture 'config/model-registry.json')) 'reviewer')) -contains 'gpt-5.6-sol') '8: independent reviewer unchanged'
-    $routingDecision=Invoke-AihRoutingDecision 'implement ordinary change' $fixture $liveLayout.RoutingPolicy (Join-Path $fixture 'data/routing') 'loop-routing-1' 'aih-engineering' -DryRun -SettingsPath (Join-Path $fixture 'data/settings.yaml')
+    $routingDecision=Invoke-AihRoutingDecision 'implement ordinary change' $fixture $liveLayout.RoutingPolicy (Join-Path $fixture 'data/routing') 'loop-routing-1' 'aih-engineering' -DryRun -SettingsPath (Join-Path $fixture 'data/nexus-settings.yaml')
     Assert-Aih ($routingDecision.executionClass -eq 'engineer_normal') '8: routing unchanged by the visual capability'
 
     Write-Host "RESULT: $passed visual-loop assertions passed."

@@ -61,7 +61,7 @@ async function main() {
     fs.cpSync(path.join(sourceRoot, 'scripts'), path.join(installRoot, 'scripts'), { recursive: true })
     fs.cpSync(path.join(sourceRoot, 'config'), path.join(installRoot, 'config'), { recursive: true })
     fs.mkdirSync(dataHome, { recursive: true })
-    fs.writeFileSync(path.join(dataHome, 'settings.yaml'), [
+    fs.writeFileSync(path.join(dataHome, 'nexus-settings.yaml'), [
       'engineering-profile: deepseek-codex',
       'llm-pi-ai:',
       '  providers:',

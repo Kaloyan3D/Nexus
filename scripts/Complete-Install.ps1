@@ -20,9 +20,28 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Common.ps1')
 $layout = Get-AihLayout $InstallRoot
 
+# DSH 0.2.x: the DSH settings plugin imports and RENAMES `$DSH_HOME/settings.yaml`
+# the first time it boots (and writes its sections into profile patches). The
+# Nexus-owned settings document therefore lives in `data/nexus-settings.yaml`.
+# An install upgraded from DSH 0.1.x still has the old name: move it (no copy,
+# no content change) so DSH never sees it, preserving every user value. When
+# both exist the Nexus document wins and the legacy file is parked, never
+# deleted, under a name DSH does not read.
+if (Test-Path -LiteralPath $layout.LegacySettings -PathType Leaf) {
+    if (-not (Test-Path -LiteralPath $layout.Settings)) {
+        Move-Item -LiteralPath $layout.LegacySettings -Destination $layout.Settings
+        Write-Host 'Migrated data/settings.yaml to data/nexus-settings.yaml (DSH 0.2.x would rename the old name).'
+    }
+    else {
+        $parked = $layout.LegacySettings + '.pre-dsh-0.2.' + [DateTime]::UtcNow.ToString('yyyyMMddHHmmss')
+        Move-Item -LiteralPath $layout.LegacySettings -Destination $parked
+        Write-Host "Parked the legacy data/settings.yaml as $([IO.Path]::GetFileName($parked))."
+    }
+}
+
 # Initialize managed settings before any UI patcher reads them. Fresh installs
-# have an empty data directory, so Patch-NexusUi must never run before
-# settings.yaml exists. Existing user settings are preserved unless the caller
+# have an empty data directory, so the Nexus UI/preset installers must never run before
+# nexus-settings.yaml exists. Existing user settings are preserved unless the caller
 # explicitly requests -ResetManagedSettings.
 if ($ResetManagedSettings -or -not (Test-Path -LiteralPath $layout.Settings)) {
     Copy-Item -LiteralPath (Join-Path $layout.Config 'settings.yaml') -Destination $layout.Settings
@@ -45,47 +64,27 @@ if ($LASTEXITCODE -ne 0) {
     throw "The retired Muse Contributor provider-egress hook could not be removed."
 }
 
-# TASK-0009: the OpenCode Go Responses transport requires a stable
-# per-conversation x-opencode-session header (the pinned pi-ai transport
-# never emits it; without it the Go endpoint answers HTTP 400
-# MissingSessionID). Apply the repo-owned substrate patch AFTER the pinned
-# dependencies are installed, then verify the result. Every failure closes
-# the install: a missing substrate file, a changed anchor shape, a partial
-# edit, a failed apply, or a post-apply status other than `applied` aborts
-# here instead of shipping a broken OpenCode Go transport. The patch is
-# idempotent (re-apply keeps exactly one patch) and reversible (remove
-# restores the original bytes); it targets ONLY the Nexus-owned pinned
-# runtime substrate under this InstallRoot, never system/global node_modules.
-& $layout.Node (Join-Path $layout.Scripts 'Apply-OpenCodeSessionPatch.cjs') $InstallRoot apply
-if ($LASTEXITCODE -ne 0) {
-    throw "The OpenCode Go x-opencode-session substrate patch could not be applied."
-}
-$openCodeSessionPatchStatus = & $layout.Node (Join-Path $layout.Scripts 'Apply-OpenCodeSessionPatch.cjs') $InstallRoot status
-if ($LASTEXITCODE -ne 0) {
-    throw "The OpenCode Go x-opencode-session substrate patch status could not be verified."
-}
-if (($openCodeSessionPatchStatus | Out-String) -notmatch 'applied') {
-    throw "The OpenCode Go x-opencode-session substrate patch is not applied after installation. Refusing a broken transport."
-}
+# TASK-0009 (DSH 0.2.x): the OpenCode Go x-opencode-session header is supplied by
+# the repo-owned config/OpenCode-SessionHeader.cjs plugin on the supported
+# `llm-pi-ai/request-headers` waterfall (data/cordis.patch.yml row
+# nexus-opencode-session-header). No provider-adapter bundle is edited; any
+# legacy in-place substrate edit disappears with the replaced node_modules.
 
-# data/cordis.patch.yml is managed by the installer. Sync it before the Nexus
-# patcher inspects composition so upgrades from pre-controller installs see the
-# current nexus-controller row instead of failing against stale managed state.
+# data/cordis.patch.yml is managed by the installer. Seed the static Nexus
+# composition and its plugin modules first (Install-NexusPresets.ps1 below
+# regenerates the complete layer and verifies it on the real DSH runtime).
+# Relative plugin names in the home patch resolve against $DSH_HOME.
 Copy-Item -LiteralPath (Join-Path $layout.Config 'home.cordis.patch.yml') -Destination (Join-Path $layout.Data 'cordis.patch.yml') -Force
 Copy-Item -LiteralPath (Join-Path $layout.Config 'Routing-Integrity.cjs') -Destination (Join-Path $layout.Data 'Routing-Integrity.cjs') -Force
-& (Join-Path $layout.Scripts 'Patch-ControlRoomUi.ps1') -InstallRoot $InstallRoot
-& (Join-Path $layout.Scripts 'Patch-NexusUi.ps1') -InstallRoot $InstallRoot
-& $layout.Node (Join-Path $layout.Scripts 'Verify-RoutingIntegrityComposition.mjs') $InstallRoot
-if ($LASTEXITCODE -ne 0) { throw 'The composed Web routing-integrity plugin could not be imported.' }
+Copy-Item -LiteralPath (Join-Path $layout.Config 'OpenCode-SessionHeader.cjs') -Destination (Join-Path $layout.Data 'OpenCode-SessionHeader.cjs') -Force
 
-& (Join-Path $layout.Scripts 'Install-ControllerPresets.ps1') -InstallRoot $InstallRoot
+# Supported-plugin Nexus UI (no upstream bundle patching on DSH 0.2.x).
+& (Join-Path $layout.Scripts 'Install-NexusUi.ps1') -InstallRoot $InstallRoot -SourceRoot $InstallRoot
 
-# Build every managed Muse file in a staging directory, validate the generated
-# composition with DSH's actual !!js YAML schema, then swap the complete preset
-# into place with rollback. A failed update therefore cannot publish a mixed-
-# version Muse plane.
-& (Join-Path $layout.Scripts 'Install-MusePreset.ps1') -InstallRoot $InstallRoot
-if ($LASTEXITCODE -ne 0) { throw 'The managed Muse preset could not be installed.' }
+# The three Nexus agent planes (engineering, deepseek, muse): closures, the
+# generated home patch, and verification against the real DSH composition.
+& (Join-Path $layout.Scripts 'Install-NexusPresets.ps1') -InstallRoot $InstallRoot
+if ($LASTEXITCODE -ne 0) { throw 'The Nexus agent planes could not be installed.' }
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $layout.Credentials) | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $layout.RoutingData 'states') | Out-Null

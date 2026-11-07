@@ -28,7 +28,7 @@ function New-AihStartupFixture([string]$Name) {
     }
     Copy-Item -Path (Join-Path $InstallRoot 'scripts/*') -Destination (Join-Path $root 'scripts') -Recurse
     Copy-Item -LiteralPath (Join-Path $InstallRoot 'config/routing-policy.json') -Destination (Join-Path $root 'config/routing-policy.json')
-    Copy-Item -LiteralPath (Join-Path $InstallRoot 'config/settings.yaml') -Destination (Join-Path $root 'data/settings.yaml')
+    Copy-Item -LiteralPath (Join-Path $InstallRoot 'config/settings.yaml') -Destination (Join-Path $root 'data/nexus-settings.yaml')
     $fixtureNode = Join-Path (Join-Path $root 'runtime/node') (Get-AihNodeRelativeExecutable)
     New-Item -ItemType Directory -Path (Split-Path -Parent $fixtureNode) -Force | Out-Null
     Copy-Item -LiteralPath (Get-AihNodeExecutable -InstallRoot $InstallRoot) -Destination $fixtureNode
@@ -39,7 +39,7 @@ function New-AihStartupFixture([string]$Name) {
     # own port without changing the launcher's production port contract.
     $fixtureLauncher = Join-Path $root 'scripts/aih.ps1'
     $fixtureLauncherText = Get-Content -Raw -LiteralPath $fixtureLauncher
-    $fixtureLauncherText = $fixtureLauncherText.Replace("@(`$layout.Dsh, 'web', '--port', '3080')", "@(`$layout.Dsh, 'web', '--port', '$webPort')")
+    $fixtureLauncherText = $fixtureLauncherText.Replace("@(`$layout.Dsh, 'web', '--no-open', '--port', '3080')", "@(`$layout.Dsh, 'web', '--no-open', '--port', '$webPort')")
     [IO.File]::WriteAllText($fixtureLauncher, $fixtureLauncherText, [Text.UTF8Encoding]::new($false))
     [ordered]@{
         HarnessVersion = 'startup-provider-test'

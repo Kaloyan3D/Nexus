@@ -1,0 +1,9 @@
+session-f21d9139-fa03-4ad4-ad3 agentPreset "aih-engineering" }, "goal": { "ver": 6, "seq": 2, "val": { "current": null,
+session-f21d9139-fa03-4ad4-ad3 modelSelection { "lastUsed": null, "pending": null } }, "workingDirectory": { "ver": 1,
+session-f21d9139-fa03-4ad4-ad3 workingDirectory "/home/kaloyannikolov.guest/nx-home-cand" }, "contextBreakdown": { "ver": 6, "seq": 2, "val
+session-4287f1b0-b835-48bd-9cf agentPreset "aih-engineering" }, "goal": { "ver": 6, "seq": 2, "val": { "current": null,
+session-4287f1b0-b835-48bd-9cf modelSelection { "lastUsed": null, "pending": null } }, "workingDirectory": { "ver": 1,
+session-4287f1b0-b835-48bd-9cf workingDirectory "/home/kaloyannikolov.guest/nx-home-cand/ws-rc-B" }, "contextBreakdown": { "ver": 6, "seq": 2,
+session-dd5a8eff-b8ee-474b-93b agentPreset "aih-engineering" }, "goal": { "ver": 6, "seq": 26, "val": { "current": null,
+session-dd5a8eff-b8ee-474b-93b modelSelection { "lastUsed": null, "pending": { "provider": "flash-max-direct", "model": "deepseek-
+session-dd5a8eff-b8ee-474b-93b workingDirectory "/home/kaloyannikolov.guest/nx-home-cand/ws-rc-A" }, "contextBreakdown": { "ver": 6, "seq": 26,

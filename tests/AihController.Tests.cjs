@@ -145,12 +145,12 @@ async function main() {
   fs.cpSync(path.join(sourceRoot, 'scripts'), path.join(bridgeInstallRoot, 'scripts'), { recursive: true })
   fs.cpSync(path.join(sourceRoot, 'config'), path.join(bridgeInstallRoot, 'config'), { recursive: true })
   fs.mkdirSync(path.join(bridgeInstallRoot, 'data', 'routing'), { recursive: true })
-  if (fs.existsSync(path.join(sourceRoot, 'data', 'settings.yaml'))) {
-    fs.copyFileSync(path.join(sourceRoot, 'data', 'settings.yaml'), path.join(bridgeInstallRoot, 'data', 'settings.yaml'))
+  if (fs.existsSync(path.join(sourceRoot, 'data', 'nexus-settings.yaml'))) {
+    fs.copyFileSync(path.join(sourceRoot, 'data', 'nexus-settings.yaml'), path.join(bridgeInstallRoot, 'data', 'nexus-settings.yaml'))
   } else {
-    fs.copyFileSync(path.join(sourceRoot, 'config', 'settings.yaml'), path.join(bridgeInstallRoot, 'data', 'settings.yaml'))
+    fs.copyFileSync(path.join(sourceRoot, 'config', 'settings.yaml'), path.join(bridgeInstallRoot, 'data', 'nexus-settings.yaml'))
   }
-  const bridgeSettingsPath = path.join(bridgeInstallRoot, 'data', 'settings.yaml')
+  const bridgeSettingsPath = path.join(bridgeInstallRoot, 'data', 'nexus-settings.yaml')
   const bridgeSettings = fs.readFileSync(bridgeSettingsPath, 'utf8')
   fs.writeFileSync(bridgeSettingsPath, bridgeSettings.replace(/^engineering-profile:\s*[^\r\n]+/m, 'engineering-profile: deepseek-codex'))
   process.once('exit', () => {

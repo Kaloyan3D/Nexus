@@ -1,3 +1,11 @@
+> **Retired for DSH 0.2.x.** The runtime now pins upstream `@deepseek-ai/dsh@0.2.2-rc.1`
+> with no vendored or patched package. Controller routing uses the supported
+> `agent.model.select()` model (see `config/Controller-RequestBoundary.cjs` and
+> `docs/integration/dsh-0.2.x-migration-report.md`). This file, the patch and
+> `runtime/vendor/` are kept only as rollback provenance for the `0.1.1-rc.2` pin
+> (that tarball needs `npm ci --legacy-peer-deps` because its peer dependencies are
+> `workspace:^`).
+
 # DSH routing authority build
 
 Nexus pins `@deepseek-ai/dsh-agent@0.1.1-rc.2-nexus.1` from

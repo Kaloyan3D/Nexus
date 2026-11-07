@@ -8,8 +8,9 @@
 # settings, credentials, and controller state unless --reset-managed-settings
 # is requested.
 #
-# Supported: Linux x86_64 (tested target: Arch/CachyOS).
-# Required system tools: git, tar, xz, sha256sum, iconv, and curl or wget.
+# Supported: Linux x86_64 (tested target: Arch/CachyOS) and macOS arm64 (Darwin; node darwin-arm64,
+# PowerShell osx-arm64).
+# Required system tools: git, tar, xz, sha256sum (or shasum on macOS), iconv, and curl or wget.
 # Node.js and PowerShell are provisioned pinned per-platform by this
 # installer with SHA256 verification (no system-wide install needed).
 
@@ -25,6 +26,8 @@ AIH_SOURCE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # Pinned-Node runtime environment: gates the runtime and prepends its bin to
 # PATH for this process tree so npm lifecycle scripts resolve the pinned node.
 . "$AIH_SOURCE_ROOT/scripts/lib/aih-node-env.sh"
+# Platform detection and pinned-runtime artifact names (unit-testable, tests/aih-platform.Tests.sh).
+. "$AIH_SOURCE_ROOT/scripts/lib/aih-platform.sh"
 AIH_DEFAULT_ROOT="$HOME/.local/share/nexus"
 AIH_INSTALL_ROOT="${AIH_INSTALL_ROOT:-$AIH_DEFAULT_ROOT}"
 AIH_RESET_MANAGED_SETTINGS=0
@@ -32,6 +35,9 @@ AIH_SKIP_DEEPSEEK_LOGIN=0
 AIH_SKIP_OPENAI_LOGIN=0
 AIH_SKIP_DEPENDENCY_INSTALL=0
 AIH_SKIP_PATH_CHECK=0
+# Directory that receives the aih launchers (default ~/.local/bin). An isolated test install
+# passes its own directory so it never replaces another installation's launchers.
+AIH_USER_BIN="${AIH_USER_BIN:-$HOME/.local/bin}"
 
 usage() {
   cat <<'EOF'
@@ -46,6 +52,8 @@ Options:
   --skip-openai-login       Skip the ChatGPT/Codex OAuth sign-in flow
   --skip-dependency-install Skip npm ci (requires an existing DSH runtime)
   --skip-path-check         Skip the ~/.local/bin PATH check
+  --user-bin DIR            Directory for the aih launchers (default: ~/.local/bin,
+                            overridable through AIH_USER_BIN)
   -h, --help                Show this help
 EOF
 }
@@ -58,6 +66,7 @@ while [ $# -gt 0 ]; do
     --skip-openai-login) AIH_SKIP_OPENAI_LOGIN=1; shift ;;
     --skip-dependency-install) AIH_SKIP_DEPENDENCY_INSTALL=1; shift ;;
     --skip-path-check) AIH_SKIP_PATH_CHECK=1; shift ;;
+    --user-bin) [ $# -ge 2 ] || { echo "--user-bin requires a value" >&2; exit 1; }; AIH_USER_BIN=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
   esac
@@ -71,38 +80,6 @@ AIH_FAIL_UNLESS() {
     echo "$2" >&2
     exit 1
   fi
-}
-
-aih_detect_platform() {
-  # Pure helper (unit-testable): map uname values to a supported target id.
-  aih_detect_platform_impl() {
-    _uname_s=$1
-    _uname_m=$2
-    case "$_uname_s" in
-      Linux) ;;
-      *) echo "unsupported-os:$_uname_s" >&2; return 1 ;;
-    esac
-    case "$_uname_m" in
-      x86_64|amd64) echo "linux-x64" ;;
-      aarch64|arm64) echo "unsupported-arch:$_uname_m (Nexus currently supports Linux x86_64)" >&2; return 1 ;;
-      *) echo "unsupported-arch:$_uname_m" >&2; return 1 ;;
-    esac
-  }
-  aih_detect_platform_impl "$1" "$2"
-}
-
-aih_node_artifact_name() {
-  # Pure helper (unit-testable): pinned Node artifact per platform target.
-  aih_node_artifact_name_impl() {
-    _version=$1
-    _target=$2
-    case "$_target" in
-      win-x64|win-arm64) echo "node-v${_version}-${_target}.zip" ;;
-      linux-x64|linux-arm64) echo "node-v${_version}-${_target}.tar.xz" ;;
-      *) echo "unsupported target: $_target" >&2; return 1 ;;
-    esac
-  }
-  aih_node_artifact_name_impl "$1" "$2"
 }
 
 aih_require_tool() {
@@ -145,7 +122,10 @@ echo "Nexus platform: $AIH_PLATFORM"
 aih_require_tool git git
 aih_require_tool tar tar
 aih_require_tool xz xz
-aih_require_tool sha256sum coreutils
+if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+  echo "Nexus installer: required tool 'sha256sum' (or 'shasum' on macOS) is not available on PATH." >&2
+  exit 1
+fi
 # iconv decodes vendor checksum manifests that ship as UTF-16 (the official
 # PowerShell hashes.sha256 is UTF-16LE with a BOM). Verified BEFORE any
 # download so the failure is an explicit dependency error, never a mid-
@@ -163,7 +143,7 @@ AIH_PWSH_VERSION=$(aih_read_version PowerShellVersion "$AIH_SOURCE_ROOT/config/v
 [ -n "$AIH_PWSH_VERSION" ] || { echo "Nexus installer: could not read PowerShellVersion from config/versions.json" >&2; exit 1; }
 
 # Fail closed when the source tree is not a complete Nexus checkout.
-for _required in config/versions.json config/settings.yaml config/nexus-profiles.json config/muse-profiles.json config/preset-muse.yml config/Muse-Isolation.cjs config/Controller-RequestBoundary.cjs config/Routing-Integrity.cjs scripts/Common.ps1 scripts/aih.ps1 scripts/Verify-RoutingIntegrityComposition.mjs runtime/package.json runtime/package-lock.json; do
+for _required in config/versions.json config/settings.yaml config/nexus-profiles.json config/muse-profiles.json config/preset-muse.yml config/Muse-Isolation.cjs config/Controller-RequestBoundary.cjs config/Routing-Integrity.cjs scripts/Common.ps1 scripts/aih.ps1 scripts/Verify-NexusComposition.mjs scripts/Build-NexusHomePatch.cjs scripts/Install-NexusPresets.ps1 scripts/Install-NexusUi.ps1 runtime/package.json runtime/package-lock.json; do
   AIH_FAIL_UNLESS "$AIH_SOURCE_ROOT/$_required" "The source tree is incomplete; clone the Nexus repository and run ./setup.sh from its root."
 done
 
@@ -183,7 +163,7 @@ for _name in setup.sh setup.ps1 README.md SECURITY.md .gitignore .gitattributes 
   if [ -f "$AIH_SOURCE_ROOT/$_name" ]; then cp -f "$AIH_SOURCE_ROOT/$_name" "$AIH_INSTALL_ROOT/$_name"; fi
 done
 
-AIH_CONFIG_FILES='versions.json settings.yaml home.cordis.patch.yml delegation-block.yml preset.yml preset-deepseek.yml preset-muse.yml DeepSeek-Isolation.cjs Engineering-Isolation.cjs Muse-Isolation.cjs Muse-ReasoningGovernor.cjs Muse-ReasoningRuntime.cjs Muse-ReasoningSignals.cjs Muse-ReasoningActivity.cjs Controller-RequestBoundary.cjs Preset-ShellEnvironment.cjs Routing-Integrity.cjs AihController.cjs ContextCompaction.cjs deepseek-agent.cordis.yml routing-policy.json engineering-profiles.json model-registry.json nexus-profiles.json muse-profiles.json Engineering-Profiles.cjs Nexus-Profiles.cjs'
+AIH_CONFIG_FILES='versions.json settings.yaml home.cordis.patch.yml delegation-block.yml preset.yml preset-deepseek.yml preset-muse.yml DeepSeek-Isolation.cjs Engineering-Isolation.cjs Muse-Isolation.cjs Muse-ReasoningGovernor.cjs Muse-ReasoningRuntime.cjs Muse-ReasoningSignals.cjs Muse-ReasoningActivity.cjs Controller-RequestBoundary.cjs Preset-ShellEnvironment.cjs Dsh-SessionEvents.cjs OpenCode-SessionHeader.cjs Routing-Integrity.cjs AihController.cjs ContextCompaction.cjs deepseek-agent.cordis.yml routing-policy.json engineering-profiles.json model-registry.json nexus-profiles.json muse-profiles.json Engineering-Profiles.cjs Nexus-Profiles.cjs'
 for _name in $AIH_CONFIG_FILES; do
   if [ -f "$AIH_SOURCE_ROOT/config/$_name" ]; then cp -f "$AIH_SOURCE_ROOT/config/$_name" "$AIH_INSTALL_ROOT/config/$_name"; fi
 done
@@ -258,7 +238,7 @@ if [ -x "$AIH_PWSH_DIR/pwsh" ]; then
   AIH_INSTALLED_PWSH_VERSION=$("$AIH_PWSH_DIR/pwsh" --version | sed 's/^PowerShell //')
 fi
 if [ "$AIH_INSTALLED_PWSH_VERSION" != "$AIH_PWSH_VERSION" ]; then
-  AIH_PWSH_ARTIFACT="powershell-$AIH_PWSH_VERSION-$AIH_PLATFORM.tar.gz"
+  AIH_PWSH_ARTIFACT=$(aih_pwsh_artifact_name "$AIH_PWSH_VERSION" "$AIH_PLATFORM")
   AIH_PWSH_BASE="https://github.com/PowerShell/PowerShell/releases/download/v$AIH_PWSH_VERSION"
   AIH_PWSH_TMP=$(mktemp -d "${TMPDIR:-/tmp}/aih-pwsh-XXXXXXXX")
   echo "Downloading pinned PowerShell $AIH_PWSH_VERSION ($AIH_PWSH_ARTIFACT) ..."
@@ -293,7 +273,7 @@ else
   # caller's PATH is preserved behind the pinned entry and nothing
   # persistent (rc files) is touched.
   aih_use_pinned_node "$AIH_NODE_DIR" "$AIH_NODE_VERSION"
-  "$AIH_NODE_DIR/bin/node" "$AIH_NPM_CLI" ci --omit=dev --legacy-peer-deps --prefix "$AIH_INSTALL_ROOT/app"
+  "$AIH_NODE_DIR/bin/node" "$AIH_NPM_CLI" ci --omit=dev --prefix "$AIH_INSTALL_ROOT/app"
 fi
 
 # Shared install composition (settings, UI patches, agent presets, data dirs,
@@ -310,7 +290,6 @@ fi
 "$AIH_PWSH_DIR/pwsh" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$AIH_INSTALL_ROOT/scripts/Install-NexusSkills.ps1" -InstallRoot "$AIH_INSTALL_ROOT"
 
 # -- 6/6 user launchers and PATH ----------------------------------------------
-AIH_USER_BIN="$HOME/.local/bin"
 mkdir -p "$AIH_USER_BIN"
 for _wrapper in "$AIH_INSTALL_ROOT"/bin/*; do
   [ -f "$_wrapper" ] || continue

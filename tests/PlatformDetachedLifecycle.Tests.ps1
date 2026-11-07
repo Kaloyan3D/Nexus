@@ -17,7 +17,7 @@ param($Root,$Node,$Child)
 $base = Split-Path -Parent $Child
 $p = Start-AihDetachedProcess -FilePath $Node -ArgumentList @($Child, 'argument with spaces') -WorkingDirectory $base -RedirectStandardOutput (Join-Path $base 'stdout.log') -RedirectStandardError (Join-Path $base 'stderr.log')
 [IO.File]::WriteAllText((Join-Path $base 'pid.txt'), [string]$p.Id)
-[IO.File]::WriteAllText((Join-Path $base 'sid.txt'), [string](& ps -o sid= -p $p.Id).Trim())
+[IO.File]::WriteAllText((Join-Path $base 'sid.txt'), [string]$(if ((Get-AihPlatformName) -eq 'macos') { (& ps -o pgid= -p $p.Id).Trim() } else { (& ps -o sid= -p $p.Id).Trim() }))
 '@)
 try {
     & $pwsh -NoProfile -File $launcher $root $node $child

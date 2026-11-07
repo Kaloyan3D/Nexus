@@ -1,4 +1,14 @@
-# ── delegation and workflows ────────────────────────────────────────────────
+# ── delegation and workflows (DSH 0.2.x) ───────────────────────────────────
+# Single source for the Nexus delegation surface; scripts/Build-NexusHomePatch.cjs
+# inserts this group into the aih-engineering and aih-deepseek planes (the codex
+# row is dropped structurally for aih-deepseek; aih-muse has no delegation group).
+#
+# Differences from DSH 0.1.x (the upstream tool config changed):
+#   - per-worker `persona`, `backgroundMode` and `enableRunInBackground` no
+#     longer exist; a worker inherits the parent plane's persona. A dedicated
+#     worker persona would need a worker agent preset (follow-up).
+#   - `tool-subagent-control/list-agents` was folded into tool-subagent-control.
+#   - `workflow-worker-thread` was replaced by `workflow-ptc`.
 
 - id: delegation
   name: cordis:group
@@ -9,36 +19,27 @@
     - id: tool-subagent-control
       name: '@deepseek-ai/dsh-tool-subagent-control'
 
-    - id: tool-subagent-list-agents
-      name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
-
     - id: deepseek-normal-worker
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
         provider: spawn
         toolName: deepseek_normal
-        backgroundMode: continuable
         maxDepth: 1
         agentOptions:
           provider: flash-high-direct
           model: deepseek-v4-flash
           reasoningEffort: high
-        persona: >-
-          You are the implementation agent. Complete the supplied bounded task. Use repository-local instructions, inspect relevant context before modifying, respect task scope, and use targeted verification. The deterministic controller decides completion and owns automatic Visual Review; never discover or invoke Visual Review through the skill catalog. If blocked, return one structured escalation with a stable failure signature and concrete evidence.
 
     - id: deepseek-deep-worker
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
         provider: spawn
         toolName: deepseek_deep
-        backgroundMode: continuable
         maxDepth: 1
         agentOptions:
           provider: flash-max-direct
           model: deepseek-v4-flash
           reasoningEffort: max
-        persona: >-
-          You are the implementation agent with an expanded reasoning budget. Resolve the supplied bounded failure or task. Use only the supplied structured state and repository context, run targeted verification, and return evidence. The deterministic controller decides completion and owns automatic Visual Review; never discover or invoke Visual Review through the skill catalog. If unresolved, return one structured escalation scoped to the remaining question.
 
     - id: tool-subagent-codex
       name: '@deepseek-ai/dsh-tool-subagent'
@@ -46,11 +47,10 @@
       config:
         provider: codex
         toolName: subagent_codex
-        enableRunInBackground: false
         maxDepth: provider-managed
 
-    - id: workflow-worker-thread
-      name: '@deepseek-ai/dsh-workflow-worker-thread'
+    - id: workflow-ptc
+      name: '@deepseek-ai/dsh-workflow-ptc'
       config:
         provider: spawn
 

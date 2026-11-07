@@ -40,6 +40,7 @@
  * reviewer role); it can never become the root engineering model.
  */
 
+const sessionReader = require('./Dsh-SessionEvents.cjs')
 const { execFile, spawn } = require('node:child_process')
 const { promisify } = require('node:util')
 const { createRequire } = require('node:module')
@@ -1828,11 +1829,13 @@ function apply(ctx) {
       }
       const dshSession = loadDshSessionModule()
       if (!dshSession || typeof dshSession.Session.fromRestore !== 'function') return false
+      // The full persisted header is the restore contract (DSH 0.2 validates every field, e.g.
+      // version 4 and the isSeeded flag); a partial copy would make every restore proof fail.
       const header = session.header && typeof session.header === 'object'
-        ? JSON.parse(JSON.stringify({ version: session.header.version, id: session.header.id, createdAt: session.header.createdAt, cwd: session.header.cwd }))
+        ? JSON.parse(JSON.stringify(session.header))
         : null
       if (!header || header.version === undefined || !header.id) return false
-      const seed = JSON.parse(JSON.stringify(session.events))
+      const seed = JSON.parse(JSON.stringify(sessionReader.sessionEvents(session)))
       const restored = dshSession.Session.fromRestore(String(session.id || sessionId || 'restored'), seed, header)
       const found = contextCompaction.findReplacementByOperation(restored, operationId)
       return Boolean(found)
@@ -2024,8 +2027,8 @@ function apply(ctx) {
   // sequence identity only -- never wall-clock time.
   function captureCompletionBoundary(session, binding) {
     try {
-      if (!session || !binding || !Array.isArray(session.events)) return null
-      const boundary = session.events.length - 1
+      if (!session || !binding || sessionReader.sessionEventCount(session) < 0) return null
+      const boundary = sessionReader.sessionEventCount(session) - 1
       if (!Number.isFinite(boundary) || boundary < 0) return null
       binding.completionBoundarySeqs = boundary
       return boundary
@@ -2237,7 +2240,7 @@ function apply(ctx) {
       }
       const appendedSeqs = []
       for (const segment of remainingSegments) {
-        const node = session.append('user/message', message, { surfaceOp: { op: 'replace', start: segment.start, end: segment.end }, sourceEventSeqs: segment.sourceEventSeqs })
+        const node = session.append('user/message', message, { surfaceOp: { op: 'replace', startSeq: segment.start, endSeq: segment.end }, sourceEventSeqs: segment.sourceEventSeqs })
         appendedSeqs.push(node.seq)
       }
       const transitionedPending = await lifecycleCli('transition', binding, [], { to: 'awaiting-durability', reason: 'replacement appended in memory; durability unconfirmed', sessionId }).then(() => true).catch((error) => {
@@ -3056,9 +3059,10 @@ function apply(ctx) {
   // now runs — the stale header alone would dispatch the wrong engine.
   function agentPresetOf(session) {
     try {
-      if (Array.isArray(session.events)) {
-        for (let index = session.events.length - 1; index >= 0; index -= 1) {
-          const event = session.events[index]
+      const presetEvents = sessionReader.sessionEvents(session)
+      if (Array.isArray(presetEvents)) {
+        for (let index = presetEvents.length - 1; index >= 0; index -= 1) {
+          const event = presetEvents[index]
           if (event && event.type === 'agent-preset/selected' && event.data && event.data.agentPreset) {
             const selected = String(event.data.agentPreset)
             if (selected === 'aih-engineering' || selected === 'aih-deepseek' || selected === 'aih-muse') return selected

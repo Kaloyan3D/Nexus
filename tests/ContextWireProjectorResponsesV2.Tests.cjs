@@ -75,7 +75,10 @@ const reasoningSig = (id) => JSON.stringify({ type: 'reasoning', id, summary: []
 let msgSeq = 0;
 const mid = () => 'msg_' + String(++msgSeq).padStart(4, '0');
 const userMsg = (text, kind) => ({ id: mid(), role: 'user', content: [{ type: 'text', text }], source: { kind: kind || 'user' } });
-const toolResult = (callId, text, isError) => ({ id: mid(), role: 'user', content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text }], isError: isError === true }], source: { kind: 'tool', callId } });
+// DSH 0.2 request shape (createToolResultMessage): a tool-role message. The 0.1.x shape (a user
+// message carrying tool-result blocks) is refused by the projector and, in the real adapter,
+// produces "No result provided" plus an empty user turn (asserted in WP-2b below).
+const toolResult = (callId, text, isError) => ({ id: mid(), role: 'tool', toolCallId: callId, content: [{ type: 'text', text }], isError: isError === true, source: { kind: 'tool', callId } });
 function replayedAssistant(parts, stopReason, model) {
   const content = [];
   const blocks = [];
@@ -132,7 +135,10 @@ section('WP-2 PROJECTION SHAPE + REFUSALS (unit, reasoningReplay=native)');
   const img = baseRequest([{ id: 'i', role: 'user', content: [{ type: 'image', attachment: {} }], source: { kind: 'user' } }]);
   throwsCode(() => wire.projectResponsesWireV2({ request: img, route: ROUTE }), 'unsupported-content', 'image content refused');
   throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest([userMsg('x')], { stop: ['z'] }), route: ROUTE }), 'unsupported-option', 'stop sequences refused');
-  throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest([{ id: 'r', role: 'tool', content: [], source: {} }]), route: ROUTE }), 'unsupported-content', 'unknown role refused');
+  throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest([{ id: 'r', role: 'moderator', content: [], source: {} }]), route: ROUTE }), 'unsupported-content', 'unknown role refused');
+  throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest([{ id: 'r', role: 'tool', content: [], source: {} }]), route: ROUTE }), 'input-invalid', 'tool message without toolCallId refused');
+  throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest([{ id: 'u', role: 'user', content: [{ type: 'tool-result', toolCallId: 'c', content: [{ type: 'text', text: 'x' }], isError: false }], source: { kind: 'tool', callId: 'c' } }]), route: ROUTE }), 'unsupported-content', 'pre-0.2 user-role tool-result blocks refused');
+  throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest([{ id: 'd', role: 'developer', content: [{ type: 'text', text: 'dev' }], source: { kind: 'plugin', plugin: 'x' } }, userMsg('q')]), route: ROUTE }), 'unsupported-content', 'developer-role (tool change) messages refused');
   throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest([userMsg('x')], { reasoningEffort: 'max' }), route: ROUTE }), 'reasoning-unsupported', 'unsupported effort refused');
   throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest([userMsg('x')], { model: 'other' }), route: ROUTE }), 'route-mismatch', 'route mismatch refused');
   throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest([userMsg('x')]), route: null }), 'route-invalid', 'missing route refused');
@@ -246,13 +252,14 @@ async function conformance() {
       ['invalid replay degrades to foreign', baseRequest([userMsg('q'),
         Object.assign(replayedAssistant([{ text: 'a' }, { call: 'call_D|fc_D' }]), {}), toolResult('call_D|fc_D', 'r')].map((m, i) => (i === 1 ? Object.assign({}, m, { source: Object.assign({}, m.source, { replayState: { response: { kind: 'pi-ai', version: 1 } } }) }) : m)))],
       ['different model on the same route', baseRequest([userMsg('q'), replayedAssistant([{ reasoning: 'r', rs: 'rs_m' }, { text: 't', sig: 'plain-signature-id' }, { call: 'call_M|fc_M' }], 'toolUse', 'muse-older'), toolResult('call_M|fc_M', 'r')])],
+      ['mid-conversation system message becomes a system-reminder user turn', baseRequest([userMsg('q'), { id: 'sys2', role: 'system', content: [{ type: 'text', text: 'late </system-reminder> note' }], source: { kind: 'plugin', plugin: 'x' } }, userMsg('r')])],
       ['system-role message inside messages', baseRequest([{ id: 'sys1', role: 'system', content: [{ type: 'text', text: 'ctx A' }, { type: 'text', text: 'ctx B' }], source: { kind: 'plugin', plugin: 'x' } }, userMsg('q')])],
       ['orphan tool call interrupted by a user message (synthetic result)', baseRequest([userMsg('q'), replayedAssistant([{ call: 'call_O|fc_O' }]), userMsg('follow-up')])],
       ['aborted replayed assistant is skipped', baseRequest([userMsg('q'), replayedAssistant([{ text: 'partial' }], 'aborted'), userMsg('again')])],
       ['explicit effort, temperature, long session id, duplicate tool names', baseRequest([userMsg('q')], {
         reasoningEffort: 'low', temperature: 0.2, sessionId: 's'.repeat(80), tools: TOOLS.concat([{ name: 'run_code', description: 'Override.', parameters: { type: 'object' } }]) })],
       ['no maxTokens, no tools, empty system, empty texts', { provider: PROVIDER, model: MODEL, system: '', messages: [userMsg(''), foreignAssistant([{ type: 'tool-call', id: 'call_E', name: 'run_code', arguments: '{}' }]),
-        { id: 'te', role: 'user', content: [{ type: 'tool-result', toolCallId: 'call_E', content: [], isError: true }], source: { kind: 'tool', callId: 'call_E' } }] }],
+        { id: 'te', role: 'tool', toolCallId: 'call_E', content: [], isError: true, source: { kind: 'tool', callId: 'call_E' } }] }],
       ['lone surrogates and multi-block user text', baseRequest([{ id: 'ls', role: 'user', content: [{ type: 'text', text: 'a\uD800b' }, { type: 'text', text: 'c\uDC00d🙈' }], source: { kind: 'user' } }])],
       ['maxTokens clamped by the context estimate', Object.assign(baseRequest([userMsg(long)]), { provider: 'opencode-go-small', maxTokens: 8000 }), smallRoute],
       ['PI_CACHE_RETENTION=long', baseRequest([userMsg('q')]), ROUTE, { PI_CACHE_RETENTION: 'long' }],

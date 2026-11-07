@@ -2812,12 +2812,27 @@ function ControlRoom({ sessionId, running, onClose }) {
 * The overlay layer is click-through; only the drawer surface opts into pointer
 * events, so the app stays usable around it.
 */
+// DSH 0.2.x: the sessions state has no `current`; the displayed (main-view) session is
+// the one retained by the main view (the same rule upstream's DocumentTitle uses). A
+// legacy `current` is honoured only when it names a known session.
+function currentSessionIdOf(state) {
+	if (!state || !state.byId) return undefined;
+	if (typeof state.current === "string" && state.byId[state.current]) return state.current;
+	for (const id of Object.keys(state.byId)) {
+		const entry = state.byId[id];
+		if (entry && entry.retainedBy && (entry.retainedBy.mainView || 0) > 0) return id;
+	}
+	return undefined;
+}
 function ControllerDrawer({ useSessions }) {
-	const sessionId = useSessions ? useSessions((s) => s && s.current) : undefined;
-	const running = useSessions ? useSessions((s) => !!s && !!(s.byId && s.byId[s.current] && s.byId[s.current].running === true)) : false;
+	const sessionId = useSessions ? useSessions((s) => currentSessionIdOf(s)) : undefined;
+	const running = useSessions ? useSessions((s) => { const id = currentSessionIdOf(s); return !!id && s.byId[id].running === true; }) : false;
 	const pressure = useSessions ? useSessions((s) => {
-		if (!s || !s.byId || !s.byId[s.current] || !s.byId[s.current].projections) return undefined;
-		const value = s.byId[s.current].projections.values ? s.byId[s.current].projections.values.contextPressure : undefined;
+		const id = currentSessionIdOf(s);
+		if (!id) return undefined;
+		const entry = s.byId[id];
+		const values = entry.projectionValues || (entry.projections && entry.projections.values);
+		const value = values ? values.contextPressure : undefined;
 		if (value === undefined) return undefined;
 		if (typeof value === "string") {
 			try { return JSON.parse(value); } catch { return undefined; }
@@ -3122,7 +3137,18 @@ function composerPreferredEngineer(snapshot, editor) {
 	return composer.preferredEngineer && typeof composer.preferredEngineer === "object" ? composer.preferredEngineer : null;
 }
 
-function executorChipContent(snapshot, editor, composerMode) {
+// DSH 0.2 keeps the model choice PER SESSION (`modelSelection`: pending ?? lastUsed),
+// while the controller snapshot's `preference` still reads the global agent-default-model.
+// In a legacy (DeepSeek-only) session the two can disagree after the operator picks a
+// model; a stale PREFERRED label would contradict the chooser, so it is only shown while
+// it names the session's actual selection (the chooser itself is the authoritative display).
+function sessionModelSelectionOf(session) {
+	const projection = session && typeof session === "object" ? session.modelSelection : null;
+	if (!projection || typeof projection !== "object") return null;
+	const chosen = projection.pending || projection.lastUsed;
+	return chosen && typeof chosen.provider === "string" && typeof chosen.model === "string" ? chosen : null;
+}
+function executorChipContent(snapshot, editor, composerMode, sessionSelection) {
 	if (!snapshot || snapshot.error) return null;
 	const composer = snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
 	// TASK-0038: the pills obey the SAME authoritative mode the chip derived
@@ -3150,6 +3176,10 @@ function executorChipContent(snapshot, editor, composerMode) {
 	} else {
 		preference = snapshot.preference && typeof snapshot.preference.label === "string" && snapshot.preference.label ? snapshot.preference.label : null;
 		preferenceReasoning = snapshot.preference && typeof snapshot.preference.reasoning === "string" && snapshot.preference.reasoning ? snapshot.preference.reasoning : null;
+		if (preference !== null && sessionSelection && snapshot.preference && (snapshot.preference.provider !== sessionSelection.provider || snapshot.preference.modelId !== sessionSelection.model)) {
+			preference = null;
+			preferenceReasoning = null;
+		}
 	}
 	const reasoning = reasoningBadgeVisible(modelName, effectiveReasoning) ? effectiveReasoning : null;
 	// PREFERRED adds information only when it differs from RUNNING (or when
@@ -3372,10 +3402,21 @@ function useComposerState(session, explicitSessionId) {
 }
 
 // Additive execution status has no responsibility for the preference control.
-function ExecutorChip({ session }) {
+// The per-session model directory (DSH 0.2 `ctx.modelDirectories`), captured when the
+// service is provided (see the model seat registration). Absent in hosts/tests that do not
+// provide it; the chip then falls back to the session's own `modelSelection` projection.
+let modelDirectoriesService = null;
+const NO_DIRECTORY_STORE = { subscribe: () => () => {}, getSnapshot: () => null };
+function ExecutorChip({ session, sessionId: slotSessionId }) {
     const { snapshot, editor, derivedMode } = useComposerState(session);
+    // A blank hero session has no session object yet, but the slot still names its id.
+    const sessionId = typeof slotSessionId === "string" ? slotSessionId : session && typeof session.sessionId === "string" ? session.sessionId : undefined;
+    let store = NO_DIRECTORY_STORE;
+    try { if (modelDirectoriesService && sessionId) store = modelDirectoriesService.directoryFor(sessionId).store; } catch { store = NO_DIRECTORY_STORE; }
+    const directoryState = react.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+    const directorySelection = directoryState && directoryState.current && typeof directoryState.current.provider === "string" && typeof directoryState.current.model === "string" ? directoryState.current : null;
     return react_jsx_runtime.jsx(ExecutorPill, {
-        content: executorChipContent(snapshot, derivedMode.mode === "engineering" ? editor : null, derivedMode.mode),
+        content: executorChipContent(snapshot, derivedMode.mode === "engineering" ? editor : null, derivedMode.mode, directorySelection || sessionModelSelectionOf(session)),
     });
 }
 
@@ -3400,6 +3441,48 @@ function ComposerPreference({ sessionId, useSession, useSessions, legacy }) {
             ? react_jsx_runtime.jsx(EngineeringSelector, { editor })
             : legacy,
     });
+}
+// DSH 0.2.x composer preference seat. The seat is the supported single-occupant
+// slot `conversation.input.model`; the Nexus registration outranks upstream's
+// ModelSelect by priority (slot shadowing is ascending: the LOWEST priority renders) (supported election, no DOM mutation, no bundle patch).
+// Engineering sessions get the Engineering profile selector (the Controller owns
+// routing, so an upstream model picker would advertise a choice the Controller
+// overrides). Legacy (DeepSeek-only) sessions keep a real model chooser over the
+// SAME per-session ModelDirectory upstream uses, so choosing a model still works.
+function LegacyModelChooser({ directory, load, select, locked, available }) {
+    const state = react.useSyncExternalStore(directory.subscribe, directory.getSnapshot, directory.getSnapshot);
+    react.useEffect(() => { load(); }, [load]);
+    if (available === false) return null;
+    const groups = Array.isArray(state.groups) ? state.groups : [];
+    const options = [];
+    for (const group of groups) for (const model of group.models || []) options.push({ key: group.id + "\u0000" + model.id, provider: group.id, model: model.id, label: group.name + " · " + model.name });
+    const current = state.current ? state.current.provider + "\u0000" + state.current.model : "";
+    const busy = state.status === "selecting" || state.status === "loading";
+    // The saved selection stays visible even when the catalog does not list it (no
+    // credentials, provider offline): the control never renders empty or hides state.
+    if (current !== "" && !options.some((option) => option.key === current)) {
+        options.unshift({ key: current, provider: state.current.provider, model: state.current.model, label: state.current.provider + " · " + state.current.model + " (not in catalog)" });
+    }
+    return react_jsx_runtime.jsx("select", {
+        "data-nexus-legacy-model": "true",
+        "aria-label": "Model",
+        className: "nx-eng-trigger",
+        value: current,
+        disabled: !!locked || busy || options.length <= 1 && current !== "" && state.groups.length === 0,
+        title: state.error ? String(state.error) : "Model for this DeepSeek-only session",
+        onChange: (event) => {
+            const picked = options.find((option) => option.key === event.target.value);
+            if (picked) select({ provider: picked.provider, model: picked.model });
+        },
+        children: [
+            current === "" ? react_jsx_runtime.jsx("option", { value: "", children: busy ? "Loading models…" : options.length === 0 ? "No models available" : "Model" }, "none") : null,
+            ...options.map((option) => react_jsx_runtime.jsx("option", { value: option.key, children: option.label }, option.key)),
+        ],
+    });
+}
+function NexusModelSeat(props) {
+    const legacy = react_jsx_runtime.jsx(LegacyModelChooser, { directory: props.directory, load: props.load, select: props.select, locked: props.locked, available: props.available });
+    return react_jsx_runtime.jsx(ComposerPreference, { sessionId: props.sessionId, useSession: props.useSession, useSessions: props.useSessions, legacy });
 }
 //#region styles
 /**
@@ -3582,7 +3665,7 @@ const PANEL_CSS = [
 
 //#region apply
 /** Required client service: the UI slot registry. */
-const inject = ["slots", "workspaces"];
+const inject = ["slots", "workspaces", "uiWorkspace"];
 function apply(ctx) {
 	ctx.provide("nexusComposerPreference", { Component: ComposerPreference });
 	// Phase M3 (TASK-0040): the shared engine mapping service consumed by the
@@ -3654,7 +3737,12 @@ function apply(ctx) {
 				const key = requestedPath.replaceAll("/", "\\").replace(/[\\]+$/g, "").toLocaleLowerCase();
 				let workspace = snapshot.items.find((item) => item.path.replaceAll("/", "\\").replace(/[\\]+$/g, "").toLocaleLowerCase() === key);
 				if (workspace === void 0) workspace = await ctx.workspaces.create({ path: requestedPath });
-				if (!disposed) ctx.workspaces.startSession(workspace.workspaceId);
+				if (!disposed) {
+					// DSH 0.2.x: session navigation lives on the uiWorkspace service
+					// (ctx.workspaces is the Remote workspace store and has no startSession).
+					if (!ctx.uiWorkspace || typeof ctx.uiWorkspace.startSession !== "function") throw new Error("uiWorkspace.startSession is unavailable");
+					ctx.uiWorkspace.startSession(workspace.workspaceId);
+				}
 			} catch (reason) {
 				console.warn("Nexus workspace handoff failed:", reason);
 			} finally {
@@ -3709,6 +3797,7 @@ function apply(ctx) {
 		id: "nexus-controller",
 		order: 90,
 		label: "Task executor",
+		inject: (sessionId) => ({ sessionId }),
 	}, ExecutorChip));
 	// Phase M2.1 (TASK-0038): consume the mode selector's authoritative client
 	// state (see the nexus mode bridge region). The nested inject is
@@ -3719,6 +3808,26 @@ function apply(ctx) {
 	// controller still boots.
 	ctx.inject(["nexusModeState"], (scope) => {
 		attachNexusModeState(scope.nexusModeState);
+	});
+	// Scopes carry only the names listed here; the slot registry is the apply
+	// context's own (declared above), never `scope.slots`.
+	ctx.inject(["modelDirectories", "sessions"], (scope) => {
+		modelDirectoriesService = scope.modelDirectories;
+		ctx.slots.inject("conversation.input.model", () => ctx.slots.register({
+			name: "conversation.input.model",
+			priority: -100,
+			label: "Nexus model preference",
+			inject: (sessionId) => {
+				const directory = scope.modelDirectories.directoryFor(sessionId);
+				const available = typeof scope.sessions.subagentAddress !== "function" || scope.sessions.subagentAddress(sessionId) === undefined;
+				return {
+					available,
+					directory: directory.store,
+					load: () => { if (available) directory.load().catch(() => {}); },
+					select: (selection) => available ? directory.select(selection) : Promise.resolve(undefined),
+				};
+			},
+		}, NexusModelSeat));
 	});
 }
 //#endregion
@@ -3736,6 +3845,7 @@ exports.executorChipContent = executorChipContent;
 exports.composerModeOfSession = composerModeOfSession;
 exports.classifyNexusPreset = classifyNexusPreset;
 exports.ComposerPreference = ComposerPreference;
+exports.currentSessionIdOf = currentSessionIdOf;
 exports.attachNexusModeState = attachNexusModeState;
 exports.subscribeNexusMode = subscribeNexusMode;
 exports.currentNexusModePreset = currentNexusModePreset;

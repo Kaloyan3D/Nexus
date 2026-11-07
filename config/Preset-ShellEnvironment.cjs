@@ -1,5 +1,7 @@
 'use strict'
 
+const sessionReader = require('./Dsh-SessionEvents.cjs')
+
 // ShellEnv owns keys per host, not per standing preset. Use its public
 // declaration inventory as the idempotence authority even when installed
 // presets load separate copies of this module. Registration is synchronous.
@@ -15,8 +17,9 @@ function invalidIdentity() {
 
 function presetFor(session) {
   if (!session || typeof session !== 'object') throw invalidIdentity()
-  if (session.events !== undefined && !Array.isArray(session.events)) throw invalidIdentity()
-  const events = session.events || []
+  const read = sessionReader.sessionEvents(session)
+  if (read !== undefined && !Array.isArray(read)) throw invalidIdentity()
+  const events = read || []
   for (let index = events.length - 1; index >= 0; index--) {
     const event = events[index]
     if (event && event.type === 'agent-preset/selected') {

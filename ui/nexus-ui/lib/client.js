@@ -213,15 +213,15 @@ window.__ModuleLoader__.load({
 		* intrinsic size does not constrain it: 34px in the conversation hero,
 		* 30px in the expanded sidebar brand row, 26px in the collapsed rail.
 		* The NEXUS wordmark renders separately through the sidebar.brand.name
-		* slot. The asset is copied into the web frontend dist by
-		* scripts/Patch-NexusUi.ps1 (step 2d) and served from /assets/.
+		* slot. The asset is served by the @nexus/ui-brand host half (it used to be copied into the web frontend dist by
+		* the retired scripts/Patch-NexusUi.ps1) on /nexus/assets/.
 		* @param props - host-supplied mark presentation (size + positioning class).
 		* @returns the Nexus icon mark.
 		*/
 		function NexusMark({ size, className }) {
 			return (0, react_jsx_runtime.jsx)("img", {
 				className: className ? "nexus-brand-mark " + className : "nexus-brand-mark",
-				src: "/assets/nexus-mark.png",
+				src: "/nexus/assets/nexus-mark.png",
 				alt: "",
 				"aria-hidden": "true"
 			});
@@ -257,6 +257,47 @@ window.__ModuleLoader__.load({
 					tag.remove();
 				};
 			}, "nexus-ui: structural stylesheet");
+			// Product identity in the browser chrome, by supported runtime means: the
+			// favicon is an ordinary <link> served by this plugin's host half behind
+			// connection admission; the title follows upstream's DocumentTitle (which owns
+			// <title> and reads a BUILD-time product title) by rewriting only the product
+			// suffix it appends. No compiled upstream file is touched.
+			ctx.effect(() => {
+				const link = document.createElement("link");
+				link.rel = "icon";
+				link.type = "image/svg+xml";
+				link.href = "/nexus/assets/nexus-favicon.svg";
+				link.dataset.plugin = "@nexus/ui-brand";
+				const existing = Array.from(document.querySelectorAll('link[rel~="icon"]'));
+				document.head.appendChild(link);
+				const hidden = existing.map((node) => { const was = node.getAttribute("rel"); node.setAttribute("rel", "x-upstream-icon"); return [node, was]; });
+				return () => {
+					link.remove();
+					for (const [node, was] of hidden) node.setAttribute("rel", was);
+				};
+			}, "nexus-ui: favicon");
+			ctx.effect(() => {
+				const titleNode = document.querySelector("title");
+				if (!titleNode) return () => {};
+				const upstream = document.title;
+				const brand = (value) => {
+					if (value === upstream) return "Nexus";
+					return value.endsWith(" \u2014 " + upstream) ? value.slice(0, -upstream.length) + "Nexus" : value;
+				};
+				let applying = false;
+				const rewrite = () => {
+					if (applying) return;
+					const next = brand(document.title);
+					if (next === document.title) return;
+					applying = true;
+					document.title = next;
+					applying = false;
+				};
+				const observer = new MutationObserver(rewrite);
+				observer.observe(titleNode, { childList: true, characterData: true, subtree: true });
+				rewrite();
+				return () => { observer.disconnect(); };
+			}, "nexus-ui: product title");
 			ctx.slots.inject("sidebar.brand.mark", () => ctx.slots.inject("sidebar.brand.name", () => ctx.slots.inject("conversation.hero.brand.mark", function* () {
 				yield ctx.slots.register({ name: "sidebar.brand.mark" }, NexusMark);
 				yield ctx.slots.register({ name: "sidebar.brand.name" }, NexusBrandName);

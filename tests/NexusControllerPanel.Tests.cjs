@@ -193,7 +193,7 @@ function fixtureFileMap(dataRoot, workspace, { task, executionClass, decision, d
   } else {
     files[path.join(dataRoot, 'routing', 'decisions.jsonl')] = JSON.stringify(decisionRecord) + '\n'
   }
-  files[path.join(dataRoot, 'settings.yaml')] = FIXTURE_SETTINGS
+  files[path.join(dataRoot, 'nexus-settings.yaml')] = FIXTURE_SETTINGS
   files[path.join(dataRoot, 'aih-state.json')] = JSON.stringify({
     SchemaVersion: 3,
     Status: 'READY',
@@ -528,10 +528,10 @@ async function main() {
 
       // 11b. webServer becomes available later → the injection callback
       // applies and BOTH routes register (Cordis lifecycle semantics).
-      assert.doesNotThrow(() => injectCallback({ webServer: fakeWebServer, effect(fn) { fn(); return () => {} } }), 'injection callback must apply cleanly once the service exists')
-      assert.equal(captured.length, 33, 'all routes must register after webServer becomes available (30 pre-R5 plus 3 R5 connections endpoints)')
+      assert.doesNotThrow(() => injectCallback({ webServer: fakeWebServer, connection: { admit: () => ({ peer: {} }) }, effect(fn) { fn(); return () => {} } }), 'injection callback must apply cleanly once the service exists')
+      assert.equal(captured.length, 34, 'all routes must register after webServer becomes available (30 pre-R5, 3 R5 connections endpoints, and the default-mode route)')
       const paths = captured.map((spec) => spec.path).sort()
-      assert.deepEqual(paths, ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/registry/v1/catalog', '/nexus/registry/v1/configuration', '/nexus/registry/v1/connections', '/nexus/registry/v1/connections/check', '/nexus/registry/v1/connections/delete', '/nexus/registry/v1/connections/disable', '/nexus/registry/v1/connections/discover', '/nexus/registry/v1/connections/list', '/nexus/registry/v1/connections/status', '/nexus/registry/v1/eligible', '/nexus/registry/v1/models', '/nexus/registry/v1/models/delete', '/nexus/registry/v1/models/disable', '/nexus/registry/v1/modes', '/nexus/registry/v1/preview', '/nexus/registry/v1/providers', '/nexus/registry/v1/providers/delete', '/nexus/registry/v1/providers/disable', '/nexus/registry/v1/providers/discover', '/nexus/registry/v1/providers/test', '/nexus/registry/v1/routes', '/nexus/registry/v1/routes/delete', '/nexus/registry/v1/routes/disable', '/nexus/registry/v1/routes/evidence', '/nexus/registry/v1/routes/project', '/nexus/registry/v1/routes/verify', '/nexus/registry/v1/validate', '/nexus/workspace-registration.json'])
+      assert.deepEqual(paths, ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/mode-default.json', '/nexus/registry/v1/catalog', '/nexus/registry/v1/configuration', '/nexus/registry/v1/connections', '/nexus/registry/v1/connections/check', '/nexus/registry/v1/connections/delete', '/nexus/registry/v1/connections/disable', '/nexus/registry/v1/connections/discover', '/nexus/registry/v1/connections/list', '/nexus/registry/v1/connections/status', '/nexus/registry/v1/eligible', '/nexus/registry/v1/models', '/nexus/registry/v1/models/delete', '/nexus/registry/v1/models/disable', '/nexus/registry/v1/modes', '/nexus/registry/v1/preview', '/nexus/registry/v1/providers', '/nexus/registry/v1/providers/delete', '/nexus/registry/v1/providers/disable', '/nexus/registry/v1/providers/discover', '/nexus/registry/v1/providers/test', '/nexus/registry/v1/routes', '/nexus/registry/v1/routes/delete', '/nexus/registry/v1/routes/disable', '/nexus/registry/v1/routes/evidence', '/nexus/registry/v1/routes/project', '/nexus/registry/v1/routes/verify', '/nexus/registry/v1/validate', '/nexus/workspace-registration.json'])
       const route = captured.find((spec) => spec.path === '/nexus/controller.json')
       assert.equal(route.kind, 'exact')
       const roomRoute = captured.find((spec) => spec.path === '/nexus/control-room.json')
@@ -629,9 +629,12 @@ async function main() {
       // the service appears AFTER the plugin activated — the deferred
       // injection resolves and the route registers.
       root.provide('webServer', fakeWebServer)
+      await tick(200)
+      assert.equal(registered.length, 0, 'real cordis: with webServer but WITHOUT the connection service no route registers (admission cannot be skipped)')
+      root.provide('connection', { admit: () => ({ peer: {} }) })
       for (let i = 0; i < 60 && registered.length < 5; i++) await tick(50)
-      assert.equal(registered.length, 33, 'real cordis: all routes register after webServer becomes available')
-      assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/registry/v1/catalog', '/nexus/registry/v1/configuration', '/nexus/registry/v1/connections', '/nexus/registry/v1/connections/check', '/nexus/registry/v1/connections/delete', '/nexus/registry/v1/connections/disable', '/nexus/registry/v1/connections/discover', '/nexus/registry/v1/connections/list', '/nexus/registry/v1/connections/status', '/nexus/registry/v1/eligible', '/nexus/registry/v1/models', '/nexus/registry/v1/models/delete', '/nexus/registry/v1/models/disable', '/nexus/registry/v1/modes', '/nexus/registry/v1/preview', '/nexus/registry/v1/providers', '/nexus/registry/v1/providers/delete', '/nexus/registry/v1/providers/disable', '/nexus/registry/v1/providers/discover', '/nexus/registry/v1/providers/test', '/nexus/registry/v1/routes', '/nexus/registry/v1/routes/delete', '/nexus/registry/v1/routes/disable', '/nexus/registry/v1/routes/evidence', '/nexus/registry/v1/routes/project', '/nexus/registry/v1/routes/verify', '/nexus/registry/v1/validate', '/nexus/workspace-registration.json'])
+      assert.equal(registered.length, 34, 'real cordis: all routes register after webServer becomes available (incl. the default-mode route)')
+      assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/mode-default.json', '/nexus/registry/v1/catalog', '/nexus/registry/v1/configuration', '/nexus/registry/v1/connections', '/nexus/registry/v1/connections/check', '/nexus/registry/v1/connections/delete', '/nexus/registry/v1/connections/disable', '/nexus/registry/v1/connections/discover', '/nexus/registry/v1/connections/list', '/nexus/registry/v1/connections/status', '/nexus/registry/v1/eligible', '/nexus/registry/v1/models', '/nexus/registry/v1/models/delete', '/nexus/registry/v1/models/disable', '/nexus/registry/v1/modes', '/nexus/registry/v1/preview', '/nexus/registry/v1/providers', '/nexus/registry/v1/providers/delete', '/nexus/registry/v1/providers/disable', '/nexus/registry/v1/providers/discover', '/nexus/registry/v1/providers/test', '/nexus/registry/v1/routes', '/nexus/registry/v1/routes/delete', '/nexus/registry/v1/routes/disable', '/nexus/registry/v1/routes/evidence', '/nexus/registry/v1/routes/project', '/nexus/registry/v1/routes/verify', '/nexus/registry/v1/validate', '/nexus/workspace-registration.json'])
       assert.ok(registered.every((spec) => spec.kind === 'exact'))
 
       // the registered handler keeps the existing semantics.
@@ -699,7 +702,7 @@ async function main() {
     vm.createContext(sandbox)
     vm.runInContext(code, sandbox)
     assert.ok(moduleExports, 'client bundle must export a module')
-    assert.equal(JSON.stringify(moduleExports.inject), JSON.stringify(['slots', 'workspaces']), 'client services')
+    assert.equal(JSON.stringify(moduleExports.inject), JSON.stringify(['slots', 'workspaces', 'uiWorkspace']), 'client services')
 
     const injectedServices = []
     const fakeCtx = {
@@ -721,7 +724,7 @@ async function main() {
       },
     }
     moduleExports.apply(fakeCtx)
-    assert.deepEqual(injectedServices, ['nexusModeState'], 'composer mode ownership rides the shared nexusModeState service')
+    assert.deepEqual(injectedServices, ['nexusModeState', 'modelDirectories', 'sessions'], 'composer mode ownership rides the shared nexusModeState service; the model seat injects modelDirectories + sessions')
     assert.deepEqual(injected.map((i) => i.name), ['shell.overlay', 'conversation.session.header.actions', 'conversation.input.right'])
     assert.equal(registered.length, 3)
     assert.equal(registered[0].spec.name, 'shell.overlay')
@@ -1095,7 +1098,7 @@ async function main() {
 
     // The drawer still renders independently (controller panel intact).
     const Drawer = null // resolved through the mini-core path in group 13; here assert bundle exports
-    assert.equal(JSON.stringify(moduleExports.inject), JSON.stringify(['slots', 'workspaces']))
+    assert.equal(JSON.stringify(moduleExports.inject), JSON.stringify(['slots', 'workspaces', 'uiWorkspace']))
     assert.equal(typeof moduleExports.apply, 'function')
   }
 
@@ -1799,6 +1802,13 @@ async function main() {
     const unboundHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001', agentPreset: 'aih-deepseek' } }))
     assert.ok(!unboundHtml.includes('data-nexus-executor'), 'unbound session never invents a RUNNING value')
     assert.match(unboundHtml, /data-nexus-preferred/, 'unbound legacy session keeps the preference labeled and usable')
+    // DSH 0.2 per-session model choice: a PREFERRED label that names a DIFFERENT model than the
+    // session's actual selection (pending ?? lastUsed) would contradict the chooser -> suppressed.
+    const selectedPro = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001', agentPreset: 'aih-deepseek', modelSelection: { lastUsed: null, pending: { provider: 'deepseek-pro-direct', model: 'deepseek-v4-pro' } } } }))
+    assert.ok(!selectedPro.includes('data-nexus-preferred'), 'stale PREFERRED (flash) is not shown when the session selected pro')
+    const selectedSame = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001', agentPreset: 'aih-deepseek', modelSelection: { lastUsed: { provider: 'flash-max-direct', model: 'deepseek-v4-flash' }, pending: null } } }))
+    assert.match(selectedSame, /data-nexus-preferred/, 'PREFERRED stays when it names the session\'s actual selection')
+    assert.ok(!renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001', agentPreset: 'aih-deepseek', modelSelection: { lastUsed: null, pending: { provider: 'deepseek-pro-direct', model: 'deepseek-v4-pro' } } } })).includes('>DeepSeek V4 Flash<'), 'the stale label text never renders')
     // An unbound session with NO preset anywhere is an unknown boot state:
     // fail closed toward engineering/loading (Profile UI trigger mounted).
     const unknownUnboundHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } }))
@@ -1883,7 +1893,7 @@ async function main() {
       let captured = []
       let injectCallback = null
       plugin.apply({ inject(keys, cb) { injectCallback = cb }, effect() { return () => {} } })
-      injectCallback({ webServer: { register(spec) { captured.push(spec) } }, effect(fn) { fn(); return () => {} } })
+      injectCallback({ webServer: { register(spec) { captured.push(spec) } }, connection: { admit: () => ({ peer: {} }) }, effect(fn) { fn(); return () => {} } })
       const roomRoute = captured.find((spec) => spec.path === '/nexus/control-room.json')
       assert.ok(roomRoute, 'control-room route must register')
       const res = {
@@ -2232,12 +2242,12 @@ async function main() {
     const dataRoot = tmpDir('nexus-ctr-')
     const workspace = path.join(dataRoot, 'ws')
     const files = fixtureFileMap(dataRoot, workspace, {})
-    files[path.join(dataRoot, 'settings.yaml')] = 'agent-default-model:\n  provider: flash-max-direct\n  model: deepseek-v4-flash\n  reasoningEffort: max\n'
+    files[path.join(dataRoot, 'nexus-settings.yaml')] = 'agent-default-model:\n  provider: flash-max-direct\n  model: deepseek-v4-flash\n  reasoningEffort: max\n'
     writeTree(dataRoot, files)
     const snapshot = await status.buildControllerSnapshot({
       dataRoot,
       sessionId: 'session-0001',
-      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      settingsPath: path.join(dataRoot, 'nexus-settings.yaml'),
       statePath: path.join(dataRoot, 'aih-state.json'),
       readFile: memoryReader(files),
       modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' },
@@ -2251,7 +2261,7 @@ async function main() {
     const unbound = await status.buildControllerSnapshot({
       dataRoot,
       sessionId: 'session-nobody',
-      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      settingsPath: path.join(dataRoot, 'nexus-settings.yaml'),
       statePath: path.join(dataRoot, 'aih-state.json'),
       readFile: memoryReader(files),
       modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' },
@@ -2262,11 +2272,11 @@ async function main() {
     assert.deepEqual(unbound.preference, { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash' }, 'unbound session still exposes the preference')
 
     // corrupt settings degrade only the preference (fail-closed subsystem)
-    files[path.join(dataRoot, 'settings.yaml')] = '{ this is not yaml: [unclosed'
+    files[path.join(dataRoot, 'nexus-settings.yaml')] = '{ this is not yaml: [unclosed'
     const corrupt = await status.buildControllerSnapshot({
       dataRoot,
       sessionId: 'session-0001',
-      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      settingsPath: path.join(dataRoot, 'nexus-settings.yaml'),
       statePath: path.join(dataRoot, 'aih-state.json'),
       readFile: memoryReader(files),
       modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' },
@@ -2342,7 +2352,7 @@ async function main() {
     const oldTaskFiles = fixtureFileMap(oldTaskDataRoot, path.join(oldTaskDataRoot, 'ws'), {})
     writeTree(oldTaskDataRoot, oldTaskFiles)
     const oldSnap = await status.buildControllerSnapshot({
-      dataRoot: oldTaskDataRoot, sessionId: 'session-0001', settingsPath: path.join(oldTaskDataRoot, 'settings.yaml'),
+      dataRoot: oldTaskDataRoot, sessionId: 'session-0001', settingsPath: path.join(oldTaskDataRoot, 'nexus-settings.yaml'),
       statePath: path.join(oldTaskDataRoot, 'aih-state.json'), readFile: memoryReader(oldTaskFiles),
       modelNames: {}, gitSummary: null, nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
@@ -2466,7 +2476,7 @@ async function main() {
     files27[path.join(dataRoot, 'completion', 'gates.jsonl')] = fs.readFileSync(gateModule.gatesPathOf(dataRoot), 'utf8')
     writeTree(dataRoot, files27)
     const snap27 = await status.buildControllerSnapshot({
-      dataRoot, sessionId: 'session-0001', settingsPath: path.join(dataRoot, 'settings.yaml'),
+      dataRoot, sessionId: 'session-0001', settingsPath: path.join(dataRoot, 'nexus-settings.yaml'),
       statePath: path.join(dataRoot, 'aih-state.json'), readFile: memoryReader(files27),
       modelNames: {}, gitSummary: null, nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
@@ -2795,7 +2805,7 @@ async function main() {
       [path.join(dataRoot, 'routing', 'session-bindings.json')]: JSON.stringify({ schemaVersion: 1, bindings: { 'session-0001': { ...FIXTURE_BINDING, workspace } } }),
       [path.join(dataRoot, 'routing', 'states', stateFile)]: JSON.stringify({ taskId: 'TASK-0042', workspace, preset: 'aih-engineering', executionClass: 'engineer_normal', selectedTier: 3, risk: 'normal', reviewRequired: false, reviewRequested: false, lastFailureSignature: '', sameFailureCount: 0, updatedAtUtc: '2026-08-28T17:30:00.000Z' }),
       [path.join(dataRoot, 'routing', 'decisions.jsonl')]: JSON.stringify({ ...FIXTURE_DECISION, workspace, executionClass: 'engineer_normal', role: 'primaryEngineer', profile: 'deepseek-codex', profileDisplayName: 'DeepSeek + Codex', provider: 'flash-high-direct', model: 'deepseek-v4-flash' }) + '\n',
-      [path.join(dataRoot, 'settings.yaml')]: 'agent-default-model:\n  provider: flash-max-direct\n  model: deepseek-v4-flash\n  reasoningEffort: max\nengineering-profile: glm-codex\n',
+      [path.join(dataRoot, 'nexus-settings.yaml')]: 'agent-default-model:\n  provider: flash-max-direct\n  model: deepseek-v4-flash\n  reasoningEffort: max\nengineering-profile: glm-codex\n',
       [path.join(dataRoot, 'profiles.json')]: JSON.stringify({ schemaVersion: 1, profiles: [{ id: 'glm-codex', displayName: 'GLM + Codex' }, { id: 'deepseek-codex', displayName: 'DeepSeek + Codex' }] }),
       [path.join(dataRoot, 'aih-state.json')]: JSON.stringify({ SchemaVersion: 3, Status: 'READY', Pid: 12345, ProcessStartedAtUtc: '2026-08-28T17:00:00.0000000Z', Workspace: workspace, Url: 'http://127.0.0.1:3080' }),
       [path.join(workspace, '.ai-harness', 'state', 'tasks.json')]: JSON.stringify({ schemaVersion: 1, tasks: [{ ...FIXTURE_TASK.tasks[0], workspace }] }),
@@ -2804,7 +2814,7 @@ async function main() {
     const snapshot = await status.buildControllerSnapshot({
       dataRoot,
       sessionId: 'session-0001',
-      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      settingsPath: path.join(dataRoot, 'nexus-settings.yaml'),
       statePath: path.join(dataRoot, 'aih-state.json'),
       profilesPath: path.join(dataRoot, 'profiles.json'),
       readFile: memoryReader(files),
@@ -2857,7 +2867,7 @@ async function main() {
       },
     }
     const files = {
-      [path.join(dataRoot, 'settings.yaml')]: settingsText,
+      [path.join(dataRoot, 'nexus-settings.yaml')]: settingsText,
       [path.join(dataRoot, 'custom-engineering-profile.json')]: JSON.stringify(customDoc, null, 2),
     }
     writeTree(dataRoot, files)
@@ -2866,7 +2876,7 @@ async function main() {
     const state = buildEngineeringProfileState({
       installRoot: ROOT, // real config: engineering-profiles.json + model-registry.json
       dataRoot,
-      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      settingsPath: path.join(dataRoot, 'nexus-settings.yaml'),
       customProfilePath: path.join(dataRoot, 'custom-engineering-profile.json'),
       nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
@@ -2910,7 +2920,7 @@ async function main() {
     fs.cpSync(path.join(ROOT, 'scripts'), path.join(installRoot, 'scripts'), { recursive: true })
     fs.cpSync(path.join(ROOT, 'config'), path.join(installRoot, 'config'), { recursive: true })
     writeTree(dataRoot, {
-      [path.join(dataRoot, 'settings.yaml')]: 'engineering-profile: glm-codex\n',
+      [path.join(dataRoot, 'nexus-settings.yaml')]: 'engineering-profile: glm-codex\n',
     })
     const previousHome = process.env.DSH_HOME
     process.env.DSH_HOME = dataRoot
@@ -2924,6 +2934,7 @@ async function main() {
       })
       injectCallback({
         webServer: { register(spec) { captured.push(spec) } },
+        connection: { admit: () => ({ peer: {} }) },
         effect(fn) { fn(); return () => {} },
       })
       const engineeringRoute = captured.find((spec) => spec.path === '/nexus/engineering-profile.json')
@@ -3035,7 +3046,7 @@ async function main() {
     const policyPath = path.join(ROOT, 'config', 'routing-policy.json')
     const registryPath = path.join(ROOT, 'config', 'model-registry.json')
     const profilesPath = path.join(ROOT, 'config', 'engineering-profiles.json')
-    const settingsPath = path.join(dataRoot, 'settings.yaml')
+    const settingsPath = path.join(dataRoot, 'nexus-settings.yaml')
     const settingsA = [
       'agent-default-model:',
       '  provider: zai-direct',
@@ -3052,7 +3063,7 @@ async function main() {
       // stateful leftovers from earlier cases must never leak into the next
       fs.rmSync(path.join(dataRoot, 'routing'), { recursive: true, force: true })
       fs.rmSync(path.join(dataRoot, 'custom-engineering-profile.json'), { force: true })
-      const files = { 'settings.yaml': settingsText }
+      const files = { 'nexus-settings.yaml': settingsText }
       if (overrides.files) Object.assign(files, overrides.files)
       delete overrides.files
       writeTree(dataRoot, files)
@@ -3487,8 +3498,8 @@ async function main() {
     // editor fields) and in NexusProfiles.Tests.cjs sections 6a/6b.
   }
 
-  require('./NexusComposerOwnership.Tests.cjs')()
-  await require('./NexusModeContract.Tests.cjs')()
+  // NexusComposerOwnership was retired with the 0.1.x composer patch (its contract is now
+  // NexusComposerSeat); NexusModeContract runs as its own harness suite.
   console.log('PASS: nexus controller panel state layer')
 }
 

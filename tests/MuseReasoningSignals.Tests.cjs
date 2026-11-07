@@ -345,7 +345,7 @@ async function main() {
       let nextCalls = 0;
       await assert.rejects(
         () => requestCtx.handlers['agent/request'](
-          { agent: { session: museSession('sess-r2') } },
+          { agent: { session: museSession('sess-r2'), options: { provider: 'x', model: 'y' } } },
           async () => { nextCalls += 1; return { provider: 'x', model: 'y' }; },
         ),
         (error) => error.code === 'nexus-muse-reasoning-capability-unavailable',
@@ -534,12 +534,19 @@ async function main() {
 
     // 22 + installation surface: the row exists only in the Muse preset.
     {
-      const installerText = fs.readFileSync(path.join(repoRoot, 'scripts', 'Install-MusePreset.ps1'), 'utf8');
-      assert.ok(installerText.includes("name: './Muse-ReasoningSignals.cjs'"));
-      assert.ok(installerText.includes('aih-muse-reasoning-signals'));
-      pass('22a: installer stages the signals row into the aih-muse preset');
+      // DSH 0.2.x: the planes are preset rows in the generated home patch.
+      const homePatchText = fs.readFileSync(path.join(repoRoot, 'data', 'cordis.patch.yml'), 'utf8');
+      const planeBlock = (planeId) => {
+        const match = new RegExp('^[ \\t]*- id: preset-' + planeId + '[ \\t]*$([\\s\\S]*?)(?=^[ \\t]*- id: preset-aih-|^# ---- END NEXUS GENERATED|$(?![\\s\\S]))', 'm').exec(homePatchText);
+        assert.ok(match, 'preset row ' + planeId + ' must be declared in the home patch');
+        return match[1];
+      };
+      const museBlock = planeBlock('aih-muse');
+      assert.ok(/Muse-ReasoningSignals\.cjs/.test(museBlock));
+      assert.ok(museBlock.includes('aih-muse-reasoning-signals'));
+      pass('22a: the generated home patch mounts the signals row in the aih-muse preset');
 
-      const composition = fs.readFileSync(path.join(repoRoot, 'data', '.agent-presets', 'aih-engineering', 'agent.cordis.yml'), 'utf8');
+      const composition = planeBlock('aih-engineering');
       assert.ok(!composition.includes('Muse-ReasoningSignals.cjs'));
       assert.ok(!composition.includes('muse_update_reasoning_state'));
       pass('22b: Dual preset carries no reasoning-signal surface');

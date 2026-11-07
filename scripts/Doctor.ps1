@@ -30,8 +30,11 @@ Add-Check 'portable Node' (Test-Path -LiteralPath $layout.Node) $versions.NodeVe
 Add-Check 'DeepSeek Harness' (Test-Path -LiteralPath $layout.Dsh) $versions.HarnessVersion
 Add-Check 'openai-oauth (optional review)' $true $(if (Test-Path -LiteralPath $layout.OAuth) { "installed $($versions.OpenAiOAuthVersion); not required for ordinary tasks" } else { 'not installed; bounded Codex review unavailable' })
 Add-Check 'settings' (Test-Path -LiteralPath $layout.Settings) $layout.Settings
-Add-Check 'Normal preset' (Test-Path -LiteralPath (Join-Path $layout.Data '.agent-presets/aih-engineering/agent.cordis.yml')) 'aih-engineering / Normal Engineering'
-Add-Check 'DeepSeek-only preset' (Test-Path -LiteralPath (Join-Path $layout.Data '.agent-presets/aih-deepseek/agent.cordis.yml')) 'aih-deepseek / DeepSeek Only'
+# DSH 0.2.x: planes are preset rows in data/cordis.patch.yml (verified below) -- not .agent-presets/<name>/agent.cordis.yml files.
+$doctorHomePatch = Join-Path $layout.Data 'cordis.patch.yml'
+$doctorHomePatchText = if (Test-Path -LiteralPath $doctorHomePatch) { Get-Content -Raw -Encoding UTF8 -LiteralPath $doctorHomePatch } else { '' }
+Add-Check 'Normal preset' $doctorHomePatchText.Contains('id: preset-aih-engineering') 'aih-engineering / Normal Engineering'
+Add-Check 'DeepSeek-only preset' $doctorHomePatchText.Contains('id: preset-aih-deepseek') 'aih-deepseek / DeepSeek Only'
 Add-Check 'active preset' $true "$($resolvedPreset.Id) / $($resolvedPreset.Config.displayName)"
 $routingPolicyValid = $false
 $routingPolicyDetail = ''
@@ -78,13 +81,14 @@ if (-not (Test-AihIsWindows)) {
     Add-Check 'Node executable' $nodeOk $(if ($nodeOk) { $nodeExecutable } else { 'missing; run the Nexus installer (./setup.sh)' })
     $pathValue = [string]$env:PATH
     $userHome = if (-not [string]::IsNullOrWhiteSpace($env:HOME)) { $env:HOME } else { [Environment]::GetFolderPath('UserProfile') }
-    $launcherDir = Join-Path $userHome '.local/bin'
+    $launcherDir = if (-not [string]::IsNullOrWhiteSpace($env:AIH_USER_BIN)) { $env:AIH_USER_BIN } else { Join-Path $userHome '.local/bin' }
     $pathHasLauncherDir = ($pathValue -split ':') -contains $launcherDir
     Add-Check 'launcher directory on PATH' $pathHasLauncherDir $(if ($pathHasLauncherDir) { $launcherDir } else { "$launcherDir is not on PATH; add it to your shell profile (see docs/linux.md)" })
-    $xdgOpen = Get-Command 'xdg-open' -ErrorAction SilentlyContinue
-    Add-Check 'xdg-open (browser)' ($null -ne $xdgOpen) $(if ($null -ne $xdgOpen) { 'present; aih -Open can launch a browser' } else { 'missing; aih -Open prints the URL instead' })
+    $openerName = Get-AihBrowserOpenerName
+    $xdgOpen = Get-Command $openerName -ErrorAction SilentlyContinue
+    Add-Check "$openerName (browser)" ($null -ne $xdgOpen) $(if ($null -ne $xdgOpen) { 'present; aih -Open can launch a browser' } else { 'missing; aih -Open prints the URL instead' })
     $rg = Get-Command 'rg' -ErrorAction SilentlyContinue
-    Add-Check 'ripgrep (optional context engine)' ($null -ne $rg) $(if ($null -ne $rg) { 'present; reference search enabled' } else { 'not installed; reference search degrades (pacman -S ripgrep)' })
+    Add-Check 'ripgrep (optional context engine)' ($null -ne $rg) $(if ($null -ne $rg) { 'present; reference search enabled' } else { 'not installed; reference search degrades (install ripgrep with your package manager)' })
 }
 
 if (-not $Offline -and -not $deepSeekOnly -and (Test-Path -LiteralPath (Get-AihCodexAuthFile))) {
@@ -122,58 +126,36 @@ if (Test-Path -LiteralPath $homePatch) {
     Add-Check 'Nexus composition' ($patchText.Contains('nexus-ui-brand') -and $patchText.Contains('ui-brand-official') -and $patchText.Contains('disabled: true')) 'home patch rows: nexus-ui-brand + ui-brand-official disabled'
 }
 else { Add-Check 'Nexus composition' $false 'home cordis patch missing' }
-$distIndex = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html'
-$distFavicon = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-web-frontend/dist/favicon.svg'
-$distManifest = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-web-frontend/dist/manifest.webmanifest'
-if (Test-Path -LiteralPath $distIndex) {
-    Add-Check 'Nexus app title' ((Get-Content -Raw -Encoding UTF8 -LiteralPath $distIndex).Contains('<title>Nexus</title>')) 'dist index.html'
-}
-else { Add-Check 'Nexus app title' $false 'dist index.html missing' }
-if (Test-Path -LiteralPath $distFavicon) {
-    Add-Check 'Nexus favicon' ((Get-Content -Raw -Encoding UTF8 -LiteralPath $distFavicon).Contains('#7C5CFF')) 'geometric Nexus mark, no DeepSeek whale'
-}
-else { Add-Check 'Nexus favicon' $false 'dist favicon.svg missing' }
-if (Test-Path -LiteralPath $distManifest) {
-    try {
-        $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $distManifest | ConvertFrom-Json
-        Add-Check 'Nexus PWA identity' ([string]$manifest.name -eq 'Nexus' -and [string]$manifest.short_name -eq 'Nexus') 'manifest name/short_name'
-    }
-    catch { Add-Check 'Nexus PWA identity' $false $_.Exception.Message }
-}
-else { Add-Check 'Nexus PWA identity' $false 'dist manifest missing' }
-$rendererBundle = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-renderer/lib/client.js'
-if (Test-Path -LiteralPath $rendererBundle) {
-    Add-Check 'Nexus runtime title' ((Get-Content -Raw -Encoding UTF8 -LiteralPath $rendererBundle).Contains('const productTitle = "Nexus"')) 'document title owner patched'
-}
-else { Add-Check 'Nexus runtime title' $false 'renderer client bundle missing' }
+# DSH 0.2.x: the cosmetic client-bundle patches (title, favicon, manifest, brand
+# copy, sidebar width, primary-action colour, model badge) are retired because
+# string-patching compiled upstream bundles is unsupported; see
+# docs/integration/dsh-0.2.x-migration-report.md. Doctor therefore verifies
+# the supported composition instead: the Nexus planes, the stock-preset
+# lockout, the DSH-safe settings document name, and untouched upstream bundles.
 if (Test-Path -LiteralPath $layout.Settings) {
     Add-Check 'Nexus dark default' ([regex]::IsMatch((Get-Content -Raw -Encoding UTF8 -LiteralPath $layout.Settings), '(?m)^ui-theme:\s*\r?\n\s+preference:\s*dark')) 'settings ui-theme preference'
 }
-else { Add-Check 'Nexus dark default' $false 'settings missing' }
-$frontendDist = Split-Path -Parent $distIndex
-$nexusAssets = Join-Path $frontendDist 'assets'
-if (Test-Path -LiteralPath (Join-Path $nexusAssets 'nexus-logo.png')) {
-    Add-Check 'Nexus brand assets' ((Test-Path -LiteralPath (Join-Path $nexusAssets 'nexus-logo.png')) -and (Test-Path -LiteralPath (Join-Path $nexusAssets 'nexus-mark.png'))) 'dist assets: logo lockup + icon mark'
+else { Add-Check 'Nexus dark default' $false 'nexus-settings.yaml missing' }
+Add-Check 'Nexus settings not importable by DSH' (-not (Test-Path -LiteralPath $layout.LegacySettings)) 'data/settings.yaml must not exist (DSH 0.2.x renames it on first boot)'
+if (Test-Path -LiteralPath $homePatch) {
+    $planeText = Get-Content -Raw -Encoding UTF8 -LiteralPath $homePatch
+    $planesOk = $true
+    foreach ($plane in @('aih-engineering', 'aih-deepseek', 'aih-muse')) {
+        if (-not $planeText.Contains("id: preset-$plane")) { $planesOk = $false }
+    }
+    Add-Check 'Nexus agent planes declared' $planesOk 'preset-aih-engineering, preset-aih-deepseek, preset-aih-muse'
+    $stockLocked = $true
+    foreach ($stock in @('preset-standard', 'preset-ptc', 'preset-minimal', 'preset-cordis')) {
+        if (-not [regex]::IsMatch($planeText, "(?m)^- id: $stock\r?\n  disabled: true")) { $stockLocked = $false }
+    }
+    Add-Check 'Stock agent presets disabled' $stockLocked 'only Nexus controller planes are selectable'
 }
-else { Add-Check 'Nexus brand assets' $false 'dist assets missing' }
-$layoutBundle = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-layout/lib/client.js'
-if (Test-Path -LiteralPath $layoutBundle) {
-    $layoutBundleText = Get-Content -Raw -Encoding UTF8 -LiteralPath $layoutBundle
-    Add-Check 'Nexus sidebar width' ($layoutBundleText.Contains('sidebar: 288,') -and $layoutBundleText.Contains('d.sidebar === 0 ? 288 : 0')) 'expanded sidebar default 288px'
+else { Add-Check 'Nexus agent planes declared' $false 'home cordis patch missing' }
+foreach ($plane in @('aih-engineering', 'aih-deepseek', 'aih-muse')) {
+    Add-Check "Plane closure $plane" (Test-Path -LiteralPath (Join-Path $layout.Data ".agent-presets/$plane/AihController.cjs")) 'controller module closure published'
 }
-else { Add-Check 'Nexus sidebar width' $false 'layout client bundle missing' }
-$conversationBundle = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js'
-if (Test-Path -LiteralPath $conversationBundle) {
-    $conversationText = Get-Content -Raw -Encoding UTF8 -LiteralPath $conversationBundle
-    Add-Check 'Nexus primary action' ($conversationText.Contains('background:var(--dsw-alias-button-primary-fill);color:#fff')) 'send button violet'
-    Add-Check 'Nexus hero glow' ($conversationText.Contains('#7C5CFF') -and -not $conversationText.Contains('#6187D8')) 'hero glow tinted violet'
-}
-else { Add-Check 'Nexus primary action' $false 'conversation client bundle missing' }
-$modelSelBundle = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-model-selection/lib/client.js'
-if (Test-Path -LiteralPath $modelSelBundle) {
-    Add-Check 'Nexus model chip' ((Get-Content -Raw -Encoding UTF8 -LiteralPath $modelSelBundle).Contains('!modelLabel.toUpperCase().endsWith(effortLabel.toUpperCase())')) 'reasoning badge deduped'
-}
-else { Add-Check 'Nexus model chip' $false 'model-selection client bundle missing' }
+$headerPlugin = Join-Path $layout.Data 'OpenCode-SessionHeader.cjs'
+Add-Check 'OpenCode session header plugin' (Test-Path -LiteralPath $headerPlugin) 'x-opencode-session via llm-pi-ai/request-headers'
 
 # --- Nexus Controller panel --------------------------------------------------
 $controllerPackage = Join-Path $layout.Data 'profiles/node_modules/@nexus/controller/package.json'

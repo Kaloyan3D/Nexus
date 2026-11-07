@@ -3,6 +3,7 @@ Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot=Split-Path -Parent $PSScriptRoot }
 . (Join-Path $InstallRoot 'scripts/Platform.ps1')
 $passed=0
+function Get-AihTestFileMode([string]$Path) { if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)) { return (& stat -f '%Lp' $Path) } return (& stat -c '%a' $Path) }
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
 $runningOnWindows=Test-AihIsWindows
 $realIsWindows=[System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
@@ -12,6 +13,7 @@ try {
     Assert-Aih ($runningOnWindows-eq$realIsWindows) 'Test-AihIsWindows matches RuntimeInformation (PS 5.1 has no $IsWindows)'
     $platformName=Get-AihPlatformName
     if ($runningOnWindows) { Assert-Aih ($platformName-eq'windows') 'Get-AihPlatformName reports windows on Windows' }
+    elseif ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)) { Assert-Aih ($platformName-eq'macos') 'Get-AihPlatformName reports macos on macOS' }
     else { Assert-Aih ($platformName-eq'linux') 'Get-AihPlatformName reports linux on Linux' }
 
     # ── launcher naming ──
@@ -336,7 +338,7 @@ Get-AihPowerShellHost -InstallRoot $InstallRoot
     }
     else {
         Protect-AihPrivatePath -Path $credPath
-        $mode=(stat -c '%a' $credPath)
+        $mode=(Get-AihTestFileMode $credPath)
         Assert-Aih ($mode-eq'600') 'credential file is 0600 after Protect-AihPrivatePath on Linux'
     }
     # ── Start-AihDetachedProcess optional-parameter contract (A–J + OAuth shape) ──

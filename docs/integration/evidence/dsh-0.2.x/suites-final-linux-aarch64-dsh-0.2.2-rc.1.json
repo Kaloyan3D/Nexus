@@ -1,0 +1,1631 @@
+[
+ {
+  "name": "ContextRestrictedProductionV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 20,
+  "firstFailure": "Error: Cannot find module '../config/ContextActiveApplyV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextRestrictedProjectionV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 473,
+  "firstFailure": "Error: Command failed: git -C /home/kaloyannikolov.guest/nx-cand config user.name",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextRestrictedDshCompaction",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 17,
+  "firstFailure": "Error: Cannot find module '/home/kaloyan/.local/share/nexus/app/node_modules/@deepseek-ai/cordis/lib/index.js'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "SetupUpgrade",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 31,
+  "ms": 613,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "CredentialsCompat",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 6,
+  "ms": 4852,
+  "firstFailure": "SUITE RESULT: PASS 6 | FAIL 0 | total 6",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "UpdateRootResolution",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 43,
+  "ms": 1672,
+  "firstFailure": "PASS: the same-root failure names the positive-identification contract, not a copy error: Exception: /home/kaloyannikolov.guest/tmp-suites-final2/suite-6Fksiz/aih-update-roots-9e2fc4e33fab4c1ebd0d4e07",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "SourceCredentialGuard",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 14,
+  "ms": 317,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "Harness",
+  "kind": "powershell",
+  "verdict": "FAIL",
+  "passLines": 136,
+  "ms": 11462,
+  "firstFailure": "Exception: /home/kaloyannikolov.guest/nx-cand/tests/Harness.Tests.ps1:20",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "TestHarness.Reporting",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 9,
+  "ms": 377,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "JsonSerialization",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 35,
+  "ms": 416,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "EpistemicPolicy",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 85,
+  "ms": 3807,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "EngineeringTelemetry",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 13,
+  "ms": 3320,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompaction",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 99,
+  "ms": 3947,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ControllerRouting",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 85,
+  "ms": 3967,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "TaskIdentity",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 53,
+  "ms": 2619,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "EngineeringProfiles",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 105,
+  "ms": 1430,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "EngineeringProfileEditor",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 43,
+  "ms": 1116,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "NexusProfiles",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 65,
+  "ms": 891,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MuseProvider",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 111,
+  "ms": 3079,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MuseAgentPlane",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 65,
+  "ms": 922,
+  "firstFailure": "SUITE RESULT: PASS 65 | FAIL 0 | total 65",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MuseInstall",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 7,
+  "ms": 14063,
+  "firstFailure": "SUITE RESULT: PASS 7 | FAIL 0 | total 7",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "SourceCompleteness",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 0,
+  "ms": 172,
+  "firstFailure": "SUITE RESULT: PASS 1 | FAIL 0 | total 1 (72 tracked files)",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MusePresetDependencyClosure",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 0,
+  "ms": 68,
+  "firstFailure": "SUITE RESULT: PASS 11 | FAIL 0 | total 11",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MusePresetCleanInstall",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 0,
+  "ms": 333,
+  "firstFailure": "SUITE RESULT: PASS 1 | FAIL 0 | total 1 (72 isolated files)",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ControllerPresetCleanInstall",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 0,
+  "ms": 1146,
+  "firstFailure": "SUITE RESULT: PASS 3 | FAIL 0 | total 3",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ControllerPresetInstalled",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 0,
+  "ms": 2365,
+  "firstFailure": "SUITE RESULT: PASS 2 | FAIL 0 | total 2 installed controller planes + real composition",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "VisualReview",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 94,
+  "ms": 12387,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "VisualLoop",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 64,
+  "ms": 30940,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "NexusWorkspace",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 16,
+  "ms": 1022,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "Intelligence.Concurrency",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 15,
+  "ms": 33610,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "NexusSkills",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 164,
+  "ms": 2973,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "Intelligence.Registry",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 65,
+  "ms": 1861,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "Intelligence.Scanning",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 53,
+  "ms": 1823,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "Intelligence.Snapshots",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 38,
+  "ms": 3667,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "Intelligence.EndToEnd",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 43,
+  "ms": 4130,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "Intelligence.IgnoreRegression",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 20,
+  "ms": 1017,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "Intelligence.SnapshotModules",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 19,
+  "ms": 1993,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "Intelligence.CodeFoundation",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 45,
+  "ms": 2259,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "Intelligence.CodeParsing",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 47,
+  "ms": 466,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "Intelligence.CodeIntelligence",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 58,
+  "ms": 7825,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "Intelligence.CodeScale",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 13,
+  "ms": 48115,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "AihController",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 1,
+  "ms": 5310,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "VisualControllerLifecycle",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 1,
+  "ms": 19833,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "VisualReviewBridge",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 1,
+  "ms": 54,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "VisualStructuredOutput",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 1,
+  "ms": 97,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "NexusSkillsRuntime",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 22,
+  "ms": 324,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "NexusProfilesRuntime",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 37,
+  "ms": 63,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MuseProviderRuntime",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 35,
+  "ms": 817,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MuseReasoningGovernor",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 52,
+  "ms": 23,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MuseReasoningRuntime",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 30,
+  "ms": 64,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MuseReasoningSignals",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 34,
+  "ms": 74,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MuseReasoningActivity",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 33,
+  "ms": 89,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MuseIsolation",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 20,
+  "ms": 43,
+  "firstFailure": "SUITE RESULT: PASS 20 | FAIL 0 | total 20",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ControllerRouteSelection",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 9,
+  "ms": 36,
+  "firstFailure": "SUITE RESULT: PASS 9 | FAIL 0 | total 9",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "NexusRouteAdmission",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 7,
+  "ms": 41,
+  "firstFailure": "SUITE RESULT: PASS 7 | FAIL 0 | total 7",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionBridge",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 31,
+  "ms": 28,
+  "firstFailure": "<ref *1> Error: spawnSync pwsh ENOENT",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionAcceptance",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 9,
+  "ms": 22,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionCrash",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 0,
+  "ms": 20,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionF1Loop",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 19,
+  "firstFailure": "Error: Cannot find module '/home/kaloyan/.local/share/nexus/app/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionF2Prod",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 20,
+  "firstFailure": "FAIL: Cannot find module '/home/kaloyan/.local/share/nexus/app/node_modules/@deepseek-ai/dsh-session/lib/index.js'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionF5Prod",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 20,
+  "firstFailure": "FAIL: Cannot find module '/home/kaloyan/.local/share/nexus/app/node_modules/@deepseek-ai/dsh-session/lib/index.js'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionXProc",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 30,
+  "firstFailure": "FAIL: spawnSync pwsh ENOENT",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionF1Loop",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 20,
+  "firstFailure": "Error: Cannot find module '/home/kaloyan/.local/share/nexus/app/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionPartial",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 20,
+  "firstFailure": "FAIL: Cannot find module '/home/kaloyan/.local/share/nexus/app/node_modules/@deepseek-ai/dsh-session/lib/index.js'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionF5Slow",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 19,
+  "firstFailure": "FAIL: Cannot find module '/home/kaloyan/.local/share/nexus/app/node_modules/@deepseek-ai/dsh-session/lib/index.js'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MuseEgressCleanup",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 0,
+  "ms": 20,
+  "firstFailure": "SUITE RESULT: PASS 2 | FAIL 0 | total 2",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "NexusEngineContract",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 26,
+  "ms": 28,
+  "firstFailure": "SUITE RESULT: PASS 26 | FAIL 0 | total 26",
+  "source": "targeted rerun after the full run (tree changed since)"
+ },
+ {
+  "name": "EpistemicProductionHardening",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 20,
+  "ms": 52,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "AihControllerIdentity",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 7,
+  "ms": 28927,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "NexusControllerPanel",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 478,
+  "firstFailure": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "PlatformSupport",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 163,
+  "ms": 2900,
+  "firstFailure": "PASS: Update.ps1 resolves the platform branch in a fresh process and reaches branch validation: Nexus update source: /home/kaloyannikolov.guest/tmp-suites-final2/suite-hrGqpN/aih-update-fixture-482745",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "StartupProviderIsolation",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 19,
+  "ms": 2925,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "PowerShellPortability",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 25,
+  "ms": 11341,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "RegistryInstalledRuntime",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 130,
+  "firstFailure": "SUITE RESULT: PASS 0 | FAIL 3 | total 3",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "AihControllerHost",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 159,
+  "ms": 23,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCheckpointV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 35,
+  "ms": 29,
+  "firstFailure": "Error: ccv2-durable-mutation-disabled: active durable CCv2 is unavailable until mutation-time fencing is verified",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextTrustV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 113,
+  "ms": 39,
+  "firstFailure": "Error: ccv2-durable-mutation-disabled: active durable CCv2 is unavailable until mutation-time fencing is verified",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextSnapshotV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 64,
+  "ms": 35,
+  "firstFailure": "Error: ccv2-durable-mutation-disabled: active durable CCv2 is unavailable until mutation-time fencing is verified",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextSafePointV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 88,
+  "ms": 27,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextSafePointV2LiveHost",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 24,
+  "firstFailure": "FAIL: pinned DSH host is absent but NEXUS_REQUIRE_CCV2_LIVE_HOST=1 requires the live proof (never faked).",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCheckpointabilityV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 86,
+  "ms": 68,
+  "firstFailure": "Error: ccv2-durable-mutation-disabled: active durable CCv2 is unavailable until mutation-time fencing is verified",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCheckpointabilityV2LiveHost",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 26,
+  "firstFailure": "FAIL: pinned DSH host is absent but NEXUS_REQUIRE_CCV2_LIVE_HOST=1 requires the live proof (never faked).",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextPressureV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 17,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextPressureV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextRetentionV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 21,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextRetentionV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextPressureRetentionV2LiveHost",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 19,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextPressureV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextShadowV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 17,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextShadowV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextShadowV2LiveHost",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 18,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextShadowV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextActiveApplyV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 18,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextActiveApplyV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextActiveApplyV2LiveHost",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 19,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextActiveApplyV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextActiveApplyV2XProc",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 22,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextActiveApplyV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextGenerationRuntimeV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 18,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextGenerationRuntimeV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextGenerationRuntimeV2LiveHost",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 19,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextGenerationRuntimeV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextGenerationRuntimeV2XProc",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 19,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextGenerationRuntimeV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextRecoveryV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 22,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextGenerationRuntimeV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextRecoveryV2XProc",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 19,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextGenerationRuntimeV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextRecoveryV2LiveHost",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 18,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextGenerationRuntimeV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionV2DshGenerationProof",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 19,
+  "firstFailure": "FAIL: pinned DSH host is absent but NEXUS_REQUIRE_CCV2_LIVE_HOST=1 requires the live proof (never faked).",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionV2Operation",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 20,
+  "firstFailure": "FAIL: pinned DSH host is absent but NEXUS_REQUIRE_CCV2_LIVE_HOST=1 requires the live proof (never faked).",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionV2FoundationHardening",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 8,
+  "ms": 29,
+  "firstFailure": "Error: ccv2-durable-mutation-disabled: active durable CCv2 is unavailable until mutation-time fencing is verified",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompleteTaskV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 21,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextCompleteTaskV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompleteTaskV2LiveHost",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 19,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextCompleteTaskV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompleteTaskV2XProc",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 20,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextGenerationRuntimeV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextPageV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 175,
+  "ms": 373,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextPageStoreV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 141,
+  "ms": 88,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextPageStoreV2Crash",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 15,
+  "ms": 3075,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextPageStoreV2XProc",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 12,
+  "ms": 144,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextPageStoreV2Fallback",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 16,
+  "ms": 61,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextPageStoreV2FallbackXProc",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 11,
+  "ms": 124,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextPageStoreV2Secrets",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 32,
+  "ms": 119,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextPageStoreV2Advisory",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 19,
+  "ms": 32,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextEvidenceRehydrationV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 26,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextRepositoryEvidenceSourceV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextEvidenceRehydrationV2LiveHost",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 23,
+  "firstFailure": "FAIL: pinned DSH host is absent but NEXUS_REQUIRE_CCV2_LIVE_HOST=1 requires the live proof (never faked).",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextEvidenceRehydrationV2XProc",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 33,
+  "ms": 92,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextEvidenceRehydrationV2H",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 24,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextRepositoryEvidenceSourceV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextMemoryTierV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 24,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextRepositoryEvidenceSourceV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextMemoryTierV2XProc",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 32,
+  "ms": 146,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextMemoryTierV2H",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 24,
+  "firstFailure": "Error: Cannot find module '/home/kaloyannikolov.guest/nx-cand/config/ContextRepositoryEvidenceSourceV2.cjs'",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextViewV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 126,
+  "ms": 75,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextViewV2XProc",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 16,
+  "ms": 89,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompilerV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 251,
+  "ms": 162,
+  "firstFailure": "C02 CANDIDATE CONFLICTS FAIL CLOSED",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompilerV2XProc",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 24,
+  "ms": 155,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompilerV2H",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 40,
+  "ms": 52,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextRetrieverV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 126,
+  "ms": 74,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextRetrieverV2XProc",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 9,
+  "ms": 68,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextRetrieverV2H",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 99,
+  "ms": 41,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextBudgetAllocatorV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 190,
+  "ms": 131,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextBudgetAllocatorV2XProc",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 27,
+  "ms": 182,
+  "firstFailure": "XPROC FAIL CLOSED",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextBudgetAllocatorV2H",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 33,
+  "ms": 90,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompressionLadderV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 139,
+  "ms": 449,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompressionLadderV2XProc",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 12,
+  "ms": 213,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompressionLadderV2H",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 98,
+  "ms": 195,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextPromptLayoutV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 96,
+  "ms": 169,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextPromptLayoutV2XProc",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 27,
+  "ms": 201,
+  "firstFailure": "XPROC FAIL CLOSED",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompilerShadowV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 197,
+  "ms": 904,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompilerShadowV2XProc",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 31,
+  "ms": 293,
+  "firstFailure": "C07 XPROC FAIL CLOSED",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompilerShadowHostV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 6,
+  "ms": 58,
+  "firstFailure": "Error: ccv2-durable-mutation-disabled: active durable CCv2 is unavailable until mutation-time fencing is verified",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextModelCapabilityV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 48,
+  "ms": 217,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextPromptRendererV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 46,
+  "ms": 132,
+  "firstFailure": "C08-RENDER-6 FAIL-CLOSED TAMPER",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompilerActiveV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 47,
+  "ms": 153,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompilerActiveV2XProc",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 8,
+  "ms": 627,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompilerActiveHostV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 10,
+  "ms": 38,
+  "firstFailure": "Error: ccv2-durable-mutation-disabled: active durable CCv2 is unavailable until mutation-time fencing is verified",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextTokenizerDeepseekV4",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 71,
+  "ms": 241,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextTokenizerDeepseekV4XProc",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 9,
+  "ms": 915,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompilerActiveDeepseekV4",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 37,
+  "firstFailure": "Error: ccv2-durable-mutation-disabled: active durable CCv2 is unavailable until mutation-time fencing is verified",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompilerActiveMuseRoutesV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 7,
+  "ms": 38,
+  "firstFailure": "Error: ccv2-durable-mutation-disabled: active durable CCv2 is unavailable until mutation-time fencing is verified",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextRemoteCounterMuseV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 35,
+  "ms": 27,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextRemoteCounterResilienceV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 124,
+  "ms": 2631,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompilerActiveMuseV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 68,
+  "ms": 234,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompilerActiveOpencodeV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 31,
+  "ms": 290,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextAuthorityCertificationV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 35,
+  "ms": 114,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompilerActiveOpencodeHostV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 41,
+  "firstFailure": "Error: ccv2-durable-mutation-disabled: active durable CCv2 is unavailable until mutation-time fencing is verified",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextActivationPressureV2",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 72,
+  "ms": 44,
+  "firstFailure": "RC1.1-A7 FAIL CLOSED (unmeasurable -> NATIVE)",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextR1RealSessionContracts",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 128,
+  "ms": 7708,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextMemoryProducerV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 33,
+  "firstFailure": "Error: ccv2-durable-mutation-disabled: active durable CCv2 is unavailable until mutation-time fencing is verified",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionV2",
+  "kind": "powershell",
+  "verdict": "FAIL",
+  "passLines": 22,
+  "ms": 604,
+  "firstFailure": "Exception: /home/kaloyannikolov.guest/nx-cand/scripts/ContextLifecycle.ps1:954",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ComposedRoutingAuthority",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 2,
+  "ms": 69,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ComposedRoutingMatrix",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 8,
+  "ms": 71,
+  "firstFailure": "SUITE RESULT: PASS 8 | FAIL 0 | total 8",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionF10ReaderBounds",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 20,
+  "firstFailure": "<ref *1> Error: spawnSync pwsh ENOENT",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionF4Privacy",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 50,
+  "ms": 703,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionF6UsageRace",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 21,
+  "firstFailure": "FAIL: Error: spawnSync pwsh ENOENT",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionF7Telemetry",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 18,
+  "firstFailure": "<ref *1> Error: spawnSync pwsh ENOENT",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionF8GitFacts",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 19,
+  "firstFailure": "<ref *1> Error: spawnSync pwsh ENOENT",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextCompactionF9TailBound",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 0,
+  "ms": 19,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ContextWireProjectorResponsesV2",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 64,
+  "ms": 312,
+  "firstFailure": "FAIL: T-NT-3 multi-step active turn (replayed reasoning, text signatures, two tool calls) [replay=native]: projector == posted body (byte-exact) ::",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "ControllerSessionBootstrap",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 32,
+  "ms": 39540,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "DeepSeekRequestBoundaryHost",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 0,
+  "ms": 20,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MixedPresetShellEnv",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 8,
+  "ms": 71,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "DeepSeekIsolation",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 4,
+  "ms": 34,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "EngineeringIsolation",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 6,
+  "ms": 33,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MuseOpenCodeGoRuntime",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 19,
+  "ms": 364,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MuseOpenCodeGo",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 54,
+  "ms": 915,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "MuseOpenCodeSession",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 13,
+  "ms": 35,
+  "firstFailure": "SUITE RESULT: PASS 13 | FAIL 0 | total 13",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "NexusControllerPanel",
+  "kind": "node",
+  "verdict": "FAIL",
+  "passLines": 0,
+  "ms": 461,
+  "firstFailure": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "NexusModeContract",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 1,
+  "ms": 20,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "PlatformDetachedLifecycle",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 3,
+  "ms": 555,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "PreferredRouteContract",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 7,
+  "ms": 3364,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "RoutingIntegrity",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 8,
+  "ms": 34,
+  "firstFailure": "SUITE RESULT: PASS 8 | FAIL 0 | total 8",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "RuntimeRoutingTrace",
+  "kind": "node",
+  "verdict": "PASS",
+  "passLines": 5,
+  "ms": 123,
+  "firstFailure": "SUITE RESULT: PASS 5 | FAIL 0 | total 5",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "StartupLifecycle",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 2,
+  "ms": 320,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "VisualCaptureTarget",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 10,
+  "ms": 24267,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ },
+ {
+  "name": "VisualPacketIntegrity",
+  "kind": "powershell",
+  "verdict": "PASS",
+  "passLines": 10,
+  "ms": 286,
+  "firstFailure": "",
+  "source": "full single-tree run on a clean install"
+ }
+]

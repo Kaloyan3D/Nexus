@@ -270,7 +270,11 @@ $delegation=Get-Content -Raw -Encoding UTF8 -LiteralPath $delegationPath
 Assert-Aih ($delegation -match 'toolName: deepseek_normal') '19: deepseek_normal subagent tool registration unchanged (compat alias)'
 Assert-Aih ($delegation -match 'toolName: deepseek_deep') '19: deepseek_deep subagent tool registration unchanged (compat alias)'
 Assert-Aih ($delegation -match 'tool-subagent-codex[\s\S]*?disabled: true') '19: Codex subagent remains disabled by default'
-$engPreset=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'data/.agent-presets/aih-engineering/agent.cordis.yml')
+# DSH 0.2.x: the planes are preset rows in the generated home patch.
+$engHomePatch=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'data/cordis.patch.yml')
+$engPresetMatch=[regex]::Match($engHomePatch,'(?ms)^[ \t]*- id: preset-aih-engineering[ \t]*$(.*?)(?=^[ \t]*- id: preset-aih-|^# ---- END NEXUS GENERATED|\z)')
+Assert-Aih $engPresetMatch.Success '19: engineering plane is declared in the home patch'
+$engPreset=$engPresetMatch.Groups[1].Value
 Assert-Aih ($engPreset -match '- id: tool-subagent-codex[\s\S]*?disabled: true') '19: engineering preset keeps the Codex subagent disabled'
 Assert-Aih ($engPreset -match '- id: aih-engineering-isolation') '19: engineering preset keeps its isolation plugin'
 Assert-Aih ($engPreset -match '- id: aih-controller') '19: engineering preset keeps the controller bridge'

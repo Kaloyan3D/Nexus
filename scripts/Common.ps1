@@ -45,7 +45,10 @@ function Get-AihLayout {
         Dsh = Join-Path $root 'app/node_modules/@deepseek-ai/dsh/lib/bin.js'
         OAuth = Join-Path $root 'app/node_modules/openai-oauth/dist/cli.js'
         Credentials = Join-Path $root 'data/.credentials.yaml'
-        Settings = Join-Path $root 'data/settings.yaml'
+        # DSH 0.2.x imports and RENAMES any $DSH_HOME/settings.yaml, so the Nexus-owned
+        # settings document must not use that name (see docs/integration/dsh-0.2.x-migration-report.md).
+        Settings = Join-Path $root 'data/nexus-settings.yaml'
+        LegacySettings = Join-Path $root 'data/settings.yaml'
         State = Join-Path $root 'data/aih-state.json'
         RoutingPolicy = Join-Path $root 'config/routing-policy.json'
         ModelRegistry = Join-Path $root 'config/model-registry.json'
@@ -92,6 +95,10 @@ function ConvertTo-AihJsonSafe {
     # for a plain string, which would serialize {Length: n} instead of the
     # value. Serialize the string value itself, never its reflection members.
     if ($Value -is [string]) { return $Value }
+    # Numbers, booleans, dates and other value types serialize as themselves. Under a culture whose
+    # decimal separator is a comma (for example bg-BG/en-BG) a numeric literal can arrive PSObject-wrapped,
+    # which would otherwise satisfy the pscustomobject test below and serialize as an empty object.
+    if ($Value -is [ValueType]) { return $Value }
     if ($Value -is [Collections.Specialized.OrderedDictionary] -or $Value -is [Collections.IDictionary]) {
         $output = [ordered]@{}
         foreach ($entry in ([Collections.IDictionary]$Value).GetEnumerator()) {
@@ -136,7 +143,20 @@ function Get-AihVersions {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "AI Harness version manifest is missing: $path"
     }
-    Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+    $versions = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+    # An independent installation (for example a test install running next to another Nexus) picks
+    # its own server port and OAuth service URL through the environment; the manifest defaults stay.
+    if (-not [string]::IsNullOrWhiteSpace($env:AIH_PORT)) {
+        $port = 0
+        if (-not [int]::TryParse($env:AIH_PORT, [ref]$port) -or $port -lt 1024 -or $port -gt 65535) {
+            throw "AIH_PORT must be an integer between 1024 and 65535 (got '$($env:AIH_PORT)')."
+        }
+        $versions.HarnessUrl = "http://127.0.0.1:$port"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:AIH_OAUTH_BASE_URL)) {
+        $versions.OAuthBaseUrl = $env:AIH_OAUTH_BASE_URL.TrimEnd('/')
+    }
+    return $versions
 }
 
 function Get-AihCodexAuthFile {
@@ -154,7 +174,12 @@ function Get-AihCodexAuthFile {
 function Test-AihEndpoint {
     param(
         [Parameter(Mandatory = $true)][string]$Uri,
-        [int]$TimeoutSec = 2
+        [int]$TimeoutSec = 2,
+        # DSH 0.2.x serves the Web UI behind a per-process token: an
+        # unauthenticated request answers 401/403 while the server is up.
+        # Callers probing the DSH Web listener accept that answer as "a
+        # server is listening"; the OAuth models probe keeps strict 2xx.
+        [switch]$AcceptAuthRequired
     )
 
     try {
@@ -162,8 +187,26 @@ function Test-AihEndpoint {
         return $true
     }
     catch {
+        if ($AcceptAuthRequired) {
+            $responseProperty = $_.Exception.PSObject.Properties['Response']
+            if ($null -ne $responseProperty -and $null -ne $responseProperty.Value) {
+                try { $status = [int]$responseProperty.Value.StatusCode; if ($status -eq 401 -or $status -eq 403) { return $true } } catch { }
+            }
+        }
         return $false
     }
+}
+
+function Get-AihDshWebUrlFromLog {
+    # DSH 0.2.x prints `dsh web: http://host:port/?token=...` once the server
+    # is listening. The token authorizes the browser session, so the launcher
+    # opens exactly this URL. Returns $null when the line is absent.
+    param([string]$StdoutLog, [datetime]$NotBeforeUtc = [datetime]::MinValue)
+    if ([string]::IsNullOrWhiteSpace($StdoutLog) -or -not (Test-Path -LiteralPath $StdoutLog)) { return $null }
+    if ((Get-Item -LiteralPath $StdoutLog).LastWriteTimeUtc -lt $NotBeforeUtc.AddSeconds(-1)) { return $null }
+    $hits = @(Get-Content -LiteralPath $StdoutLog -Tail 50 -ErrorAction SilentlyContinue | ForEach-Object { if ($_ -match 'dsh web:\s+(https?://\S+)') { $Matches[1] } })
+    if ($hits.Count -eq 0) { return $null }
+    return [string]$hits[-1]
 }
 
 function Get-AihDeepSeekKey {

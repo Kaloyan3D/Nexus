@@ -39,30 +39,25 @@ async function main() {
     process.env.AIH_INSTALL_ROOT = installRoot
 
     const ctx = createPresetCtx()
-    const selection = {
-      current: { provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoningEffort: 'max' },
-      assembled: undefined,
-    }
-    installModelSelection(ctx, selection)
+    // DSH 0.2.x: installModelSelection(agentCtx) adds only the model-switch notice;
+    // the controller route is the durable selection armed by the isolation boundary.
+    installModelSelection(ctx)
     muse.apply(ctx)
-    await ctx.hooks.get('system-prompt/assemble')[0].listener({}, {}, async () => ({ variables: {} }))
-    const session = { id: 'session-muse', header: { agentPreset: 'aih-muse' }, events: [] }
+    const session = { id: 'session-muse', header: { agentPreset: 'aih-muse' }, events: [], requestHeader: () => undefined }
     // One live agent across both steps, as in the running loop.
-    const agent = { session }
+    const agent = { session, options: { provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoningEffort: 'max' } }
     const seed = async () => ({ provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoningEffort: 'max', maxTokens: 32768 })
     const finalRequest = await runAgentStep(ctx, { agent }, seed)
     assert.equal(finalRequest.provider, 'opencode-go')
     assert.equal(finalRequest.model, 'muse-spark-1.3-contributor')
     console.log('PASS: composed DSH session selection preserves the Muse controller target')
-    ctx.on('agent/request', async (laterPayload, laterNext) => {
-      laterPayload.routingAuthority = {
-        source: 'session',
-        target: { provider: 'flash-max-direct', model: 'deepseek-v4-flash' },
-      }
-      return laterNext()
-    })
-    await assert.rejects(runAgentStep(ctx, { agent }, seed), /lower routing authority cannot replace a higher route/)
-    console.log('PASS: installed DSH rejects a later lower-authority route claim')
+    // A later claim that tries to move the route below the controller is refused.
+    ctx.on('agent/request', async (_laterPayload, laterNext) => ({ ...(await laterNext()), provider: 'flash-max-direct', model: 'deepseek-v4-flash' }))
+    await assert.rejects(
+      runAgentStep(ctx, { agent }, seed, { claim: false }),
+      (error) => error && /effective-route-differs-from-controller-target/.test(String(error.message)),
+    )
+    console.log('PASS: installed DSH boundary rejects a later lower-priority route rewrite (fail closed)')
   } finally {
     if (previousHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousHome
     if (previousRoot === undefined) delete process.env.AIH_INSTALL_ROOT; else process.env.AIH_INSTALL_ROOT = previousRoot

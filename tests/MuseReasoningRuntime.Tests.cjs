@@ -244,7 +244,7 @@ async function main() {
       let nextCalls = 0;
       await assert.rejects(
         () => ctx.handlers['agent/request'](
-          { agent: { session: museSession('sess-d') } },
+          { agent: { session: museSession('sess-d'), options: { provider: 'x', model: 'y' } } },
           async () => { nextCalls += 1; return { provider: 'x', model: 'y' }; },
         ),
         (error) => (
@@ -346,7 +346,7 @@ async function main() {
       isolation.apply(brokenCtx);
       await assert.rejects(
         () => brokenCtx.handlers['agent/request'](
-          { agent: { session: museSession('sess-f2') } },
+          { agent: { session: museSession('sess-f2'), options: { provider: 'x', model: 'y' } } },
           async () => { throw Object.assign(new Error('provider request failed'), { code: 'provider-error' }); },
         ),
         (error) => error.code === 'nexus-muse-reasoning-capability-unavailable',

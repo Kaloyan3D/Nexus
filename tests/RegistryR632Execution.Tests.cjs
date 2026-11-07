@@ -57,7 +57,7 @@ await check('R6.3.2 turn-entry gate upholds pins and exposes legacy', () => {
   fs.cpSync(path.join(repoRoot, 'config'), path.join(installRoot, 'config'), { recursive: true });
   fs.mkdirSync(path.join(installRoot, 'ui', 'nexus-controller', 'lib'), { recursive: true });
   fs.cpSync(path.join(repoRoot, 'ui', 'nexus-controller', 'lib', 'gate.cjs'), path.join(installRoot, 'ui', 'nexus-controller', 'lib', 'gate.cjs'));
-  fs.writeFileSync(path.join(dataHome, 'settings.yaml'), 'engineering-profile: deepseek-codex\n');
+  fs.writeFileSync(path.join(dataHome, 'nexus-settings.yaml'), 'engineering-profile: deepseek-codex\n');
   const fixture = tmpDir('r632-ws-');
   fs.mkdirSync(path.join(fixture, 'src'), { recursive: true });
   fs.writeFileSync(path.join(fixture, 'src', 'a.js'), 'module.exports = 1;\n');

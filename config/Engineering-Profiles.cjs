@@ -150,7 +150,7 @@ function profileById(profiles, id) {
 /** Read the `engineering-profile:` key from data/settings.yaml, or null. */
 function settingsEngineeringProfile(installRoot) {
   try {
-    const text = fs.readFileSync(path.join(installRoot, 'data', 'settings.yaml'), 'utf8')
+    const text = fs.readFileSync(path.join(installRoot, 'data', 'nexus-settings.yaml'), 'utf8')
     const match = /^engineering-profile:\s*([^\s#\r\n]+)/m.exec(text)
     if (match) return match[1].trim().replace(/^['"]|['"]$/g, '')
   } catch {

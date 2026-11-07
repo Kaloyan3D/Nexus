@@ -86,7 +86,7 @@ async function main() {
     fs.copyFileSync(path.join(repo, 'ui', 'nexus-controller', 'lib', 'gate.cjs'), path.join(root, 'ui', 'nexus-controller', 'lib', 'gate.cjs'));
     let settings = fs.readFileSync(path.join(root, 'config', 'settings.yaml'), 'utf8');
     if (engine === 'muse') settings = settings.replace('engineering-profile: deepseek-codex', 'engineering-profile: muse-spark-1.3-contributor');
-    fs.writeFileSync(path.join(root, 'data', 'settings.yaml'), settings);
+    fs.writeFileSync(path.join(root, 'data', 'nexus-settings.yaml'), settings);
     const workspace = path.join(root, 'workspace');
     fs.mkdirSync(path.join(workspace, 'src'), { recursive: true });
     fs.writeFileSync(path.join(workspace, 'src', 'resolver.js'), 'module.exports = (value) => value ?? "";\n');

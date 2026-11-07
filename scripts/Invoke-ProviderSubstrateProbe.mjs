@@ -5,7 +5,7 @@
  * Proves that the REAL DSH provider substrate recognizes a Nexus-managed
  * provider route end-to-end, entirely OFFLINE (no credentials, no network):
  *
- *   FileSettingsProvider (real cordis Context, real settings.yaml)
+ *   settings document (real js-yaml parse of nexus-settings.yaml)
  *     -> the pinned @deepseek-ai/dsh-llm-pi-ai section schema (Config)
  *     -> substrate.apply on a real cordis Context
  *     -> the REAL PiAiAdapter captured from ctx.llm.registerAdapter
@@ -77,7 +77,6 @@ function record(name, ok, detail) {
 }
 
 const cordis = await importPinned("@deepseek-ai/cordis");
-const settingsFile = await importPinned("@deepseek-ai/dsh-settings-file");
 const substrate = await importPinned("@deepseek-ai/dsh-llm-pi-ai");
 
 // 1. A REAL cordis Context: the substrate and the settings provider are
@@ -107,14 +106,14 @@ try {
     registerModelDiscovery() {}
   };
 
-  // 2. The REAL file settings provider over the REAL document.
-  const provider = new settingsFile.FileSettingsProvider(ctx, {
-    path: settingsPath,
-    dshHome: path.dirname(settingsPath),
-    watch: false,
-    debounceMs: 0
-  });
-  const document = await provider.load();
+  // 2. The REAL settings document, parsed with the runtime's own YAML library.
+  //    DSH 0.2.x removed dsh-settings-file; provider routes now reach the
+  //    substrate as the `llm-pi-ai` plugin config (Nexus projects its
+  //    nexus-settings.yaml into the home patch with the same section shape).
+  const { createRequire } = await import("node:module");
+  const { readFileSync } = await import("node:fs");
+  const yamlLibrary = createRequire(path.join(packagesRoot, "..", "package.json"))("js-yaml");
+  const document = yamlLibrary.load(readFileSync(settingsPath, "utf8"));
   record("settings-loaded", document !== undefined && document !== null && typeof document === "object",
     "the real settings document parsed");
 
@@ -140,12 +139,15 @@ try {
   record("route-registered", Array.isArray(capturedRoutes) && capturedRoutes.includes(providerId),
     "registered routes: " + JSON.stringify(capturedRoutes));
 
-  // 5. The REAL adapter answers the route's model directory offline.
-  const models = await capturedAdapter.listModels(providerId);
-  const listedIds = models.map((m) => m.id);
+  // 5. The REAL adapter serves every configured model of the route offline.
+  //    DSH 0.2.x: `listModels` is the LIVE discovery listing (it is empty offline
+  //    by design), so the offline directory proof is that each configured model
+  //    id resolves through `resolveModel`.
   for (const expected of expectModels) {
-    record("list-models:" + expected, listedIds.includes(expected),
-      "route directory: " + JSON.stringify(listedIds));
+    let entry;
+    try { entry = await capturedAdapter.resolveModel(providerId, expected); } catch (error) { entry = undefined; }
+    record("list-models:" + expected, entry !== undefined && entry !== null && entry.id === expected,
+      "configured model resolves to id " + JSON.stringify(entry && entry.id));
   }
 
   const resolved = await capturedAdapter.resolveModel(providerId, modelId);

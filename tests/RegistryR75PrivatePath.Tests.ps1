@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param([string]$InstallRoot = (Split-Path -Parent $PSScriptRoot))
 $ErrorActionPreference = 'Stop'
+function Get-AihTestFileMode([string]$Path) { if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)) { return (& stat -f '%Lp' $Path) } return (& stat -c '%a' $Path) }
 . (Join-Path $InstallRoot 'scripts/Platform.ps1')
 if (Test-AihIsWindows) { throw 'Native symlink permission regression requires Linux; Windows behavior remains unverified.' }
 $scratch = Join-Path ([IO.Path]::GetTempPath()) ('r75-private-' + [guid]::NewGuid().ToString('N'))
@@ -20,7 +21,7 @@ try {
     if ($plan.Count -ne 1 -or $plan[0].Path -ne $private) { throw 'FAIL: private permission plan follows symlinks outside its ownership boundary' }
     Write-Host 'PASS: private plan includes only owned root, never directory/file symlinks'
     Protect-AihPrivatePath -Path $private
-    if ((& stat -c '%a' $sentinel) -ne '644' -or (& stat -c '%a' $outside) -ne '755') { throw 'FAIL: outside permissions changed' }
+    if ((Get-AihTestFileMode $sentinel) -ne '644' -or (Get-AihTestFileMode $outside) -ne '755') { throw 'FAIL: outside permissions changed' }
     Write-Host 'PASS: applying private plan preserves outside permissions'
     if (@(Get-AihUnixPermissionPlan -Path $dirLink).Count -ne 0) { throw 'FAIL: symlink root is traversed' }
     Write-Host 'PASS: a symlink root cannot escape the boundary'

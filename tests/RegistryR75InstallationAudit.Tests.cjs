@@ -61,7 +61,7 @@ if (!initial.persisted) {
   }
 }
 assert.equal(config.revision, 2)
-const settings = path.join(data, 'settings.yaml')
+const settings = path.join(data, 'nexus-settings.yaml')
 fs.appendFileSync(settings, '\n# R75A operator-owned preservation sentinel\n')
 const credentials = path.join(data, '.credentials.yaml')
 fs.writeFileSync(credentials, 'R75A_FAKE_ONLY: isolated-preservation-sentinel\n')
