@@ -17,7 +17,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const name = "nexus-ui-brand";
-const ASSETS = Object.freeze(['nexus-mark.png', 'nexus-logo.png']);
+const ASSETS = Object.freeze(['nexus-mark.png', 'nexus-logo.png', 'nexus-favicon.svg']);
+const contentTypeOf = (file) => (file.endsWith('.svg') ? 'image/svg+xml' : 'image/png');
 const assetDirectory = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets');
 
 /** Host plugin body — brand assets only; no state, no writes. */
@@ -38,7 +39,7 @@ function apply(ctx) {
           res.end('not found')
           return
         }
-        res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'private, max-age=3600', 'Content-Length': String(bytes.length) })
+        res.writeHead(200, { 'Content-Type': contentTypeOf(file), 'Cache-Control': 'private, max-age=3600', 'Content-Length': String(bytes.length) })
         res.end(req.method === 'HEAD' ? undefined : bytes)
       }
       const handler = (req, res) => {

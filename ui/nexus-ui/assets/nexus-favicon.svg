@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+	<!-- Nexus mark: hexagonal node ring with hub core on a dark tile. -->
+	<rect width="64" height="64" rx="14" fill="#0D0D10"/>
+	<path d="M32 7.5 53.3 20.3v23.4L32 56.5 10.7 43.7V20.3Z" stroke="#7C5CFF" stroke-width="4.4" stroke-linejoin="round"/>
+	<path d="M32 32V7.5M32 32l21.3 11.7M32 32 10.7 43.7" stroke="#7C5CFF" stroke-width="3.6" stroke-linecap="round" opacity="0.5"/>
+	<circle cx="32" cy="32" r="6.4" fill="#F5F5F7"/>
+</svg>
