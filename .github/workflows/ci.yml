@@ -61,6 +61,8 @@ jobs:
         run: npm audit --prefix runtime --omit=dev --audit-level=critical
       - name: JavaScript, shell, routing and CCv2 source contracts
         run: bash .github/ci/check-source.sh
+      - name: Verify fail-closed report validation
+        run: node .github/ci/test-harness-summary.cjs
       - name: Parse PowerShell sources
         shell: pwsh
         run: ./.github/ci/check-powershell.ps1
@@ -234,7 +236,7 @@ jobs:
       - name: Validate and summarize CCv2 lab report
         if: runner.os == 'Linux' && !cancelled() && inputs.ccv2_lab
         shell: pwsh
-        run: ./.github/ci/harness-summary.ps1 -ReportPath "$env:DSH_REPORTS/ccv2-lab.json"
+        run: ./.github/ci/harness-summary.ps1 -Lane ccv2-lab -ReportPath "$env:DSH_REPORTS/ccv2-lab.json"
       - name: Upload install and test diagnostics
         if: '!cancelled()'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

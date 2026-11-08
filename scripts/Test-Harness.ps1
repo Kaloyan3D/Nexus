@@ -201,7 +201,7 @@ $suites = @(
     [ordered]@{ name='ContextCompactionF9TailBound'; script='tests/ContextCompactionF9TailBound.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextWireProjectorResponsesV2'; script='tests/ContextWireProjectorResponsesV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ControllerSessionBootstrap'; script='tests/ControllerSessionBootstrap.Tests.cjs'; executable=$layout.Node; kind='node' },
-    [ordered]@{ name='DeepSeekRequestBoundaryHost'; script='tests/DeepSeekRequestBoundaryHost.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='DeepSeekRequestBoundaryHost'; script='tests/DeepSeekRequestBoundaryHost.Tests.cjs'; executable=$layout.Node; kind='node'; completionMarker='NEXUS SUITE COMPLETE: DeepSeekRequestBoundaryHost' },
     [ordered]@{ name='MixedPresetShellEnv'; script='tests/MixedPresetShellEnv.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_RUNTIME_ROOT'=$InstallRoot } },
     [ordered]@{ name='DeepSeekIsolation'; script='tests/DeepSeekIsolation.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='EngineeringIsolation'; script='tests/EngineeringIsolation.Tests.cjs'; executable=$layout.Node; kind='node' },
@@ -298,31 +298,37 @@ foreach ($suite in $suites) {
         }
     }
     $savedPreference = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $output = @(& $executable @arguments 2>&1 | ForEach-Object { [string]$_ }); $suiteExitCode = [int]$LASTEXITCODE }
-    catch { $output = @([string]$_); $suiteExitCode = 1 }
+    try {
+        $application = Get-Command -Name $executable -CommandType Application -ErrorAction Stop
+        $output = @(& $application @arguments 2>&1 | ForEach-Object { [string]$_ })
+        $suiteExitCode = $LASTEXITCODE
+    } catch {
+        $output = @([string]$_)
+        $suiteExitCode = $null
+    }
     finally { $ErrorActionPreference = $savedPreference }
     foreach ($envName in @($suiteEnvPrior.Keys)) {
         [System.Environment]::SetEnvironmentVariable([string]$envName, $suiteEnvPrior[$envName])
     }
     foreach ($line in $output) { Write-Host $line; $rawLines.Add($line) }
     $suiteFinished = [DateTime]::UtcNow
-    $suitePassed = Get-AihHarnessAssertionCount -Lines $output -Prefix 'PASS:'
-    $explicitFailed = Get-AihHarnessAssertionCount -Lines $output -Prefix 'FAIL:'
-    $suiteFailed = if ($suiteExitCode -eq 0) { $explicitFailed } else { [Math]::Max(1, $explicitFailed) }
-    $suiteResults.Add([ordered]@{name=$suite.name;verificationScope=$verificationScope;command=$commandText;script=$suite.script.Replace('\','/');startedAtUtc=$suiteStarted.ToString('o');finishedAtUtc=$suiteFinished.ToString('o');durationMs=[Math]::Max(0,[int64]($suiteFinished-$suiteStarted).TotalMilliseconds);exitCode=$suiteExitCode;passed=$suitePassed;failed=$suiteFailed;result=if($suiteExitCode-eq 0){'PASS'}else{'FAIL'}})
-    $rawLines.Add(('===== RESULT {0}: {1} (exit {2}) =====' -f $suite.name, $(if ($suiteExitCode -eq 0) { 'PASS' } else { 'FAIL' }), $suiteExitCode))
-    if ($suiteExitCode -ne 0) {
-        if ($harnessExitCode -eq 0) { $harnessExitCode = $suiteExitCode }
+    $outcome = Get-AihHarnessSuiteOutcome -Lines $output -ExitCode $suiteExitCode -CompletionMarker $suite['completionMarker']
+    $suiteResults.Add([ordered]@{name=$suite.name;verificationScope=$verificationScope;command=$commandText;script=$suite.script.Replace('\','/');startedAtUtc=$suiteStarted.ToString('o');finishedAtUtc=$suiteFinished.ToString('o');durationMs=[Math]::Max(0,[int64]($suiteFinished-$suiteStarted).TotalMilliseconds);exitCode=$suiteExitCode;passed=$outcome.passed;failed=$outcome.failed;result=$outcome.result;skipEvidence=$outcome.skipEvidence;completionVerified=$outcome.completionVerified})
+    $rawLines.Add(('===== RESULT {0}: {1} (exit {2}) =====' -f $suite.name, $outcome.result, $suiteExitCode))
+    # Legacy optional skips remain nonfatal locally. CI requires every selected
+    # row to pass, and an explicitly required completion marker is always fatal.
+    if ($outcome.result -in @('FAIL','INCOMPLETE') -or ($outcome.result -eq 'SKIP' -and $suite['completionMarker'])) {
+        if ($harnessExitCode -eq 0) { $harnessExitCode = if ($suiteExitCode) { $suiteExitCode } else { 1 } }
         if (-not $ContinueOnFailure) { break }
     }
 }
 
 if ($ContinueOnFailure) {
-    $failedSuites = @($suiteResults | Where-Object { $_.result -eq 'FAIL' })
+    $failedSuites = @($suiteResults | Where-Object { $_.result -ne 'PASS' })
     if ($failedSuites.Count -gt 0) {
         Write-Host ('AUDIT FAILURES ({0}): {1}' -f $failedSuites.Count, (($failedSuites | ForEach-Object { '{0} (exit={1})' -f $_.name, $_.exitCode }) -join ', '))
     } else {
-        Write-Host 'AUDIT FAILURES: none (all suites ran to completion)'
+        Write-Host 'AUDIT FAILURES: none (all suites passed)'
     }
 }
 
