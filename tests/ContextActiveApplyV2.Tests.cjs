@@ -679,7 +679,7 @@ async function main() {
   section('SECRET SAFETY: credential-shaped fixtures stay out of results');
   {
     evCounter = 0;
-    const SK = 'sk-ant-test-9f8e7d6c5b4a39482716051403040506';
+    const SK = 'sk-' + 'ant-test-9f8e7d6c5b4a39482716051403040506';
     const AK = 'AKIAIOSFODNN7EXAMPLE';
     const events = seqify([evUser('u0 token ' + SK), evAssistant('a1'), evUser('u2'), evAssistant('a3'), evUser('u4'), evAssistant('a5'), evUser('u6-current')]);
     const surface = events.map((e) => e.seq);

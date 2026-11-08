@@ -135,7 +135,7 @@ async function main() {
   await check('Windows installer recursively publishes the Registry dependency closure and preserves operator files', () => {
     const text = fs.readFileSync(path.join(repo, 'scripts/Setup.ps1'), 'utf8').replace(/\r\n/g, '\n')
     const helper = text.match(/^function Copy-AihSourceFile \{[\s\S]*?^\}/m)
-    const block = text.match(/^# TASK-0047\.1: Registry runtime closure[\s\S]*?(?=^# TASK-0009:)/m)
+    const block = text.match(/^# TASK-0047\.1: Registry runtime closure[\s\S]*?^\}/m)
     assert.ok(helper && block, 'Registry recursive copy block must exist')
     assert.match(block[0], /Get-ChildItem.*-Recurse -File/)
     const root = fixture('windows')

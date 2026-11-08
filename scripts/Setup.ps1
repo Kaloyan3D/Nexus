@@ -48,11 +48,6 @@ foreach ($directory in @($layout.Root, $layout.App, $layout.Bin, $layout.Config,
 foreach ($name in @('setup.sh', 'setup.ps1', 'README.md', 'SECURITY.md', '.gitignore', '.gitattributes', '.env.example')) {
     Copy-AihSourceFile -Source (Join-Path $sourceRoot $name) -Destination (Join-Path $layout.Root $name)
 }
-New-Item -ItemType Directory -Force -Path (Join-Path $layout.Root 'docs') | Out-Null
-foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'docs') -File -ErrorAction SilentlyContinue) {
-    Copy-AihSourceFile -Source $file.FullName -Destination (Join-Path $layout.Root 'docs')
-}
-
 foreach ($name in @('versions.json', 'settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'preset-muse.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'Muse-Isolation.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'Controller-RequestBoundary.cjs', 'Preset-ShellEnvironment.cjs', 'Dsh-SessionEvents.cjs', 'OpenCode-SessionHeader.cjs', 'Routing-Integrity.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'nexus-profiles.json', 'muse-profiles.json', 'Engineering-Profiles.cjs', 'Nexus-Profiles.cjs')) {
     Copy-AihSourceFile -Source (Join-Path $sourceRoot "config\$name") -Destination (Join-Path $layout.Config $name)
 }
@@ -67,20 +62,17 @@ foreach ($file in Get-ChildItem -LiteralPath $registrySource -Recurse -File) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
     Copy-AihSourceFile -Source $file.FullName -Destination $target
 }
-# TASK-0009: top-level provider-substrate patch appliers are .cjs modules
-# (Apply-OpenCodeSessionPatch.cjs, Remove-MuseContributorEgressPatch.cjs).
-# They must reach the installed scripts tree exactly like the Linux
-# installer copies them, or Complete-Install.ps1 cannot patch/verify the
-# pinned substrate on Windows installs.
-foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'scripts') -File | Where-Object Extension -in @('.ps1', '.mjs', '.cjs')) {
-    Copy-AihSourceFile -Source $file.FullName -Destination $layout.Scripts
-}
-foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'bin') -Filter '*.cmd' -File) {
-    Copy-AihSourceFile -Source $file.FullName -Destination $layout.Bin
-}
-New-Item -ItemType Directory -Force -Path (Join-Path $layout.Root 'tests') | Out-Null
-foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'tests') -File | Where-Object Extension -in @('.ps1', '.cjs')) {
-    Copy-AihSourceFile -Source $file.FullName -Destination (Join-Path $layout.Root 'tests')
+# Keep the Windows out-of-tree layout complete, including nested controller
+# modules, test fixtures, documentation contracts and POSIX launcher sources.
+foreach ($directory in @('scripts', 'tests', 'docs', 'bin')) {
+    $sourceDirectory = Join-Path $sourceRoot $directory
+    if (-not (Test-Path -LiteralPath $sourceDirectory -PathType Container)) { continue }
+    foreach ($file in Get-ChildItem -LiteralPath $sourceDirectory -Recurse -File) {
+        $relative = $file.FullName.Substring($sourceDirectory.Length).TrimStart([IO.Path]::DirectorySeparatorChar)
+        $target = Join-Path (Join-Path $layout.Root $directory) $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        Copy-AihSourceFile -Source $file.FullName -Destination $target
+    }
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $layout.Root 'ui') | Out-Null
 foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'ui') -Recurse -File) {

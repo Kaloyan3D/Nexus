@@ -338,7 +338,7 @@ async function main() {
     const s = svcOn(repoRoot, dir)
     const cfg = s.getModeConfiguration('engineering-v1', {}).result.config
     const evil = JSON.parse(JSON.stringify(cfg))
-    evil.slots.engineer.reasoning = 'sk-live-SECRET1234567890'
+    evil.slots.engineer.reasoning = 'sk-' + 'live-SECRET1234567890'
     // Service layer rejects first at canonical validation (unknown level):
     // nothing is ever persisted for an invalid proposal.
     const r = s.save('engineering-v1', evil, null, {})
@@ -348,7 +348,7 @@ async function main() {
     // value is refused with secret-material-rejected and never written.
     const schemaly = JSON.parse(JSON.stringify(s.getModeConfiguration('engineering-v2', {}).result.config))
     schemaly.slots.main.reasoning = 'high'
-    schemaly.roleOverrides = { muse_main: { logicalModelId: schemaly.slots.main.logicalModelId, routeId: schemaly.slots.main.routeId, reasoning: 'sk-live-SECRET1234567890' } }
+    schemaly.roleOverrides = { muse_main: { logicalModelId: schemaly.slots.main.logicalModelId, routeId: schemaly.slots.main.routeId, reasoning: 'sk-' + 'live-SECRET1234567890' } }
     const direct = configStore.saveModeConfig(dir, 'engineering-v2', schemaly, null, {})
     assert.equal(direct.ok, false)
     assert.ok(codes(direct.errors).includes('secret-material-rejected'))

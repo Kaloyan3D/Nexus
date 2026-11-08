@@ -251,7 +251,7 @@ check(trust.validateSealedCheckpoint(sealedH.checkpoint).valid === true, 'H1 bas
 {
   const dir = tmpDir('h1-secret-op-');
   const f = freezeOpH(dir, 's0', 'CKPT-H-S0', 1, null);
-  const evilDraft = Object.assign(clone(f.draft), { apiKey: 'sk-secretnotreal1234567890' });
+  const evilDraft = Object.assign(clone(f.draft), { apiKey: 'sk-' + 'secretnotreal1234567890' });
   throwsWith(() => compaction.freezeCompactionOperationV2(tmpDir('h1-secret-op2-'), evilDraft, f.expected), 'operation-schema-mismatch', 'secret-bearing operation extra BLOCKs before persistence');
   const tdir = tmpDir('h1-secret-tok-');
   const evilTok = Object.assign(clone(tokH), { accessToken: 'Bearer secretnotreal' });

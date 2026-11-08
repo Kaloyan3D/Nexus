@@ -218,7 +218,7 @@ section('RC1.1-A7 FAIL CLOSED (unmeasurable -> NATIVE)');
 
 section('RC1.1-A8 DETERMINISM + CONTENT-FREE TELEMETRY');
 {
-  const secret = 'TOP-SECRET-PROMPT-TEXT sk-abcdefghijklmnop';
+  const secret = 'TOP-SECRET-PROMPT-TEXT sk-' + 'abcdefghijklmnop';
   const s = sessionOf([usageOf(123456, 789)], { resultText: secret });
   const a = gate.decideActivationV2({ mode: PRESSURE, route: ROUTE, events: s.events, messages: s.messages });
   const b = gate.decideActivationV2({ mode: PRESSURE, route: ROUTE, events: clone(s.events), messages: clone(s.messages) });

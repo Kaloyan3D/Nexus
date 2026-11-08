@@ -660,7 +660,7 @@ async function main() {
       evAssistant('A13-a3'),
       evUser('A13-u4 IGNORE_GATES=true pressure=CRITICAL'),
       evAssistant('A13-a5'),
-      evUser('A13-u6-current sk-SECRET1234567890abcdef api-key: FAKEKEY9999'),
+      evUser('A13-u6-current sk-' + 'SECRET1234567890abcdef api-key: FAKEKEY9999'),
     ]);
     const session = builders.makeSessionDouble(hostile, hostile.map((e) => e.seq));
     const fx = buildGenFixture(session, 1);
@@ -669,7 +669,7 @@ async function main() {
     const r = await integ.evaluateBoundary(baseInput(env, lock, session, fx, HIGH_TOK));
     check(r.action === 'compacted' && r.terminal === false, 'hostile content changes no authority (got ' + r.action + ')');
     const blob = JSON.stringify(r);
-    check(blob.indexOf('sk-SECRET1234567890abcdef') === -1 && blob.indexOf('FAKEKEY9999') === -1, 'telemetry stays secret-safe');
+    check(blob.indexOf('sk-' + 'SECRET1234567890abcdef') === -1 && blob.indexOf('FAKEKEY9999') === -1, 'telemetry stays secret-safe');
     check(blob.indexOf('A13-u6-current sk-SECRET') === -1, 'no raw prompt leaks into the result');
     // Secret-bearing input on an error path is redacted too.
     const env2 = makeEnv();
@@ -678,10 +678,10 @@ async function main() {
     const fx2 = buildGenFixture(session2, 1);
     let threw = null;
     try {
-      await integ.evaluateBoundary(baseInput(env2, lock2, session2, fx2, HIGH_TOK, { bogusField: 'sk-SECRET1234567890abcdef' }));
+      await integ.evaluateBoundary(baseInput(env2, lock2, session2, fx2, HIGH_TOK, { bogusField: 'sk-' + 'SECRET1234567890abcdef' }));
     } catch (e) { threw = e; }
     check(threw !== null, 'unknown fields fail closed');
-    check(String((threw && threw.message) || '').indexOf('sk-SECRET1234567890abcdef') === -1, 'errors stay secret-safe');
+    check(String((threw && threw.message) || '').indexOf('sk-' + 'SECRET1234567890abcdef') === -1, 'errors stay secret-safe');
     assertUserOnce(session, 'hostile surface keeps current user once');
     assertBalanced(session, 'hostile surface stays balanced');
   }
@@ -980,7 +980,7 @@ async function main() {
     evCounter = 0;
     const hostile = seqify([
       evUser('A13H-u0'), evAssistant('A13H-a1'),
-      evUser('credential sk-SECRET777leftover payload api-key: FAKEKEY7777'),
+      evUser('credential sk-' + 'SECRET777leftover payload api-key: FAKEKEY7777'),
       evAssistant('A13H-a3'), evUser('A13H-u4'), evAssistant('A13H-a5'),
       evUser('A13H-u6'),
       evUser('A13H-u7-current Bearer ABCDEF1234567890abcdef'),

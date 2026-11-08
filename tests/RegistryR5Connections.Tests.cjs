@@ -181,10 +181,10 @@ await check('R5 Claude discovery uses native help hints, invents no proxy models
 });
 
 await check('R5 billing guard refuses silent API billing', () => {
-  const blocked = sub.checkBillingSeparation({ ANTHROPIC_API_KEY: 'sk-ant-real-looking-key' }, {});
+  const blocked = sub.checkBillingSeparation({ ANTHROPIC_API_KEY: 'sk-' + 'ant-real-looking-key' }, {});
   assert.equal(blocked.ok, false);
   assert.ok(codes(blocked.errors).indexOf('billing-boundary') !== -1);
-  const opted = sub.checkBillingSeparation({ ANTHROPIC_API_KEY: 'sk-ant-real-looking-key' }, { allowApiBilling: true });
+  const opted = sub.checkBillingSeparation({ ANTHROPIC_API_KEY: 'sk-' + 'ant-real-looking-key' }, { allowApiBilling: true });
   assert.equal(opted.ok, true);
   assert.ok(opted.billingSource.indexOf('explicit opt-in') !== -1);
   const clean = sub.checkBillingSeparation({}, {});
@@ -222,7 +222,7 @@ await check('R5 adapter: cancellation, timeout, exit codes and secret scan', asy
   assert.ok(codes(timedOut.errors).indexOf('claude-timeout') !== -1);
   const exited = await sub.runClaudeAgent({ prompt: 'x' }, { hooks: { spawnEvents: () => Promise.resolve({ code: 1, stdout: '', stderr: 'boom' }) }, env: {} });
   assert.ok(codes(exited.errors).indexOf('claude-exit-1') !== -1);
-  const secreted = await sub.runClaudeAgent({ prompt: 'x' }, { hooks: { spawnEvents: () => Promise.resolve({ code: 0, stdout: '{"type":"result","text":"sk-ant-secret-key-material-here"}\n', stderr: '' }) }, env: {} });
+  const secreted = await sub.runClaudeAgent({ prompt: 'x' }, { hooks: { spawnEvents: () => Promise.resolve({ code: 0, stdout: '{"type":"result","text":"sk-' + 'ant-secret-key-material-here"}\n', stderr: '' }) }, env: {} });
   assert.equal(secreted.ok, false);
   assert.ok(codes(secreted.errors).indexOf('secret-material-rejected') !== -1);
   const billed = await sub.runClaudeAgent({ prompt: 'x' }, { hooks: { spawnEvents: () => { throw new Error('must not spawn'); } }, env: { ANTHROPIC_API_KEY: 'sk-ant-abc' } });

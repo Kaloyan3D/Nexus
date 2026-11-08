@@ -291,7 +291,8 @@ if ($runningOnWindows) {
         $probeInstall = Join-Path $exitProbeRoot 'install'
         foreach ($probeDirectory in @(
             (Join-Path $probeSource 'config'), (Join-Path $probeSource 'runtime'), (Join-Path $probeSource 'scripts'),
-            (Join-Path $probeSource 'bin'), (Join-Path $probeSource 'tests'), (Join-Path $probeSource 'ui'),
+            (Join-Path $probeSource 'bin'), (Join-Path $probeSource 'tests/lib'), (Join-Path $probeSource 'ui'),
+            (Join-Path $probeSource 'scripts/Engineering'), (Join-Path $probeSource 'config/registry'),
             (Join-Path $probeInstall 'app/node_modules/@deepseek-ai/dsh/lib'))) {
             New-Item -ItemType Directory -Force -Path $probeDirectory | Out-Null
         }
@@ -306,7 +307,7 @@ if ($runningOnWindows) {
         Copy-Item -LiteralPath $probeNode -Destination (Join-Path $probeInstall 'runtime/node/node.exe')
         [IO.File]::WriteAllText((Join-Path $probeSource 'config/versions.json'), (@{ NodeVersion=$probeNodeVersion } | ConvertTo-Json))
         [IO.File]::WriteAllText((Join-Path $probeSource 'scripts/MusePresetDependencyClosure.cjs'), 'process.exit(0);')
-        foreach ($probeFile in @('settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'preset-muse.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'Muse-Isolation.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'Controller-RequestBoundary.cjs', 'Routing-Integrity.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'nexus-profiles.json', 'muse-profiles.json', 'Engineering-Profiles.cjs', 'Nexus-Profiles.cjs')) {
+        foreach ($probeFile in @('settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'preset-muse.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'Muse-Isolation.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'Controller-RequestBoundary.cjs', 'Preset-ShellEnvironment.cjs', 'Dsh-SessionEvents.cjs', 'OpenCode-SessionHeader.cjs', 'Routing-Integrity.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'nexus-profiles.json', 'muse-profiles.json', 'Engineering-Profiles.cjs', 'Nexus-Profiles.cjs')) {
             [IO.File]::WriteAllText((Join-Path $probeSource ('config/' + $probeFile)), 'TASK-0032 probe fixture' + [Environment]::NewLine)
         }
         foreach ($probeFile in @('package.json', 'package-lock.json')) {
@@ -329,6 +330,10 @@ $lines.Add('installroot=' + $InstallRoot)
 if ($env:AIH_SETUP_EXIT_RECORDER) { [System.IO.File]::WriteAllLines($env:AIH_SETUP_EXIT_RECORDER, $lines) }
 '@
         [IO.File]::WriteAllText((Join-Path $probeSource 'scripts/Complete-Install.ps1'), $stubCompleteInstall, [Text.UTF8Encoding]::new($false))
+        $nestedFixtures = @('scripts/Engineering/fixture.ps1', 'tests/lib/fixture.cjs')
+        foreach ($relativePath in $nestedFixtures) {
+            [IO.File]::WriteAllText((Join-Path $probeSource $relativePath), 'nested installer fixture')
+        }
         $exitRecorderFile = Join-Path $exitProbeRoot 'recorder.txt'
         [IO.File]::WriteAllText($exitRecorderFile, '')
         $savedExitRecorder = $env:AIH_SETUP_EXIT_RECORDER
@@ -349,6 +354,12 @@ if ($env:AIH_SETUP_EXIT_RECORDER) { [System.IO.File]::WriteAllLines($env:AIH_SET
         $probeText = (@($probeOutput) -join ' ')
         if ($probeExit -ne 0) {
             throw ('FAIL: Setup.ps1 must complete after a succeeding PowerShell .ps1 composition invocation (exit ' + $probeExit + '): ' + $probeText)
+        }
+        foreach ($relativePath in $nestedFixtures) {
+            $installedFixture = Join-Path $probeInstall $relativePath
+            if ([IO.File]::ReadAllText($installedFixture) -ne 'nested installer fixture') {
+                throw "FAIL: Windows setup did not preserve $relativePath"
+            }
         }
         $exitRecorded = @(Get-Content -LiteralPath $exitRecorderFile)
         if ($exitRecorded.Count -lt 2) { throw 'FAIL: the stub install composition did not run (recorder empty).' }
@@ -881,11 +892,10 @@ if (-not $compositionText.Contains("'OpenCode-SessionHeader.cjs'")) { throw 'FAI
 $homePatchText = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent (Split-Path -Parent $completeInstallPath)) 'config/home.cordis.patch.yml')
 if (-not $homePatchText.Contains('nexus-opencode-session-header')) { throw 'FAIL: the home patch must mount the OpenCode session header plugin.' }
 Write-Host 'PASS: Complete-Install publishes the supported x-opencode-session header plugin (no substrate patch)'
-# TASK-0009: Windows Setup.ps1 must publish top-level .cjs patch appliers
-# into the installed scripts tree (Linux setup.sh copies scripts/
-# recursively); otherwise Complete-Install cannot patch on Windows.
-if (-not $setupText.Contains("'.ps1', '.mjs', '.cjs'")) { throw 'FAIL: Setup.ps1 must publish top-level .cjs installer modules (substrate patch appliers) for Windows/Linux parity.' }
-Write-Host 'PASS: Setup.ps1 publishes .cjs installer modules for Windows/Linux install parity'
+$installedClosureTool = Join-Path $InstallRoot 'scripts/MusePresetDependencyClosure.cjs'
+if (-not (Test-Path -LiteralPath $installedClosureTool -PathType Leaf)) {
+    throw 'FAIL: the installed tree lacks its .cjs closure tool.'
+}
 Write-Host 'PASS: Complete-Install atomically builds and validates the aih-muse plane with no delegation surface'
 
 $musePresetMetaPath = Join-Path $InstallRoot 'config/preset-muse.yml'

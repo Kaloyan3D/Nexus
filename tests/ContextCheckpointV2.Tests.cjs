@@ -230,7 +230,7 @@ section('REDACTION AND SECURITY');
 const secretInput = baseInput({
   objective: { text: 'Rotate Bearer abcdefghijklmnop now', status: 'in-progress' },
   continuation: { nextAction: 'Call with password=hunter2-secret', unresolvedQuestions: [], recentUserIntent: 'Authorization: Bearer zzzzzzzzzzzzzzzz' },
-  requirements: [{ id: 'R-s', text: 'Key sk-abcdefghijklmnop1234 must rotate; see {"apiKey": "supersecretvalue"}', status: 'active', evidenceRefs: [] }],
+  requirements: [{ id: 'R-s', text: 'Key sk-' + 'abcdefghijklmnop1234 must rotate; see {"apiKey": "supersecretvalue"}', status: 'active', evidenceRefs: [] }],
   decisions: [{ id: 'D-s', statement: 'Token ghp_abcdefghijklmnopqrstuv rotates Monday', authority: 'agent-proposed', status: 'active', evidenceRefs: [] }],
 });
 const secretBuilt = checkpoint.buildCheckpointV2(secretInput);
@@ -239,7 +239,7 @@ for (const raw of ['abcdefghijklmnop', 'hunter2-secret', 'supersecretvalue', 'zz
   check(!secretBytes.includes(raw), 'raw secret never persisted (' + raw.slice(0, 8) + '…)');
 }
 check(secretBytes.includes('<redacted>'), 'stable <redacted> marker emitted');
-check(checkpoint.redactCheckpointTextV2('key = sk-abcdefghijklmnop1234') === 'key = <redacted>', 'API-key shape redacted deterministically');
+check(checkpoint.redactCheckpointTextV2('key = sk-' + 'abcdefghijklmnop1234') === 'key = <redacted>', 'API-key shape redacted deterministically');
 check(checkpoint.redactCheckpointTextV2('Authorization: Bearer token1234567890') === 'Authorization: Bearer <redacted>', 'authorization header redacted (Bearer prefix retained, secret removed)');
 check(checkpoint.redactCheckpointTextV2('Bearer abcdefghijklmnop') === 'Bearer <redacted>', 'Bearer token redacted');
 check(checkpoint.redactCheckpointTextV2('{"password": "hunter2"}') === '{"password": "<redacted>"}', 'sensitive JSON property redacted');

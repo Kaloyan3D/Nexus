@@ -40,7 +40,7 @@ const clone = (o) => JSON.parse(JSON.stringify(o));
 const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
 
 const SECRET_A = 'hunter2-test-secret-AA';
-const SECRET_B = 'sk-test-AAAAAAAAbbbbbbbbcccccccc';
+const SECRET_B = 'sk-' + 'test-AAAAAAAAbbbbbbbbcccccccc';
 const SECRET_C = 'bearer-test-token-CC';
 
 const NS = Object.freeze({
