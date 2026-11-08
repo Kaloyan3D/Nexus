@@ -296,7 +296,7 @@ if ($runningOnWindows) {
             (Join-Path $probeInstall 'app/node_modules/@deepseek-ai/dsh/lib'))) {
             New-Item -ItemType Directory -Force -Path $probeDirectory | Out-Null
         }
-        foreach ($probeFile in @('setup.ps1', 'README.md', 'SECURITY.md', '.gitignore', '.gitattributes', '.env.example')) {
+        foreach ($probeFile in @('setup.sh', 'setup.ps1', 'README.md', 'SECURITY.md', '.gitignore', '.gitattributes', '.env.example')) {
             [IO.File]::WriteAllText((Join-Path $probeSource $probeFile), 'TASK-0032 probe fixture' + [Environment]::NewLine)
         }
         # Use the existing pinned Node for the closure CLI stub; provisioning

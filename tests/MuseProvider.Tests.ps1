@@ -157,7 +157,7 @@ try{
     }
     Assert-Aih (@($secretLeaks).Count -eq 0) '5.1: no committed config contains key material'
     $envExample=Get-Content -Raw (Join-Path $InstallRoot '.env.example')
-    Assert-Aih ($envExample -match '(?m)^MODEL_API_KEY=s*$') '5.2: .env.example carries the MODEL_API_KEY name reference with an empty value'
+    Assert-Aih ($envExample -match '(?m)^MODEL_API_KEY=[ \t]*\r?$') '5.2: .env.example carries the MODEL_API_KEY name reference with an empty value'
     $museDoc=Get-Content -Raw -Encoding UTF8 (Join-Path $InstallRoot 'config/muse-profiles.json')|ConvertFrom-Json
     $museText=$museDoc|ConvertTo-Json -Depth 10
     Assert-Aih (-not$museText.Contains('apiKeyEnv')-and-not$museText.Contains('baseURL')) '5.3: muse-profiles.json carries no provider truth (no apiKeyEnv, no baseURL — provider config stays in settings.yaml)'

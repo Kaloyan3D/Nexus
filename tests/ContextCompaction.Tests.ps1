@@ -258,7 +258,7 @@ try {
     $raw = Get-Content -Raw -Encoding UTF8 -LiteralPath $checkpoint.path
     Assert-Aih (-not $raw.Contains($secret)) 'api-key-shaped secret never lands in the checkpoint'
     Assert-Aih (-not $raw.Contains('supersecretvalue123')) 'password-shaped secret never lands in the checkpoint'
-    Assert-Aih ($raw.Contains('<redacted>')) 'redaction marker survives'
+    Assert-Aih (([regex]::Unescape($raw)).Contains('<redacted>')) 'redaction marker survives'
 } finally { if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force } }
 
 # == 22/23. PATH BEHAVIOR: LINUX plus PLATFORM-NEUTRAL SERIALIZATION ==========

@@ -23,9 +23,11 @@ function Get-AihFreeTcpPort {
 
 function New-AihStartupFixture([string]$Name) {
     $root = Join-Path ([IO.Path]::GetTempPath()) ('aih-startup-provider-' + $Name + '-' + [guid]::NewGuid().ToString('N'))
+    Write-Host "STARTUP [$Name] create fixture $root"
     foreach ($directory in @('scripts','config','data','logs','runtime/node','app/node_modules/@deepseek-ai/dsh/lib')) {
         New-Item -ItemType Directory -Path (Join-Path $root $directory) -Force | Out-Null
     }
+    Write-Host "STARTUP [$Name] copy scripts and runtime"
     Copy-Item -Path (Join-Path $InstallRoot 'scripts/*') -Destination (Join-Path $root 'scripts') -Recurse
     Copy-Item -LiteralPath (Join-Path $InstallRoot 'config/routing-policy.json') -Destination (Join-Path $root 'config/routing-policy.json')
     Copy-Item -LiteralPath (Join-Path $InstallRoot 'config/settings.yaml') -Destination (Join-Path $root 'data/nexus-settings.yaml')
@@ -35,12 +37,7 @@ function New-AihStartupFixture([string]$Name) {
 
     $webPort = Get-AihFreeTcpPort
     $oauthPort = Get-AihFreeTcpPort
-    # Production intentionally owns port 3080. Give each isolated fixture its
-    # own port without changing the launcher's production port contract.
-    $fixtureLauncher = Join-Path $root 'scripts/aih.ps1'
-    $fixtureLauncherText = Get-Content -Raw -LiteralPath $fixtureLauncher
-    $fixtureLauncherText = $fixtureLauncherText.Replace("@(`$layout.Dsh, 'web', '--no-open', '--port', '3080')", "@(`$layout.Dsh, 'web', '--no-open', '--port', '$webPort')")
-    [IO.File]::WriteAllText($fixtureLauncher, $fixtureLauncherText, [Text.UTF8Encoding]::new($false))
+    Write-Host "STARTUP [$Name] fixture ports allocated"
     [ordered]@{
         HarnessVersion = 'startup-provider-test'
         OAuthBaseUrl = "http://127.0.0.1:$oauthPort/v1"
@@ -73,7 +70,7 @@ const server = http.createServer((request, response) => {
 server.listen(port, '127.0.0.1', () => console.log('dsh web: http://127.0.0.1:' + port))
 '@
     Set-Content -LiteralPath (Join-Path $root 'app/node_modules/@deepseek-ai/dsh/lib/bin.js') -Value $fakeDsh -Encoding UTF8
-    return [pscustomobject]@{ Root = $root; Url = "http://127.0.0.1:$webPort" }
+    return [pscustomobject]@{ Root = $root; Port = $webPort; Url = "http://127.0.0.1:$webPort" }
 }
 
 function Stop-AihFixtureProcess([string]$Root) {
@@ -83,11 +80,41 @@ function Stop-AihFixtureProcess([string]$Root) {
         $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
         $process = Get-Process -Id ([int]$state.Pid) -ErrorAction SilentlyContinue
         $expected = [IO.Path]::GetFullPath((Get-AihLayout $Root).Node)
-        if ($null -ne $process -and [IO.Path]::GetFullPath($process.Path) -eq $expected) {
-            Stop-Process -Id $process.Id -Force
+        if ($null -ne $process -and $state.ProcessStartedAtUtc -and
+            (Test-AihTrackedProcessIdentity -Process $process -State $state -ExpectedExecutable $expected)) {
+            $process.Kill()
             $null = $process.WaitForExit(5000)
         }
     } catch { }
+}
+
+function Start-AihStartupLauncher {
+    param($Fixture, [string]$Stage, [string]$ScriptPath, [string[]]$Arguments)
+    $logRoot = if ($env:DSH_REPORTS) { Join-Path $env:DSH_REPORTS 'startup-provider' } else { $Fixture.Root }
+    New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+    $stdout = Join-Path $logRoot "$Stage.out.log"
+    $stderr = Join-Path $logRoot "$Stage.err.log"
+    $quote = { param([string]$Value) "'" + $Value.Replace("'", "''") + "'" }
+    $command = '& ' + (& $quote $ScriptPath) + ' ' + (($Arguments | ForEach-Object { if ($_ -cmatch '^-[A-Za-z]+$') { $_ } else { & $quote $_ } }) -join ' ')
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    Write-Host "STARTUP [$Stage] launch (stdout $stdout)"
+    $process = Start-Process -FilePath $aihPsHost -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',$encoded) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    Write-Host "STARTUP [$Stage] launched PID $($process.Id)"
+    return @{ Process=$process; Stdout=$stdout; Stderr=$stderr }
+}
+
+function Invoke-AihBoundedStartupLauncher($Fixture, [string]$Stage) {
+    $launcher = Start-AihStartupLauncher $Fixture $Stage (Join-Path $Fixture.Root 'scripts/aih.ps1') @(
+        '-InstallRoot', $Fixture.Root, '-Preset', 'aih-engineering', '-Port', [string]$Fixture.Port)
+    try {
+        if (-not $launcher.Process.WaitForExit(25000)) {
+            throw "STARTUP [$Stage] launcher exceeded its 25-second exit deadline. See $($launcher.Stderr)"
+        }
+        return $launcher.Process.ExitCode
+    } finally {
+        if (-not $launcher.Process.HasExited) { $launcher.Process.Kill(); [void]$launcher.Process.WaitForExit(5000) }
+        $launcher.Process.Dispose()
+    }
 }
 
 function Invoke-AihStartupScenario([string]$Name, [ValidateSet('unreachable','absent')][string]$DeepSeekState, [string]$Preset) {
@@ -96,7 +123,7 @@ function Invoke-AihStartupScenario([string]$Name, [ValidateSet('unreachable','ab
     $probeMarker = Join-Path $fixture.Root 'data/deepseek-model-probe.txt'
     $wrapper = Join-Path $fixture.Root 'invoke-aih.ps1'
     $wrapperText = @'
-param([string]$Root,[string]$Preset,[string]$DeepSeekState,[string]$ProbeMarker)
+param([string]$Root,[string]$Preset,[string]$DeepSeekState,[string]$ProbeMarker,[int]$Port)
 function Invoke-RestMethod {
     param([string]$Uri, $Headers, [int]$TimeoutSec, [string]$Method, [string]$ContentType, [string]$Body)
     if ($Uri -eq 'https://api.deepseek.com/models') {
@@ -107,17 +134,18 @@ function Invoke-RestMethod {
     $cmdlet = Get-Command Invoke-RestMethod -CommandType Cmdlet
     & $cmdlet @PSBoundParameters
 }
-try { & (Join-Path $Root 'scripts/aih.ps1') -InstallRoot $Root -Preset $Preset }
+try { & (Join-Path $Root 'scripts/aih.ps1') -InstallRoot $Root -Preset $Preset -Port $Port }
 catch { Write-Error $_; exit 1 }
 '@
     Set-Content -LiteralPath $wrapper -Value $wrapperText -Encoding UTF8
     $savedKey = $env:DEEPSEEK_API_KEY
     try {
         $env:DEEPSEEK_API_KEY = 'startup-provider-test-key-not-real'
-        $launcherOut = Join-Path $fixture.Root 'launcher.out.log'
-        $launcherErr = Join-Path $fixture.Root 'launcher.err.log'
-        $arguments = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$wrapper,'-Root',$fixture.Root,'-Preset',$Preset,'-DeepSeekState',$DeepSeekState,'-ProbeMarker',$probeMarker)
-        $launcher = Start-Process -FilePath $aihPsHost -ArgumentList $arguments -PassThru -RedirectStandardOutput $launcherOut -RedirectStandardError $launcherErr
+        $launch = Start-AihStartupLauncher $fixture $Name $wrapper @(
+            '-Root', $fixture.Root, '-Preset', $Preset, '-DeepSeekState', $DeepSeekState,
+            '-ProbeMarker', $probeMarker, '-Port', [string]$fixture.Port)
+        $launcher = $launch.Process
+        Write-Host "STARTUP [$Name] poll readiness"
         $deadline = [DateTime]::UtcNow.AddSeconds(20)
         $state = $null
         while ([DateTime]::UtcNow -lt $deadline) {
@@ -130,24 +158,24 @@ catch { Write-Error $_; exit 1 }
             if ($launcher.HasExited) { break }
             Start-Sleep -Milliseconds 100
         }
-        $output = @()
-        if (Test-Path -LiteralPath $launcherOut) { $output += @(Get-Content -LiteralPath $launcherOut) }
-        if (Test-Path -LiteralPath $launcherErr) { $output += @(Get-Content -LiteralPath $launcherErr) }
-        Assert-Aih ($null -ne $state -and $state.Status -eq 'READY') "${Name}: aih starts when DeepSeek is $DeepSeekState ($($output -join ' | '))"
+        Write-Host "STARTUP [$Name] readiness poll ended"
+        Assert-Aih ($null -ne $state -and $state.Status -eq 'READY') "${Name}: aih starts when DeepSeek is $DeepSeekState (logs $($launch.Stdout), $($launch.Stderr))"
         Assert-Aih (-not (Test-Path -LiteralPath $probeMarker)) "${Name}: startup never calls the Direct DeepSeek model-list endpoint"
         Assert-Aih ($state.Status -eq 'READY') "${Name}: startup reaches READY"
+        Write-Host "STARTUP [$Name] wait for launcher exit"
         Assert-Aih ($launcher.WaitForExit(5000)) "${Name}: launcher exits after readiness"
         $server = Get-Process -Id ([int]$state.Pid) -ErrorAction SilentlyContinue
         Assert-Aih ($null -ne $server -and (Test-AihTrackedProcessIdentity -Process $server -State $state -ExpectedExecutable (Get-AihLayout $fixture.Root).Node)) "${Name}: READY PID keeps the original Node identity after launcher exit"
         Assert-Aih (Test-AihEndpoint -Uri $fixture.Url -TimeoutSec 2) "${Name}: HTTP remains available after launcher exit"
-        $fixture | Add-Member -NotePropertyName LauncherProcess -NotePropertyValue $launcher
+        $launcher.Dispose()
         return $fixture
     }
     catch {
         Stop-AihFixtureProcess $fixture.Root
         if ($null -ne $launcher) {
             $launcher.Refresh()
-            if (-not $launcher.HasExited) { Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue }
+            if (-not $launcher.HasExited) { $launcher.Kill(); [void]$launcher.WaitForExit(5000) }
+            $launcher.Dispose()
         }
         Remove-Item -LiteralPath $fixture.Root -Recurse -Force
         throw
@@ -171,38 +199,33 @@ try {
         @{ fixture = $absent; provider = 'local-tool'; label = 'local' }
     )) {
         $body = @{ provider = $case.provider; model = 'fixture-model' } | ConvertTo-Json
-        $response = Invoke-RestMethod -Method Post -Uri ($case.fixture.Url + '/execute') -ContentType 'application/json' -Body $body
+        $response = Invoke-RestMethod -UseBasicParsing -TimeoutSec 5 -Method Post -Uri ($case.fixture.Url + '/execute') -ContentType 'application/json' -Body $body
         Assert-Aih ($response.ok -and $response.provider -eq $case.provider) "$($case.label) execution remains usable without DeepSeek startup availability"
     }
 
     $deepSeekBody = @{ provider = 'flash-high-direct'; model = 'deepseek-v4-flash' } | ConvertTo-Json
     $scopedError = $null
-    try { $null = Invoke-WebRequest -UseBasicParsing -Method Post -Uri ($absent.Url + '/execute') -ContentType 'application/json' -Body $deepSeekBody }
+    try { $null = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Method Post -Uri ($absent.Url + '/execute') -ContentType 'application/json' -Body $deepSeekBody }
     catch { $scopedError = $_ }
     Assert-Aih ($null -ne $scopedError -and [int]$scopedError.Exception.Response.StatusCode -eq 404) 'selecting an unavailable DeepSeek model returns a scoped execution error'
-    $health = Invoke-RestMethod -Uri $absent.Url
+    $health = Invoke-RestMethod -UseBasicParsing -TimeoutSec 5 -Uri $absent.Url
     Assert-Aih ($health.status -eq 'ready') 'the Harness remains alive after the unavailable DeepSeek execution'
 
     $originalPid = [int](Get-Content -Raw (Join-Path $absent.Root 'data/aih-state.json') | ConvertFrom-Json).Pid
-    $reuseOutput = & $aihPsHost -NoProfile -File (Join-Path $absent.Root 'scripts/aih.ps1') -InstallRoot $absent.Root -Preset 'aih-engineering' 2>&1
+    $reuseExit = Invoke-AihBoundedStartupLauncher $absent 'reuse'
     $reusedState = Get-Content -Raw (Join-Path $absent.Root 'data/aih-state.json') | ConvertFrom-Json
-    Assert-Aih ($LASTEXITCODE -eq 0 -and $reusedState.Status -eq 'READY' -and [int]$reusedState.Pid -eq $originalPid) 'aih reuses the verified READY Web UI process'
+    Assert-Aih ($reuseExit -eq 0 -and $reusedState.Status -eq 'READY' -and [int]$reusedState.Pid -eq $originalPid) 'aih reuses the verified READY Web UI process'
 
     Stop-AihFixtureProcess $absent.Root
-    $restartOutput = & $aihPsHost -NoProfile -File (Join-Path $absent.Root 'scripts/aih.ps1') -InstallRoot $absent.Root -Preset 'aih-engineering' 2>&1
+    $restartExit = Invoke-AihBoundedStartupLauncher $absent 'restart'
     $restartedState = Get-Content -Raw (Join-Path $absent.Root 'data/aih-state.json') | ConvertFrom-Json
-    Assert-Aih ($LASTEXITCODE -eq 0 -and $restartedState.Status -eq 'READY' -and [int]$restartedState.Pid -ne $originalPid -and (Test-AihEndpoint -Uri $absent.Url -TimeoutSec 2)) 'aih replaces stale READY state with a new live Web UI process'
+    Assert-Aih ($restartExit -eq 0 -and $restartedState.Status -eq 'READY' -and [int]$restartedState.Pid -ne $originalPid -and (Test-AihEndpoint -Uri $absent.Url -TimeoutSec 2)) 'aih replaces stale READY state with a new live Web UI process'
 
     Write-Host "RESULT: $passed startup/provider isolation assertions passed."
 }
 finally {
     foreach ($fixture in $fixtures) {
         Stop-AihFixtureProcess $fixture.Root
-        if ($null -ne $fixture.PSObject.Properties['LauncherProcess']) {
-            $launcher = $fixture.LauncherProcess
-            $launcher.Refresh()
-            if (-not $launcher.HasExited) { Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue }
-        }
         if (Test-Path -LiteralPath $fixture.Root) { Remove-Item -LiteralPath $fixture.Root -Recurse -Force }
     }
 }

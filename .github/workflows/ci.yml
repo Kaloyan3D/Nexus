@@ -62,7 +62,9 @@ jobs:
       - name: JavaScript, shell, routing and CCv2 source contracts
         run: bash .github/ci/check-source.sh
       - name: Verify fail-closed report validation
-        run: node .github/ci/test-harness-summary.cjs
+        run: |
+          node .github/ci/test-harness-summary.cjs
+          node .github/ci/test-suite-process.cjs
       - name: Parse PowerShell sources
         shell: pwsh
         run: ./.github/ci/check-powershell.ps1
@@ -73,12 +75,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: Windows x64
+          - platform: Windows x64 PowerShell 5.1
             runner: windows-2022
+            windows_host: windows-powershell
+            artifact: Windows-X64-PS51
+          - platform: Windows x64 PowerShell 7
+            runner: windows-2022
+            windows_host: pwsh
+            artifact: Windows-X64-PS7
           - platform: Linux x64
             runner: ubuntu-24.04
+            artifact: Linux-X64
           - platform: macOS ARM64
             runner: macos-15
+            artifact: macOS-ARM64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     env:
@@ -181,10 +191,12 @@ jobs:
           "$AIH_USER_BIN/aih-doctor" -Offline
 
       - name: Installed production harness on Windows PowerShell 5.1
-        if: runner.os == 'Windows' && !cancelled() && steps.windows_install.outcome == 'success'
+        if: matrix.windows_host == 'windows-powershell' && !cancelled() && steps.windows_install.outcome == 'success'
         shell: powershell
         run: |
           $env:PATH = "$env:DSH_ROOT/runtime/node;$env:PATH"
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
           Set-Location $env:RUNNER_TEMP
           & "$env:DSH_ROOT/bin/aih-test.cmd" -Lane production -ContinueOnFailure -ReportPath "$env:DSH_REPORTS/production.json"
           exit $LASTEXITCODE
@@ -201,15 +213,17 @@ jobs:
           "$AIH_USER_BIN/aih-test" -Lane production -ContinueOnFailure -ReportPath "$DSH_REPORTS/production.json"
 
       - name: Installed production harness on Windows PowerShell 7
-        if: runner.os == 'Windows' && !cancelled() && steps.windows_install.outcome == 'success'
+        if: matrix.windows_host == 'pwsh' && !cancelled() && steps.windows_install.outcome == 'success'
         shell: pwsh
         run: |
           $env:PATH = "$env:DSH_ROOT/runtime/node;$env:PATH"
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
           $env:AIH_TEST_PWSH = (Get-Command pwsh).Source
           Write-Host "Runner PowerShell version $($PSVersionTable.PSVersion)"
           Set-Location $env:RUNNER_TEMP
           $harness = "$env:DSH_ROOT/scripts/Test-Harness.ps1"
-          & $env:AIH_TEST_PWSH -NoProfile -File $harness -InstallRoot $env:DSH_ROOT -PowerShellExecutable $env:AIH_TEST_PWSH -Lane production -ContinueOnFailure -ReportPath "$env:DSH_REPORTS/pwsh7.json"
+          & $env:AIH_TEST_PWSH -NoProfile -File $harness -InstallRoot $env:DSH_ROOT -PowerShellExecutable $env:AIH_TEST_PWSH -Lane production -ContinueOnFailure -ReportPath "$env:DSH_REPORTS/production.json"
           exit $LASTEXITCODE
 
       - name: Run opt-in CCv2 laboratory from source
@@ -229,10 +243,6 @@ jobs:
         if: '!cancelled()'
         shell: pwsh
         run: ./.github/ci/harness-summary.ps1 -ReportPath "$env:DSH_REPORTS/production.json"
-      - name: Validate and summarize Windows PowerShell 7 report
-        if: runner.os == 'Windows' && !cancelled()
-        shell: pwsh
-        run: ./.github/ci/harness-summary.ps1 -ReportPath "$env:DSH_REPORTS/pwsh7.json"
       - name: Validate and summarize CCv2 lab report
         if: runner.os == 'Linux' && !cancelled() && inputs.ccv2_lab
         shell: pwsh
@@ -241,7 +251,7 @@ jobs:
         if: '!cancelled()'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: dsh-ci-${{ runner.os }}-${{ runner.arch }}
+          name: dsh-ci-${{ matrix.artifact }}
           path: ${{ env.DSH_REPORTS }}
           retention-days: 7
           if-no-files-found: warn

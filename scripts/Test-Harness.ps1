@@ -2,6 +2,7 @@
 param(
     [string]$InstallRoot,
     [string]$ReportPath,
+    [ValidateRange(1, 3600)][int]$SuiteTimeoutSeconds = 480,
     # TASK-0024 audit mode: run EVERY suite even after failures, then exit
     # non-zero if any suite failed. Default behavior stays fail-fast.
     [switch]$ContinueOnFailure,
@@ -283,6 +284,13 @@ foreach ($suite in $suites) {
     $commandText = '"' + $executable + '" ' + (($arguments | ForEach-Object { '"' + ([string]$_).Replace('"','\"') + '"' }) -join ' ')
     $rawLines.Add(('===== SUITE {0} =====' -f $suite.name)); $rawLines.Add($commandText)
     Write-Host ('===== SUITE {0} =====' -f $suite.name)
+    if ($ReportPath) {
+        $progressPath = [IO.Path]::ChangeExtension([IO.Path]::GetFullPath($ReportPath), '.progress.json')
+        Write-AihAtomicJson -Path $progressPath -Depth 8 -Value @{
+            currentSuite = $suite.name; currentStartedAtUtc = $suiteStarted.ToString('o')
+            completed = @($suiteResults); expected = $suites.Count
+        }
+    }
     # A05H H4: optional per-suite process environment (e.g. the CCV2 live-host
     # release gate). Applies process-scoped only and restores every variable
     # afterwards; suites without 'env' behave exactly as before.
@@ -300,17 +308,26 @@ foreach ($suite in $suites) {
     $savedPreference = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try {
         $application = Get-Command -Name $executable -CommandType Application -ErrorAction Stop
-        $output = @(& $application @arguments 2>&1 | ForEach-Object { [string]$_ })
+        $watchdog = Join-Path $PSScriptRoot 'Test-SuiteProcess.cjs'
+        $timeout = if ($suite.name -eq 'StartupProviderIsolation') { [Math]::Min(150, $SuiteTimeoutSeconds) } else { $SuiteTimeoutSeconds }
+        $output = @(& $researchNode $watchdog $timeout $application.Source @arguments 2>&1 | ForEach-Object {
+            $line = [string]$_
+            Write-Host $line
+            $rawLines.Add($line)
+            $line
+        })
         $suiteExitCode = $LASTEXITCODE
+        if ($output -cmatch '^NEXUS HARNESS PROCESS INCOMPLETE: ') { $suiteExitCode = $null }
     } catch {
         $output = @([string]$_)
+        Write-Host $output[0]
+        $rawLines.Add($output[0])
         $suiteExitCode = $null
     }
     finally { $ErrorActionPreference = $savedPreference }
     foreach ($envName in @($suiteEnvPrior.Keys)) {
         [System.Environment]::SetEnvironmentVariable([string]$envName, $suiteEnvPrior[$envName])
     }
-    foreach ($line in $output) { Write-Host $line; $rawLines.Add($line) }
     $suiteFinished = [DateTime]::UtcNow
     $outcome = Get-AihHarnessSuiteOutcome -Lines $output -ExitCode $suiteExitCode -CompletionMarker $suite['completionMarker']
     $suiteResults.Add([ordered]@{name=$suite.name;verificationScope=$verificationScope;command=$commandText;script=$suite.script.Replace('\','/');startedAtUtc=$suiteStarted.ToString('o');finishedAtUtc=$suiteFinished.ToString('o');durationMs=[Math]::Max(0,[int64]($suiteFinished-$suiteStarted).TotalMilliseconds);exitCode=$suiteExitCode;passed=$outcome.passed;failed=$outcome.failed;result=$outcome.result;skipEvidence=$outcome.skipEvidence;completionVerified=$outcome.completionVerified})
