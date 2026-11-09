@@ -5,12 +5,12 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
-const { createBoundaryFixture } = require('./lib/DeepSeekBoundaryFixture.cjs')
+const os = require('node:os')
+const { spawnSync } = require('node:child_process')
+const { createBoundaryFixture, removeBoundaryFixture } = require('./lib/DeepSeekBoundaryFixture.cjs')
 
-async function main() {
-  const fault = process.argv[2]
-  assert([undefined, 'startup', 'bypass'].includes(fault), 'unknown fixture fault')
-  const fixture = await createBoundaryFixture(process.env.NEXUS_RUNTIME_ROOT, fault)
+async function runHost(base, fault) {
+  const fixture = await createBoundaryFixture(process.env.NEXUS_RUNTIME_ROOT, base, fault)
   try {
     console.log('DSH boundary fixture booted: ' + fixture.dshVersion)
     const records = await fullMatrix(fixture)
@@ -20,6 +20,22 @@ async function main() {
     }
   } finally { await fixture.dispose() }
   assert.equal(fixture.outboundAttempts(), 0, 'DSH attempted an outbound connection')
+}
+
+function main(fault) {
+  assert([undefined, 'startup', 'bypass'].includes(fault), 'unknown fixture fault')
+  assert(process.env.NEXUS_RUNTIME_ROOT, 'NEXUS_RUNTIME_ROOT must name a composed DSH installation')
+  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'nexus-boundary-'))
+  let result
+  try {
+    result = spawnSync(process.execPath, [__filename, '--worker', base, ...(fault ? [fault] : [])],
+      { stdio: 'inherit', windowsHide: true })
+    assert.ifError(result.error)
+  } finally {
+    console.log('DSH boundary worker exited; removing the owned fixture')
+    removeBoundaryFixture(base)
+  }
+  assert.equal(result.status, 0, 'boundary worker failed')
   console.log('PASS: actual host security matrix 29 cases; zero outbound socket attempts or provider dispatches')
   console.log('NEXUS SUITE COMPLETE: DeepSeekRequestBoundaryHost')
 }
@@ -172,7 +188,17 @@ async function fullMatrix({ base, install, data, createSession, probe: dispatch,
   return records
 }
 
-main().catch(error => {
-  console.error('FAIL: actual DeepSeek host boundary: ' + (error.stack || error))
-  process.exitCode = 1
-})
+const [mode, base, fault] = process.argv.slice(2)
+if (mode === '--worker') {
+  // Flush the worker's output before exiting to release all host OS handles.
+  runHost(base, fault).then(
+    () => process.stdout.write('', () => process.exit(0)),
+    error => process.stderr.write('FAIL: actual DeepSeek host boundary: ' + (error.stack || error) + '\n', () => process.exit(1)),
+  )
+} else {
+  try { main(mode) }
+  catch (error) {
+    console.error('FAIL: actual DeepSeek host boundary: ' + (error.stack || error))
+    process.exitCode = 1
+  }
+}

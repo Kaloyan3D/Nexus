@@ -2,7 +2,6 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { once } = require('node:events');
@@ -13,10 +12,9 @@ const { createRequire } = require('node:module');
 const { pathToFileURL } = require('node:url');
 const { resolveAihPowerShellHost } = require('./AihTestTransport.cjs');
 
-async function createBoundaryFixture(installRoot, fault) {
+async function createBoundaryFixture(installRoot, base, fault) {
   if (!installRoot) throw new Error('NEXUS_RUNTIME_ROOT must name a composed DSH installation');
   const source = fs.realpathSync(installRoot);
-  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'nexus-boundary-'));
   const install = path.join(base, 'install');
   const data = path.join(install, 'data');
   let booted;
@@ -40,22 +38,6 @@ async function createBoundaryFixture(installRoot, fault) {
       Object.assign(process.env, initialEnvironment);
       process.chdir(initialCwd);
       Socket.prototype.connect = originalConnect;
-      // Remove the fixture-owned links themselves before any recursive
-      // deletion. In particular the Windows junction targets are the shared
-      // test installation and must never be part of the cleanup traversal.
-      for (const item of ['app', 'runtime']) {
-        const link = path.join(install, item);
-        const stat = fs.lstatSync(link, { throwIfNoEntry: false });
-        if (!stat) continue;
-        assert(stat.isSymbolicLink(), 'expected fixture-owned link: ' + link);
-        await fs.promises.unlink(link);
-      }
-      try {
-        await fs.promises.rm(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
-      } catch (cause) {
-        const remaining = fs.readdirSync(base, { recursive: true }).slice(0, 20);
-        throw new Error('Boundary fixture cleanup failed; remaining entries: ' + JSON.stringify(remaining), { cause });
-      }
     }
   }
 
@@ -209,4 +191,16 @@ async function createBoundaryFixture(installRoot, fault) {
   }
 }
 
-module.exports = { createBoundaryFixture };
+function removeBoundaryFixture(base) {
+  // This runs only after the host worker has exited and released OS handles.
+  for (const item of ['app', 'runtime']) {
+    const link = path.join(base, 'install', item);
+    const stat = fs.lstatSync(link, { throwIfNoEntry: false });
+    if (!stat) continue;
+    assert(stat.isSymbolicLink(), 'expected fixture-owned link: ' + link);
+    fs.unlinkSync(link);
+  }
+  fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+}
+
+module.exports = { createBoundaryFixture, removeBoundaryFixture };

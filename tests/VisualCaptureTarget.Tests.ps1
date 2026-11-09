@@ -24,8 +24,8 @@ param()
 $argsList=@($args)
 if($argsList.Count-ge2-and$argsList[0]-eq'-s'){$argsList=@($argsList|Select-Object -Skip 2)}
 $command=$argsList-join' '
-[IO.File]::AppendAllText($env:AIH_FAKE_ADB_LOG,$command+[Environment]::NewLine)
 if($argsList[0]-eq'devices'){ "List of devices attached`nemulator-5554`tdevice"; exit 0 }
+[IO.File]::AppendAllText($env:AIH_FAKE_ADB_LOG,$command+[Environment]::NewLine)
 if($command-like'shell dumpsys activity activities*'){
   Start-Sleep -Milliseconds 100
   $pkg=(Get-Content -Raw $env:AIH_FAKE_ADB_STATE).Trim()
