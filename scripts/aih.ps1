@@ -24,6 +24,8 @@ $env:AIH_INSTALL_ROOT = $InstallRoot
 . (Join-Path $PSScriptRoot 'Workspace.ps1')
 if ($Port -gt 0) { $env:AIH_PORT = [string]$Port }
 $layout = Get-AihLayout $InstallRoot
+# P2-B2A: serialize launchers of this installation (held until this process exits).
+$launchLock = Enter-AihLaunchLock -Layout $layout
 $versions = Get-AihVersions $InstallRoot
 $routingPolicy = Get-AihRoutingPolicy $layout.RoutingPolicy
 $presetSource = 'command line'
@@ -101,6 +103,11 @@ if ($null -ne $runningState -and $null -ne $runningState.Pid) {
         Write-AihState -Path $layout.State -State $runningState
         throw "Refusing to reuse or stop PID $($runningState.Pid): the saved process identity is stale or does not match DSH."
     }
+    # P2-B2A: one host per installation. A live, verified host serving another
+    # address is never resumed or replaced by a launch on a different port.
+    if ($null -ne $existing -and $existingIdentityMatches -and $null -ne $runningState.PSObject.Properties['Url'] -and -not [string]::IsNullOrWhiteSpace([string]$runningState.Url) -and [string]$runningState.Url -ne $webUrl -and -not $Restart) {
+        throw "Nexus is already running for this installation at $($runningState.Url) (PID $($runningState.Pid)). Use that address, or stop it with aih-stop before starting on $webUrl."
+    }
     if ($null -eq $existing -and $runningState.Status -eq 'READY') {
         $runningState.Status = 'STOPPED'
         $runningState | Add-Member -NotePropertyName StopReason -NotePropertyValue 'Tracked Web UI process is absent.' -Force
@@ -166,6 +173,16 @@ $stdoutLog = Join-Path $layout.Logs 'dsh.out.log'
 $stderrLog = Join-Path $layout.Logs 'dsh.err.log'
 $launchTime = [DateTime]::UtcNow
 if (-not $resumingStartup) {
+    # P2-B1 single-host election: one host per canonical installation data
+    # root, whatever its port. A live owner is never displaced; an unusable
+    # probe only warns because the host Controller enforces ownership itself.
+    $ownershipProbe = Get-AihHostOwnership -Layout $layout
+    if ($ownershipProbe.State -eq 'owned') {
+        $holderPid = if ($null -ne $ownershipProbe.Holder) { $ownershipProbe.Holder.pid } else { 'unknown' }
+        throw "Another Nexus host already owns this installation (data root $($layout.Data), PID $holderPid). Reuse it, or stop it with aih-stop before starting a new one."
+    }
+    if ($ownershipProbe.State -eq 'unavailable') { Write-Warning "Nexus host ownership could not be probed ($($ownershipProbe.Reason)); the host Controller will enforce ownership at startup." }
+
     $arguments = @($layout.Dsh, 'web', '--no-open', '--port', [string]([uri]$webUrl).Port)
     # The server has a neutral runtime directory. Every actual command/file/git
     # operation resolves its cwd from the immutable session header; Nexus never
@@ -253,6 +270,26 @@ if (-not $readyIdentity -or -not $readyEndpoint) {
     Write-AihState -Path $layout.State -State $state
     throw "Nexus Web UI FAILED: $($state['FailureReason'])"
 }
+
+# P2-B1: the process we started must be the installation owner. A host that
+# lost the election refuses every engineering turn; never report it READY.
+$ownershipAtReady = $null
+for ($attempt = 0; $attempt -lt 10; $attempt++) {
+    $ownershipAtReady = Get-AihHostOwnership -Layout $layout
+    if ($ownershipAtReady.State -ne 'free') { break }
+    Start-Sleep -Milliseconds 500
+}
+$ownerPid = if ($ownershipAtReady.State -eq 'owned' -and $null -ne $ownershipAtReady.Holder) { [int]$ownershipAtReady.Holder.pid } else { $null }
+if ($ownershipAtReady.State -eq 'free' -or ($ownershipAtReady.State -eq 'owned' -and $ownerPid -ne [int]$state['Pid'])) {
+    $state['Status'] = 'FAILED'
+    $state['UpdatedAtUtc'] = [DateTime]::UtcNow.ToString('o')
+    $state['FailureReason'] = if ($ownershipAtReady.State -eq 'free') { 'The started host did not acquire installation ownership.' } else { "Installation ownership belongs to PID $ownerPid, not the started host." }
+    Write-AihState -Path $layout.State -State $state
+    if (-not $resumingStartup -and $null -ne $readyProcess) { $null = Stop-AihTrackedProcess -Process $readyProcess }
+    throw "Nexus Web UI FAILED: $($state['FailureReason'])"
+}
+if ($ownershipAtReady.State -eq 'unavailable') { Write-Warning "Nexus host ownership could not be confirmed ($($ownershipAtReady.Reason))." }
+else { $state['OwnershipEvidence'] = [ordered]@{ State = 'owned'; Pid = $ownerPid; Generation = $ownershipAtReady.Holder.generation } }
 
 $state['Status'] = 'READY'
 $state['ReadyAtUtc'] = [DateTime]::UtcNow.ToString('o')

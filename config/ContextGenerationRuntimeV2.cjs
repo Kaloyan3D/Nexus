@@ -100,6 +100,7 @@
  */
 
 const durablePolicyV2 = require('./ContextDurableMutationPolicyV2.cjs');
+const messageSource = require('./Nexus-MessageSource.cjs');
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -705,7 +706,7 @@ function generationCitationsOf(session, generation) {
   for (const event of session.events) {
     if (!event || event.type !== 'user/message') continue;
     const source = event.data && event.data.source;
-    if (!source || source.kind !== 'plugin' || source.plugin !== 'aih-controller') continue;
+    if (!messageSource.isControllerSource(source)) continue;
     if (Number(source.generation) !== Number(generation)) continue;
     if (source.form !== 'context-checkpoint' && source.form !== 'context-continuation') continue;
     cited.push(event);

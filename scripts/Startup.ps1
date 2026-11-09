@@ -215,3 +215,51 @@ function Stop-AihTrackedProcess {
     }
     return $false
 }
+
+# P2-B1: installation ownership probe. The authoritative lock is a kernel lock
+# held by the host Controller (config/nexus/host-ownership.cjs); this probe
+# only asks whether a live host holds it. Returns an object with State
+# 'free' | 'owned' | 'unavailable', Holder (informational) and Reason.
+function Get-AihHostOwnership {
+    param([Parameter(Mandatory = $true)]$Layout)
+    $probe = Join-Path $Layout.Scripts 'NexusHostProbe.cjs'
+    if (-not (Test-Path -LiteralPath $probe -PathType Leaf) -or -not (Test-Path -LiteralPath $Layout.Node -PathType Leaf)) {
+        return [pscustomobject]@{ State = 'unavailable'; Holder = $null; Reason = 'host ownership probe or pinned Node is missing' }
+    }
+    try {
+        $output = & $Layout.Node $probe $Layout.Data $Layout.App 2>$null | Select-Object -Last 1
+        $parsed = $output | ConvertFrom-Json
+        # Optional fields are absent in some states; never read a missing
+        # property (it throws under Set-StrictMode and would hide an owner).
+        $field = { param($name) if ($null -ne $parsed.PSObject.Properties[$name]) { $parsed.$name } else { $null } }
+        $state = [string](& $field 'state')
+        if ($state -notin @('free', 'owned', 'unavailable')) { return [pscustomobject]@{ State = 'unavailable'; Holder = $null; Reason = 'unexpected probe output' } }
+        return [pscustomobject]@{ State = $state; Holder = (& $field 'holder'); Reason = [string](& $field 'reason') }
+    }
+    catch {
+        return [pscustomobject]@{ State = 'unavailable'; Holder = $null; Reason = $_.Exception.Message }
+    }
+}
+
+# P2-B2A: cross-process launcher mutex. Concurrent launchers share one state
+# file (aih-state.json); without serialization a losing launcher overwrote the
+# winner's READY record and Stop lost track of the real host. The lock is an
+# exclusive open (flock on POSIX, share-deny on Windows) held by the launcher
+# process until it exits; the kernel releases it on any exit, including a
+# crash. A second launcher waits, then sees the first host and reuses it.
+function Enter-AihLaunchLock {
+    param([Parameter(Mandatory = $true)]$Layout, [int]$TimeoutSeconds = 180)
+    $directory = Join-Path $Layout.Data 'routing'
+    New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    $path = Join-Path $directory 'aih-launch.lock'
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $announced = $false
+    while ($true) {
+        try { return [IO.File]::Open($path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch {
+            if ([DateTime]::UtcNow -ge $deadline) { throw "Another Nexus launcher is still starting this installation (lock $path held for more than $TimeoutSeconds s)." }
+            if (-not $announced) { Write-Host 'Nexus: another launcher is starting this installation; waiting ...'; $announced = $true }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+}

@@ -87,7 +87,7 @@ const append = (type, data, opts) => session.append(type, data, opts);
 append('user/message', {
   role: 'user',
   content: [{ type: 'text', text: 'Controller: task TASK-0004 bound to this session.\nTask instance: task_acceptance000000000000000001\nExecution: Muse - Main Agent\nReview: not required\nCompletion authority: deterministic controller.' }],
-  source: { kind: 'plugin', plugin: 'aih-controller', form: 'controller-binding' },
+  source: { kind: 'aih-controller', plugin: 'aih-controller', form: 'controller-binding' },
 }, { surfaceOp: 'append' });
 append('user/message', {
   role: 'user',
@@ -127,7 +127,7 @@ append('assistant/message', {
 append('user/message', {
   role: 'user',
   content: [{ type: 'text', text: 'Controller: task TASK-0004 COMPLETE.\nCompletion authority: deterministic controller. Verification passed.' }],
-  source: { kind: 'plugin', plugin: 'aih-controller', form: 'controller-complete' },
+  source: { kind: 'aih-controller', plugin: 'aih-controller', form: 'controller-complete' },
 }, { surfaceOp: 'append' });
 const beforeMessages = session.deriveMessages();
 const beforeBytes = JSON.stringify(beforeMessages).length;
@@ -180,7 +180,7 @@ for (const segment of frozenSegments) {
   const node = session.append('user/message', {
     role: 'user',
     content: [{ type: 'text', text: checkpointText }],
-    source: { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', taskId: 'TASK-0004', operationId: OPERATION_ID },
+    source: { kind: 'aih-controller', plugin: 'aih-controller', form: 'context-checkpoint', taskId: 'TASK-0004', operationId: OPERATION_ID },
   }, { surfaceOp: { op: 'replace', startSeq: segment.start, endSeq: segment.end }, sourceEventSeqs: segment.sourceEventSeqs });
   appendedSeqs.push(node.seq);
 }

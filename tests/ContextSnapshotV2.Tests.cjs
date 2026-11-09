@@ -480,7 +480,7 @@ section('PARTIAL-APPLY + MID-APPLY');
     seq: 6, type: 'user/message',
     data: {
       message: { content: [{ type: 'text', text: textOp.payloadText }] },
-      source: { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId: textOp.durable.operationId, generation: 1, taskInstanceId: 'task_a05_0001' },
+      source: { kind: 'aih-controller', plugin: 'aih-controller', form: 'context-checkpoint', operationId: textOp.durable.operationId, generation: 1, taskInstanceId: 'task_a05_0001' },
     },
   };
   const shadowed = fakeSession(liveEvents.concat([landedPayload]), [0, 1, 2, 3, 6]);

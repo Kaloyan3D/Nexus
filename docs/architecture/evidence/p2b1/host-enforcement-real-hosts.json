@@ -1,0 +1,37 @@
+{
+  "hostA": {
+    "pid": 97908,
+    "port": 56867,
+    "ownership": "held",
+    "enforced": true,
+    "ready": true,
+    "problems": [],
+    "accessReason": null,
+    "bindingWrite": "written",
+    "transport": "listening"
+  },
+  "hostB": {
+    "pid": 97920,
+    "port": 56868,
+    "ownership": "contended",
+    "enforced": true,
+    "ready": false,
+    "problems": [
+      "host-ownership-contended"
+    ],
+    "accessReason": "nexus-host-ownership-contended",
+    "bindingWrite": "binding-writer-detached",
+    "transport": "none"
+  },
+  "hostC": {
+    "pid": 97935,
+    "port": 56869,
+    "ownership": "held",
+    "enforced": true,
+    "ready": true,
+    "problems": [],
+    "accessReason": null,
+    "bindingWrite": "written",
+    "transport": "listening"
+  }
+}

@@ -33,6 +33,10 @@ const PROFILES = Object.freeze({
   controller: { entries: Object.freeze(['AihController.cjs']), assets: REGISTRY_MODE_ASSETS, manifest: '.controller-preset-closure.json' },
   engineering: { entries: Object.freeze(['AihController.cjs', 'Engineering-Isolation.cjs']), assets: REGISTRY_RUNTIME_ASSETS, manifest: '.engineering-preset-closure.json' },
   deepseek: { entries: Object.freeze(['AihController.cjs', 'DeepSeek-Isolation.cjs']), assets: REGISTRY_RUNTIME_ASSETS, manifest: '.deepseek-preset-closure.json' },
+  // P1: the trusted host Nexus Controller row (one per host, not per plane).
+  // nexus/intake.cjs is an inactive contract model (P2-B1); listed so installed trees carry it.
+  // P2-B2B modules (intake-store, broker, managed-tasks, gateway-policy) are reached through controller.cjs requires.
+  host: { entries: Object.freeze(['nexus/controller.cjs', 'nexus/intake.cjs']), assets: Object.freeze([]), manifest: '.nexus-host-closure.json' },
 })
 function profile(options = {}) {
   const name = options.profile || 'muse'

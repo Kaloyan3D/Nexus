@@ -1,0 +1,1399 @@
+{
+  "dsh": "0.2.2-rc.1",
+  "gatewayHookPresent": true,
+  "resourceKinds": [
+    "workspace",
+    "session"
+  ],
+  "endpoints": [
+    {
+      "endpoint": "account/ackBonusNotified",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "accountId",
+        "orderId",
+        "client"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "account/cancelSignIn",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "attemptId"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "account/getBalance",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "client"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "account/getProfile",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "client"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "account/getState",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "account/getUnnotifiedBonuses",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "client"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "account/hasRunningAccountTasks",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "account/signOut",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "client"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "account/startSignIn",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "client",
+        "callbackOrigin",
+        "loginSource"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "account/watch",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "account/watchExpiry",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "agentPresets/list",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "agentPresets/read",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentPreset"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "agentPresets/select",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "agentPreset"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "commands/execute",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "line",
+        "submittedAttachments"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "commands/list",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "credentials/describe",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "refs"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "credentials/set",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "ref",
+        "value"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "credentials/unset",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "ref"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "directoryPicker/createDirectory",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "path",
+        "name"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "directoryPicker/list",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "path"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "directoryPicker/pick",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "dynamicCordisRunner/getClientCode",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "pluginId",
+        "pluginRunId"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "dynamicCordisRunner/inventory",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "dynamicCordisRunner/invoke",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "pluginId",
+        "pluginRunId",
+        "method",
+        "args"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "dynamicCordisRunner/reportClientGuardFailure",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "pluginId",
+        "pluginRunId",
+        "failure"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "dynamicCordisRunner/reportRenderFailure",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "pluginId",
+        "pluginRunId",
+        "failure"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "dynamicCordisRunner/resolveInspectQuery",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "requestId",
+        "resolution"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "dynamicCordisRunner/resolveRequestRun",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "requestId",
+        "resolution"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "dynamicCordisRunner/runHostHalf",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "pluginId",
+        "packageId",
+        "mode",
+        "requestId",
+        "approveFutureVersions"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "dynamicCordisRunner/settleUserRun",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "pluginId",
+        "resolution"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "dynamicCordisRunner/stopFromPanel",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "pluginId"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "dynamicCordisRunner/syncInspectManifest",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "providers"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "dynamicCordisRunner/undefineFromPanel",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "pluginId"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "fileReferences/list",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "query"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "fileUploads/upload",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "goals/clear",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "ref"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "goals/complete",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "ref"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "goals/create",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "goals/edit",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "ref",
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "goals/get",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "goals/pause",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "ref"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "goals/resume",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "ref"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "job/follow",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "job/kill",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "job/list",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "llm/discoverModels",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "settingsNs",
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "llm/listConfigurableProviders",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "llm/listProviders",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "messageFeedback/delete",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "messageFeedback/list",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "messageFeedback/put",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "officeToPdf/generation",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "officeToPdf/render",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "workspaceFileScopeId",
+        "path",
+        "priority"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "permissionPresets/catalog",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginInventory/list",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/cancelInstall",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "requestId"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/inspect",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "spec",
+        "options"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/installBundle",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "spec",
+        "options"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/listBundles",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/listPlugins",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/listVersionExemptions",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/listVersions",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "name",
+        "options"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/readBundleDetail",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "name",
+        "language",
+        "options"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/registries",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/removeBundle",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "name"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/setBundleEnabled",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "name",
+        "enabled"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/setPluginEnabled",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "id",
+        "enabled"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/setVersionExemption",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "packageVersion",
+        "runtimeVersion",
+        "enabled",
+        "acceptRisk"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/updateBundle",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "name",
+        "version",
+        "options"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginManager/waitForInstall",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "requestId"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "pluginRegistryProbe/fastest",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "remoteAccess/follow",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "schedule/catalog",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "schedule/create",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "schedule/deleteInactive",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "schedule/deliveryLimits",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "schedule/edit",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "schedule/history",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "schedule/list",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "schedule/run",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "schedule/view",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/attachment",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/canOpenWorkspacePath",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "session/cancel",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/control",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "session/create",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/events",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/follow",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/fork",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/initializeDefaultModel",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "session/list",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "_request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/modelCatalog",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "session/observeEvent",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/observeProjections",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/observeState",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/openWorkspacePath",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/page",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/projections",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/prompt",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/rename",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/search",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/selectModel",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/state",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/updateQueue",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/wait",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "session/workspacePathApplications",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "sessionFeedback/record",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "sessionReferenceResolver/candidates",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "query"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "settings/describe",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "settings/mutate",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "ns",
+        "ops",
+        "expectedRevision"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "settings/openSettingsDocument",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "settings/replace",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "ns",
+        "section",
+        "expectedRevision"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "settings/update",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "ns",
+        "patch",
+        "expectedRevision"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "skills/list",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "subagents/interruptByParent",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "childSessionId",
+        "parentSessionId",
+        "mode"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "subagents/prompt",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "terminal/attach",
+      "mode": "stream",
+      "uplink": true,
+      "parameters": [
+        "agentId",
+        "id"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "terminal/close",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "id"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "terminal/create",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "terminal/environment",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "terminal/list",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "sessionId"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "terminal/rename",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "id",
+        "title"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "terminal/retain",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [
+        "sessionId",
+        "id"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "terminal/shells",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "toolResults/watch",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "userQuestions/answer",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "callId",
+        "answer"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "userQuestions/attachWait",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [
+        "agentId",
+        "callId"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "workspace/archiveSession",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "workspace/create",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "workspace/delete",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "workspace/follow",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "workspace/initializeDefault",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [],
+      "readers": []
+    },
+    {
+      "endpoint": "workspace/insertBefore",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "workspace/insertSessionBefore",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "workspace/pinSession",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "workspace/rename",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "workspace/unarchiveSession",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "workspace/unpinSession",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "request"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "workspaceFiles/changes",
+      "mode": "stream",
+      "uplink": false,
+      "parameters": [
+        "workspaceFileScopeId",
+        "path"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "workspaceFiles/list",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "workspaceFileScopeId",
+        "path"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "workspaceFiles/read",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "workspaceFileScopeId",
+        "path",
+        "range"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "workspaceFiles/readBytes",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "workspaceFileScopeId",
+        "path",
+        "options"
+      ],
+      "readers": []
+    },
+    {
+      "endpoint": "workspaceFiles/stat",
+      "mode": "unary",
+      "uplink": false,
+      "parameters": [
+        "workspaceFileScopeId",
+        "path"
+      ],
+      "readers": []
+    }
+  ],
+  "webRoutes": {
+    "exact": [
+      "/connect",
+      "/nexus/assets/nexus-favicon.svg",
+      "/nexus/assets/nexus-logo.png",
+      "/nexus/assets/nexus-mark.png",
+      "/nexus/control-room.json",
+      "/nexus/controller.json",
+      "/nexus/engineering-profile-action.json",
+      "/nexus/engineering-profile.json",
+      "/nexus/gate-action.json",
+      "/nexus/mode-default.json",
+      "/nexus/registry/v1/catalog",
+      "/nexus/registry/v1/configuration",
+      "/nexus/registry/v1/connections",
+      "/nexus/registry/v1/connections/check",
+      "/nexus/registry/v1/connections/delete",
+      "/nexus/registry/v1/connections/disable",
+      "/nexus/registry/v1/connections/discover",
+      "/nexus/registry/v1/connections/list",
+      "/nexus/registry/v1/connections/status",
+      "/nexus/registry/v1/eligible",
+      "/nexus/registry/v1/models",
+      "/nexus/registry/v1/models/delete",
+      "/nexus/registry/v1/models/disable",
+      "/nexus/registry/v1/modes",
+      "/nexus/registry/v1/preview",
+      "/nexus/registry/v1/providers",
+      "/nexus/registry/v1/providers/delete",
+      "/nexus/registry/v1/providers/disable",
+      "/nexus/registry/v1/providers/discover",
+      "/nexus/registry/v1/providers/test",
+      "/nexus/registry/v1/routes",
+      "/nexus/registry/v1/routes/delete",
+      "/nexus/registry/v1/routes/disable",
+      "/nexus/registry/v1/routes/evidence",
+      "/nexus/registry/v1/routes/project",
+      "/nexus/registry/v1/routes/verify",
+      "/nexus/registry/v1/validate",
+      "/nexus/workspace-registration.json",
+      "/open-in-app/apps",
+      "/open-in-app/open",
+      "/plugins/events"
+    ],
+    "prefixes": [
+      "/api",
+      "/open-in-app/icon",
+      "/plugins"
+    ],
+    "upgrades": [
+      "/api/remote.mux"
+    ]
+  },
+  "connection": {
+    "fetchRoutes": [
+      "/api/changes.diff",
+      "/api/changes.open",
+      "/api/changes.summary",
+      "/api/file",
+      "/api/plugin-manager/detail-file",
+      "/api/present.host",
+      "/api/present.open",
+      "/api/session.export",
+      "/api/session.markdown",
+      "/api/session/uploadFileBinary"
+    ],
+    "interceptors": [
+      "/api"
+    ]
+  }
+}

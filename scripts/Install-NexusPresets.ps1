@@ -11,7 +11,11 @@ param([Parameter(Mandatory=$true)][string]$InstallRoot)
 #   2. Regenerate data/cordis.patch.yml (Build-NexusHomePatch.cjs): Nexus
 #      plugin rows, provider routes, and the three preset rows.
 #   3. Boot the REAL composed profile in-process (Verify-NexusComposition.mjs)
-#      and require every plane to mount and no stock preset to exist.
+#      and require every plane to mount, no stock preset to exist, and exactly
+#      one ready host Nexus Controller service (P1) with every plane bridge
+#      attached.
+# The host Controller closure (data/.agent-presets/.nexus-host) is published in
+# the same atomic set as the plane closures.
 # Any failure restores the previous closures and home patch.
 
 Set-StrictMode -Version Latest
@@ -25,13 +29,14 @@ $token = [guid]::NewGuid().ToString('N')
 $planes = @(
     @{ Name = 'aih-engineering'; Profile = 'engineering' },
     @{ Name = 'aih-deepseek';    Profile = 'deepseek' },
-    @{ Name = 'aih-muse';        Profile = 'muse' }
+    @{ Name = 'aih-muse';        Profile = 'muse' },
+    @{ Name = '.nexus-host';     Profile = 'host' }
 )
 
 # The source checkout is the only closure-manifest authority. Installed trees
 # consume the manifests that setup staged; a source tree re-prepares them.
 if (Test-Path -LiteralPath (Join-Path $InstallRoot '.git')) {
-    foreach ($closureProfile in @('', 'engineering', 'deepseek')) {
+    foreach ($closureProfile in @('', 'engineering', 'deepseek', 'host')) {
         $arguments = @($closureTool, 'prepare', $InstallRoot, $InstallRoot)
         if ($closureProfile) { $arguments += $closureProfile }
         & $layout.Node @arguments | Out-Null
@@ -61,7 +66,7 @@ try {
     & $layout.Node (Join-Path $layout.Scripts 'Build-NexusHomePatch.cjs') $InstallRoot
     if ($LASTEXITCODE -ne 0) { throw 'The Nexus home patch could not be generated.' }
     & $layout.Node (Join-Path $layout.Scripts 'Verify-NexusComposition.mjs') $InstallRoot
-    if ($LASTEXITCODE -ne 0) { throw 'The composed DSH profile failed verification: a Nexus plane did not mount, or a stock preset is selectable.' }
+    if ($LASTEXITCODE -ne 0) { throw 'The composed DSH profile failed verification: a Nexus plane did not mount, a stock preset is selectable, or the host Nexus Controller is not ready.' }
     foreach ($plane in $backedUp) { Remove-Item -LiteralPath $plane.Backup -Recurse -Force -ErrorAction SilentlyContinue }
     $backedUp = @()
 }

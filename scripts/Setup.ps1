@@ -171,7 +171,7 @@ elseif (-not (Test-Path -LiteralPath $layout.Dsh)) {
 
 & $layout.Node (Join-Path $layout.Scripts 'MusePresetDependencyClosure.cjs') prepare $sourceRoot $InstallRoot | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Muse preset source dependency closure failed.' }
-foreach ($closureProfile in @('engineering', 'deepseek')) {
+foreach ($closureProfile in @('engineering', 'deepseek', 'host')) {
     & $layout.Node (Join-Path $layout.Scripts 'MusePresetDependencyClosure.cjs') prepare $sourceRoot $InstallRoot $closureProfile | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "$closureProfile preset source dependency closure failed." }
 }

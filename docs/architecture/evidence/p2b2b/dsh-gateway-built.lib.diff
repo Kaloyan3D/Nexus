@@ -1,0 +1,105 @@
+--- published/dsh-api-gateway/lib/index.js
++++ patched-source-build/dsh-api-gateway/lib/index.js
+@@ -998,6 +998,18 @@
+ 			const client = this.remoteEventClients.get(result.clientId);
+ 			if (client === void 0) throw new Error("typert gateway: Remote event result identifies no active event stream");
+ 			if (client.peer !== peer) throw new TypertGatewayError("gateway/interactions-forbidden", endpoint, "Remote event result belongs to another Peer");
++			const pending = this.pendingRemoteEvents.get(result.eventId);
++			await this.authorizeOperation({
++				principal: peer.principal,
++				action: endpoint,
++				resources: [{ kind: "global" }],
++				args: {
++					event: pending?.frame.event ?? null,
++					agentId: pending?.frame.agentId ?? null,
++					outcome: result.outcome.kind
++				},
++				transport: "unary"
++			});
+ 			this.receiveRemoteEventResult(client, result);
+ 			return {
+ 				ok: true,
+@@ -1013,6 +1025,13 @@
+ 			releaseUplink(uplink);
+ 			assertPeerLive(peer, endpoint);
+ 			requireInteractions(peer, endpoint);
++			await this.authorizeOperation({
++				principal: peer.principal,
++				action: endpoint,
++				resources: [{ kind: "global" }],
++				args: {},
++				transport: "stream"
++			});
+ 			return this.openRemoteEvents(payload, signal, peer);
+ 		}
+ 		return this.openStream({
+@@ -1194,7 +1213,32 @@
+ 			return encodeRpcResult(await this.invokePrepared(prepared), prepared.descriptor.result);
+ 		} catch (error) {
+ 			return rpcFailure(error);
++		}
++	}
++	/**
++	* Run the `gateway/authorize` listeners for one operation. Listeners return
++	* `undefined` to abstain or `{ kind: 'deny', reason }` to refuse; the first
++	* refusal wins whatever the registration order. Any other return value or a
++	* throwing listener refuses (fail closed). With no listener every operation
++	* keeps today's behavior. Listeners receive a frozen copy of the request.
++	*/
++	async authorizeOperation(request) {
++		let verdict;
++		try {
++			verdict = await this.ctx.serial("gateway/authorize", deepFreeze(structuredClone(request)));
++		} catch {
++			throw new RemoteError("remote-access/denied", `remote access: ${request.action}: authorization failed`, {
++				action: request.action,
++				reason: "authorization-failed"
++			});
+ 		}
++		if (verdict === void 0) return;
++		const denial = isObject(verdict) ? verdict : void 0;
++		const reason = denial?.kind === "deny" && typeof denial.reason === "string" ? denial.reason : "authorization-invalid";
++		throw new RemoteError("remote-access/denied", `remote access: ${request.action}: access denied (${reason})`, {
++			action: request.action,
++			reason
++		});
+ 	}
+ 	/** `control` fails the logical stream when an uplink item is rejected; unary calls hand over an inert one. */
+ 	async prepareInvocation(request, control) {
+@@ -1203,8 +1247,8 @@
+ 		const descriptor = this.resolveDescriptor(request.namespace, request.method, endpoint);
+ 		assertExactArguments(request.args, descriptor, endpoint);
+ 		const validated = validateArguments(descriptor, request.args, endpoint);
++		const resources = callResources(this.ctx.typert, this.resourceReaders(descriptor), descriptor, validated, request.signal ?? NEVER_ABORTED_SIGNAL);
+ 		if (request.peer.principal.kind !== "owner") {
+-			const resources = callResources(this.ctx.typert, this.resourceReaders(descriptor), descriptor, validated, request.signal ?? NEVER_ABORTED_SIGNAL);
+ 			const decision = resources === void 0 ? {
+ 				kind: "deny",
+ 				reason: "resource-invalid"
+@@ -1219,6 +1263,13 @@
+ 				reason: decision.reason
+ 			});
+ 		}
++		await this.authorizeOperation({
++			principal: request.peer.principal,
++			action: endpoint,
++			resources,
++			args: validated,
++			transport: "uplink" in request ? "stream" : "unary"
++		});
+ 		const receiverContext = await this.resolveReceiverContext(descriptor, validated, endpoint);
+ 		const receiver = receiverContext.get(descriptor.service);
+ 		if (!isObject(receiver)) throw new TypertGatewayError("gateway/service-unavailable", endpoint, `active Service ${JSON.stringify(descriptor.service)} is unavailable`);
+@@ -1857,5 +1908,12 @@
+ function isObject(value) {
+ 	return typeof value === "object" && value !== null || typeof value === "function";
+ }
++function deepFreeze(value) {
++	if (isObject(value) && !Object.isFrozen(value)) {
++		Object.freeze(value);
++		for (const key of Reflect.ownKeys(value)) deepFreeze(value[key]);
++	}
++	return value;
++}
+ //#endregion
+ export { TypertGatewayError, TypertGatewayService, TypertGatewayService as default };

@@ -112,6 +112,25 @@ $suites = @(
     [ordered]@{ name='PowerShellPortability'; script='tests/PowerShellPortability.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='RegistryInstalledRuntime'; script='tests/RegistryInstalledRuntime.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='AihControllerHost'; script='tests/AihControllerHost.Tests.cjs'; executable=$layout.Node; kind='node' },
+    # P1 plugin-first foundation: host Nexus Controller, strategy boundary, legacy runner, bridge parity.
+    [ordered]@{ name='NexusControllerCore'; script='tests/NexusControllerCore.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusLegacyCli'; script='tests/NexusLegacyCli.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusControllerBridge'; script='tests/NexusControllerBridge.Tests.cjs'; executable=$layout.Node; kind='node' },
+    # P2-A Controller authority consolidation: single binding writer, host ownership, task API, real-host owner-peer gate.
+    [ordered]@{ name='NexusBindingAuthority'; script='tests/NexusBindingAuthority.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusHostOwnership'; script='tests/NexusHostOwnership.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusTaskApi'; script='tests/NexusTaskApi.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusOwnerPeerGuard'; script='tests/NexusOwnerPeerGuard.Tests.mjs'; executable=$layout.Node; kind='node' },
+    # P2-B1 secure host and managed-admission prerequisites: enforced ownership (real hosts), IPC, CLI subset, intake/broker contracts.
+    [ordered]@{ name='NexusHostEnforcement'; script='tests/NexusHostEnforcement.Tests.mjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusIpc'; script='tests/NexusIpc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusCli'; script='tests/NexusCli.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusIntakeContract'; script='tests/NexusIntakeContract.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusManagedIntake'; script='tests/NexusManagedIntake.Tests.cjs'; executable=$layout.Node; kind='node' },
+    # P2-B2B real host (pinned DSH): managed submission stays fail-closed without the verified gateway hook.
+    [ordered]@{ name='NexusManagedTasksRealHost'; script='tests/NexusManagedTasks.RealHost.Tests.mjs'; executable=$layout.Node; kind='node' },
+    # P2-B2C session durability: format-v4 source kinds, protected-head notice ordering, identity ledger.
+    [ordered]@{ name='NexusSessionDurability'; script='tests/NexusSessionDurability.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCheckpointV2'; script='tests/ContextCheckpointV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextTrustV2'; script='tests/ContextTrustV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextSnapshotV2'; script='tests/ContextSnapshotV2.Tests.cjs'; executable=$layout.Node; kind='node' },

@@ -1,0 +1,88 @@
+--- a/dsh-api-gateway/lib/index.js
++++ b/dsh-api-gateway/lib/index.js
+@@ -998,6 +998,14 @@
+ 			const client = this.remoteEventClients.get(result.clientId);
+ 			if (client === void 0) throw new Error("typert gateway: Remote event result identifies no active event stream");
+ 			if (client.peer !== peer) throw new TypertGatewayError("gateway/interactions-forbidden", endpoint, "Remote event result belongs to another Peer");
++			const pending = this.pendingRemoteEvents.get(result.eventId);
++			await this.authorizeOperation({
++				principal: peer.principal,
++				action: endpoint,
++				resources: pending === void 0 ? void 0 : [{ kind: "session", id: pending.frame.agentId }],
++				args: { event: pending?.frame.event ?? null, outcome: result.outcome.kind },
++				transport: "unary"
++			});
+ 			this.receiveRemoteEventResult(client, result);
+ 			return {
+ 				ok: true,
+@@ -1013,6 +1021,7 @@
+ 			releaseUplink(uplink);
+ 			assertPeerLive(peer, endpoint);
+ 			requireInteractions(peer, endpoint);
++			await this.authorizeOperation({ principal: peer.principal, action: endpoint, resources: GLOBAL, args: {}, transport: "stream" });
+ 			return this.openRemoteEvents(payload, signal, peer);
+ 		}
+ 		return this.openStream({
+@@ -1196,6 +1205,24 @@
+ 			return rpcFailure(error);
+ 		}
+ 	}
++	/** P2-B2A PROTOTYPE: `gateway/authorize` (deny wins, abstain = undefined, throw/invalid = deny). */
++	async authorizeOperation(request) {
++		let verdict;
++		try {
++			verdict = await this.ctx.serial("gateway/authorize", deepFreezeAuthorize(structuredClone(request)));
++		} catch {
++			throw new RemoteError("remote-access/denied", `remote access: ${request.action}: authorization failed`, {
++				action: request.action,
++				reason: "authorization-failed"
++			});
++		}
++		if (verdict === void 0) return;
++		const reason = isObject(verdict) && verdict.kind === "deny" && typeof verdict.reason === "string" ? verdict.reason : "authorization-invalid";
++		throw new RemoteError("remote-access/denied", `remote access: ${request.action}: access denied (${reason})`, {
++			action: request.action,
++			reason
++		});
++	}
+ 	/** `control` fails the logical stream when an uplink item is rejected; unary calls hand over an inert one. */
+ 	async prepareInvocation(request, control) {
+ 		const endpoint = endpointOf(request.namespace, request.method);
+@@ -1203,8 +1230,8 @@
+ 		const descriptor = this.resolveDescriptor(request.namespace, request.method, endpoint);
+ 		assertExactArguments(request.args, descriptor, endpoint);
+ 		const validated = validateArguments(descriptor, request.args, endpoint);
++		const resources = callResources(this.ctx.typert, this.resourceReaders(descriptor), descriptor, validated, request.signal ?? NEVER_ABORTED_SIGNAL);
+ 		if (request.peer.principal.kind !== "owner") {
+-			const resources = callResources(this.ctx.typert, this.resourceReaders(descriptor), descriptor, validated, request.signal ?? NEVER_ABORTED_SIGNAL);
+ 			const decision = resources === void 0 ? {
+ 				kind: "deny",
+ 				reason: "resource-invalid"
+@@ -1219,6 +1246,13 @@
+ 				reason: decision.reason
+ 			});
+ 		}
++		await this.authorizeOperation({
++			principal: request.peer.principal,
++			action: endpoint,
++			resources,
++			args: validated,
++			transport: "uplink" in request ? "stream" : "unary"
++		});
+ 		const receiverContext = await this.resolveReceiverContext(descriptor, validated, endpoint);
+ 		const receiver = receiverContext.get(descriptor.service);
+ 		if (!isObject(receiver)) throw new TypertGatewayError("gateway/service-unavailable", endpoint, `active Service ${JSON.stringify(descriptor.service)} is unavailable`);
+@@ -1487,6 +1521,13 @@
+ function parseRemoteEventResultPayload(payload) {
+ 	if (!isObject(payload) || !isPlainObject(payload) || Reflect.ownKeys(payload).length !== 1 || !Object.hasOwn(payload, "args")) throw new Error("typert gateway: Remote event result requires exactly one plain-object args field");
+ 	return parseRemoteEventResult(payload.args);
++}
++function deepFreezeAuthorize(value) {
++	if (isObject(value) && !Object.isFrozen(value)) {
++		Object.freeze(value);
++		for (const key of Reflect.ownKeys(value)) deepFreezeAuthorize(value[key]);
++	}
++	return value;
+ }
+ function remoteRequest(endpoint, payload, signal, peer) {
+ 	assertPeerLive(peer, endpoint);

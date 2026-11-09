@@ -1,0 +1,129 @@
+{
+  "dsh": "0.2.2-rc.1",
+  "node": "v24.18.1",
+  "platform": "darwin-arm64",
+  "results": {
+    "managedPrompt": {
+      "status": 200,
+      "ok": null
+    },
+    "managed": {
+      "turnEnded": true,
+      "refusedSteps": 1,
+      "llmCalls": 0,
+      "controllerCli": 0
+    },
+    "legacy": {
+      "controllerCli": [
+        "NexusWorkspace.ps1:resolve"
+      ],
+      "managed": false
+    },
+    "matrix": [
+      {
+        "path": "session/prompt (queue)",
+        "disposition": "prevented: every agent step refused at agent/pre-step",
+        "evidence": {
+          "status": 200,
+          "refusedSteps": 1,
+          "llmCalls": 0
+        }
+      },
+      {
+        "path": "session/prompt (steer)",
+        "disposition": "prevented: every agent step refused at agent/pre-step",
+        "evidence": {
+          "status": 200,
+          "refusedTotal": 2,
+          "llmCalls": 0
+        }
+      },
+      {
+        "path": "session/updateQueue",
+        "disposition": "prevented at effect: queued/edited input can only run through agent/pre-step (refused); the edit itself is not interceptable",
+        "evidence": {
+          "response": "{\"type\":\"server-response\",\"rpcId\":\"94c46ffc-b1ab-42d0-8c92-1a84e31c4961\",\"result\":{\"ok\":false,\"error\":{\"code\":\"session/queue-item-not-found\",\"message\":\"queued item is no longer pending\",\"details\":{\"it",
+          "llmCalls": 0
+        }
+      },
+      {
+        "path": "session/rename",
+        "disposition": "reconciliation-only: committed by DSH, observed post-commit (cosmetic, no task authority)",
+        "evidence": {
+          "response": "{\"type\":\"server-response\",\"rpcId\":\"4f36ff1c-f4ed-4827-a1f9-7a97a05ecb4c\",\"result\":{\"ok\":true,\"value\":{\"title\":\"renamed by owner peer\",\"seq\":13}}}",
+          "eventTypes": [
+            "session/title"
+          ],
+          "reconciliation": [
+            "rename"
+          ]
+        }
+      },
+      {
+        "path": "session/cancel",
+        "disposition": "reconciliation-only: accepted by DSH; an aborted managed turn is recorded for Controller reconciliation (interrupted)",
+        "evidence": {
+          "response": "{\"type\":\"server-response\",\"rpcId\":\"33bcfe3e-c496-48b2-9118-c6ab9089be93\",\"result\":{\"ok\":true,\"value\":{\"accepted\":true}}}"
+        }
+      },
+      {
+        "path": "session/selectModel",
+        "disposition": "prevented at effect: selection may be appended, but no step of a managed session runs; route guards reject drift for bound sessions",
+        "evidence": {
+          "response": "{\"type\":\"server-response\",\"rpcId\":\"8b16ebd6-8a7a-45a3-9f49-b6a0c30d6b12\",\"result\":{\"ok\":false,\"error\":{\"code\":\"session/model-unavailable\",\"message\":\"Select an available model before sending a message.",
+          "eventTypes": [],
+          "llmCalls": 0
+        }
+      },
+      {
+        "path": "session/fork",
+        "disposition": "authorized delegation: a fork is a new, independent ordinary session (not managed); the managed session is unchanged",
+        "evidence": {
+          "response": "{\"type\":\"server-response\",\"rpcId\":\"00d2301b-65ac-4f47-a51f-4bc57dc99ec0\",\"result\":{\"ok\":false,\"error\":{\"code\":\"gateway/internal\",\"message\":\"failed to fork session \\\"session-bb9de740-80dc-4f30-bca2-d3a",
+          "forkManaged": null
+        }
+      },
+      {
+        "path": "workspace/archiveSession",
+        "disposition": "reconciliation-only: organizational state, not interceptable per session; stops running work (observed as cancel)",
+        "evidence": {
+          "workspace": 200,
+          "response": "{\"type\":\"server-response\",\"rpcId\":\"5ea64a7f-1cd4-407b-9cdd-0004e23b7f4d\",\"result\":{\"ok\":true,\"value\":{\"archivedSessionIds\":[\"session-bb9de740-80dc-4f30-bca2-d3a309d83885\"]}}}"
+        }
+      },
+      {
+        "path": "approval/request ($events/result answer)",
+        "disposition": "prevented: answered by the Controller (rejected while managed admission is disabled); never forwarded to owner peers",
+        "evidence": {
+          "outcome": "rejected",
+          "answered": 1
+        }
+      },
+      {
+        "path": "user-questions/request (attachWait answer)",
+        "disposition": "prevented: refused by the Controller before any answerer for a managed session",
+        "evidence": {
+          "result": "{\"error\":\"NO_PROVIDER\"}",
+          "refused": 1
+        }
+      },
+      {
+        "path": "subagent prompt / child sessions",
+        "disposition": "prevented: children with origin=subagent inherit managed status (effects, approvals, questions)",
+        "evidence": {
+          "inherits": true
+        }
+      }
+    ],
+    "reconciliation": [
+      {
+        "at": "2026-11-08T13:43:37.219Z",
+        "sessionId": "session-bb9de740-80dc-4f30-bca2-d3a309d83885",
+        "managedRoot": "session-bb9de740-80dc-4f30-bca2-d3a309d83885",
+        "kind": "rename",
+        "eventType": "session/title",
+        "seq": 13
+      }
+    ]
+  }
+}

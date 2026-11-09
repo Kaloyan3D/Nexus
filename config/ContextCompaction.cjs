@@ -21,6 +21,7 @@
 
 const durablePolicyV2 = require('./ContextDurableMutationPolicyV2.cjs');
 const { sessionEvents } = require('./Dsh-SessionEvents.cjs');
+const messageSource = require('./Nexus-MessageSource.cjs');
 
 // DSH 0.2.x removed `session.events`; the supported synchronous reader is the single
 // Nexus adapter (Dsh-SessionEvents.cjs). A missing or malformed log fails closed (null).
@@ -180,8 +181,7 @@ function balancedRetainCut(session, options) {
 const RUNTIME_CONTEXT_PLUGIN = '@deepseek-ai/dsh-system-prompt';
 
 function isRuntimeContextMessage(event) {
-  return Boolean(event && event.type === 'user/message' && event.data && event.data.source
-    && event.data.source.kind === 'plugin' && event.data.source.plugin === RUNTIME_CONTEXT_PLUGIN);
+  return Boolean(event && event.type === 'user/message' && event.data && messageSource.isRuntimeContextSource(event.data.source));
 }
 
 function runtimeContextSeqsOf(session) {
@@ -254,7 +254,7 @@ function findReplacementByOperation(session, operationId) {
     const event = events[index];
     if (!event || event.type !== 'user/message') continue;
     const source = event.data && event.data.source;
-    if (!source || source.kind !== 'plugin' || source.plugin !== 'aih-controller') continue;
+    if (!messageSource.isControllerSource(source)) continue;
     if (source.form !== 'context-checkpoint') continue;
     if (source.operationId !== operationId) continue;
     return event;
@@ -388,7 +388,7 @@ function lastTextOfRole(session, role, maxChars) {
     if (role === 'user' && event.type !== 'user/message') continue;
     if (role === 'assistant' && event.type !== 'assistant/message') continue;
     const source = event.data && event.data.source;
-    if (source && source.kind === 'plugin' && source.plugin === 'aih-controller') continue;
+    if (messageSource.isControllerSource(source)) continue;
     const message = role === 'user' ? event.data : event.data && event.data.message;
     const content = message && Array.isArray(message.content) ? message.content : [];
     const texts = [];
@@ -751,7 +751,7 @@ function nexusReplacementEventsOf(session, operationId) {
   for (const event of events) {
     if (!event || event.type !== 'user/message') continue;
     const source = event.data && event.data.source;
-    if (!source || source.kind !== 'plugin' || source.plugin !== 'aih-controller') continue;
+    if (!messageSource.isControllerSource(source)) continue;
     if (source.operationId !== operationId) continue;
     found.push(event);
   }
@@ -992,8 +992,8 @@ function applyCompactionOperationV2(session, operation, payloadText, durableOp) 
     const isPayload = segment.role === 'payload';
     const text = isPayload ? payloadText : buildContinuationAnchorText(operation.operationId, operation.checkpointGeneration, index, segments.length);
     const source = isPayload
-      ? { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId: operation.operationId, generation: operation.checkpointGeneration, taskInstanceId: operation.taskInstanceId }
-      : { kind: 'plugin', plugin: 'aih-controller', form: 'context-continuation', operationId: operation.operationId, generation: operation.checkpointGeneration };
+      ? messageSource.controllerSource({ form: 'context-checkpoint', operationId: operation.operationId, generation: operation.checkpointGeneration, taskInstanceId: operation.taskInstanceId })
+      : messageSource.controllerSource({ form: 'context-continuation', operationId: operation.operationId, generation: operation.checkpointGeneration });
     const node = session.append('user/message', v2UserMessageNode(text, source), {
       surfaceOp: { op: 'replace', start: segment.start, end: segment.end }, // CCv2 laboratory writer (disabled in production): kept at its original op shape; DSH 0.2 requires { startSeq, endSeq } - port before any re-enable
       sourceEventSeqs: segment.sourceEventSeqs.slice(),
@@ -1018,8 +1018,8 @@ function retryMissingSegmentsV2(session, operation, payloadText, durableOp, miss
     const isPayload = segment.role === 'payload';
     const text = isPayload ? payloadText : buildContinuationAnchorText(operation.operationId, operation.checkpointGeneration, index, segments.length);
     const source = isPayload
-      ? { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId: operation.operationId, generation: operation.checkpointGeneration, taskInstanceId: operation.taskInstanceId }
-      : { kind: 'plugin', plugin: 'aih-controller', form: 'context-continuation', operationId: operation.operationId, generation: operation.checkpointGeneration };
+      ? messageSource.controllerSource({ form: 'context-checkpoint', operationId: operation.operationId, generation: operation.checkpointGeneration, taskInstanceId: operation.taskInstanceId })
+      : messageSource.controllerSource({ form: 'context-continuation', operationId: operation.operationId, generation: operation.checkpointGeneration });
     const node = session.append('user/message', v2UserMessageNode(text, source), {
       surfaceOp: { op: 'replace', start: segment.start, end: segment.end }, // CCv2 laboratory writer (disabled in production): kept at its original op shape; DSH 0.2 requires { startSeq, endSeq } - port before any re-enable
       sourceEventSeqs: segment.sourceEventSeqs.slice(),

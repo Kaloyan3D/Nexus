@@ -1,0 +1,93 @@
+[
+  {
+    "name": "muse-review",
+    "engine": "muse",
+    "prompt": "/review is this correct?",
+    "result": "reject",
+    "nextCalls": 0,
+    "cli": [
+      "NexusWorkspace.ps1:resolve",
+      "Task.ps1:test-task"
+    ],
+    "notices": [
+      "Controller: independent review is not available for the Muse engine (engine=muse, review.independent=false).\nThe Muse plane never invokes Codex as reviewer, fallback, repair agent, or worker, and no Muse reviewer exists in V0.\nRoute the task through a Dual profile (Normal Engineering + GLM/Codex or DeepSeek/Codex) for independent review. No files were modified."
+    ]
+  },
+  {
+    "name": "muse-turn",
+    "engine": "muse",
+    "prompt": "Implement the requested change.",
+    "result": "continue",
+    "nextCalls": 1,
+    "cli": [
+      "NexusWorkspace.ps1:resolve",
+      "Task.ps1:test-task",
+      "ContextLifecycleCli.ps1:snapshot",
+      "Task.ps1:begin-attempt"
+    ],
+    "notices": [
+      "Controller: attempt 1 started · task <id> (execution Muse · Main Agent · engine=muse)."
+    ]
+  },
+  {
+    "name": "dual-turn",
+    "engine": "dual",
+    "prompt": "Implement the requested change.",
+    "result": "continue",
+    "nextCalls": 1,
+    "cli": [
+      "NexusWorkspace.ps1:resolve",
+      "Task.ps1:test-task",
+      "ContextLifecycleCli.ps1:snapshot",
+      "Engineering.ps1:uncertainty-create",
+      "Task.ps1:begin-attempt"
+    ],
+    "notices": [
+      "Controller: attempt 1 started · task <id> (execution Engineer · Normal · step-routed)."
+    ]
+  },
+  {
+    "name": "muse-inconclusive",
+    "engine": "muse",
+    "prompt": "Implement the requested change.",
+    "result": "reject",
+    "nextCalls": 0,
+    "cli": [
+      "NexusWorkspace.ps1:resolve",
+      "Task.ps1:test-task"
+    ],
+    "notices": [
+      "Controller: the session binding could not be validated (validation infrastructure failure).\naih-controller: test-task returned no authoritative identity result\nThe existing binding was preserved; no task was created or removed; controller state was not recorded for this turn."
+    ]
+  },
+  {
+    "name": "dual-inconclusive",
+    "engine": "dual",
+    "prompt": "Implement the requested change.",
+    "result": "continue",
+    "nextCalls": 1,
+    "cli": [
+      "NexusWorkspace.ps1:resolve",
+      "Task.ps1:test-task"
+    ],
+    "notices": [
+      "Controller: the session binding could not be validated (validation infrastructure failure).\naih-controller: test-task returned no authoritative identity result\nThe existing binding was preserved; no task was created or removed; controller state was not recorded for this turn."
+    ]
+  },
+  {
+    "name": "muse-cli-garbage",
+    "engine": "muse",
+    "prompt": "Implement the requested change.",
+    "result": "continue",
+    "nextCalls": 1,
+    "cli": [
+      "NexusWorkspace.ps1:resolve",
+      "Task.ps1:test-task",
+      "ContextLifecycleCli.ps1:snapshot",
+      "Task.ps1:begin-attempt"
+    ],
+    "notices": [
+      "Controller: attempt start rejected for task <id>\naih-controller: Task.ps1 returned non-JSON output: not json at all (Unexpected token 'o', \"not json at all\" is not valid JSON)"
+    ]
+  }
+]
