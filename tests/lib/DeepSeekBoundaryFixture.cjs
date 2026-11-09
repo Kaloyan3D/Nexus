@@ -7,6 +7,8 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { once } = require('node:events');
 const { createServer, Socket } = require('node:net');
+const { execFile } = require('node:child_process');
+const { promisify } = require('node:util');
 const { createRequire } = require('node:module');
 const { pathToFileURL } = require('node:url');
 
@@ -78,10 +80,25 @@ async function createBoundaryFixture(installRoot, fault) {
       '- id: web-runtime\n  config:\n    printUrl: false\n    openBrowser: false\n- id: desktop-product-telemetry\n  disabled: true\n');
     const home = path.join(base, 'home');
     fs.mkdirSync(home);
-    const keep = /^(?:PATH|PATHEXT|SystemRoot|WINDIR|ComSpec|TEMP|TMP|TMPDIR|LANG|LC_.*|GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+))$/i;
+    const keep = /^(?:PATH|PATHEXT|SystemRoot|SystemDrive|WINDIR|ComSpec|OS|ProgramFiles(?:\(x86\))?|ProgramW6432|ProgramData|CommonProgramFiles(?:\(x86\))?|CommonProgramW6432|TEMP|TMP|TMPDIR|LANG|LC_.*|GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+))$/i;
     for (const key of Object.keys(process.env)) if (!keep.test(key)) delete process.env[key];
     Object.assign(process.env, { HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
       DSH_HOME: data, AIH_INSTALL_ROOT: install, AIH_TOOLCHAIN_ROOT: install, DSH_TELEMETRY_DISABLED: '1' });
+    if (process.platform === 'win32') {
+      // Windows PowerShell expects these profile directories, even with
+      // -NoProfile. Give it test-owned paths instead of the runner's home.
+      process.env.APPDATA = path.join(home, 'AppData', 'Roaming');
+      process.env.LOCALAPPDATA = path.join(home, 'AppData', 'Local');
+      fs.mkdirSync(process.env.APPDATA, { recursive: true });
+      fs.mkdirSync(process.env.LOCALAPPDATA, { recursive: true });
+      process.env.HOMEDRIVE = path.parse(home).root.slice(0, 2);
+      process.env.HOMEPATH = home.slice(2);
+      const startedAt = Date.now();
+      await promisify(execFile)('powershell.exe',
+        ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'exit 0'],
+        { timeout: 30000, windowsHide: true });
+      console.log('DSH boundary Windows PowerShell startup: ' + (Date.now() - startedAt) + ' ms');
+    }
     const appRequire = createRequire(path.join(install, 'app', 'package.json'));
     const load = name => import(pathToFileURL(appRequire.resolve(name)).href);
     SDK = { load, dshVersion: appRequire('@deepseek-ai/dsh/package.json').version };

@@ -86,7 +86,8 @@ try {
 
     # The real composition rejects a plane whose local module cannot load.
     $goodPatch = [IO.File]::ReadAllBytes($patchPath)
-    $brokenPatch = $patch.Replace("          - id: aih-muse-isolation", "          - id: missing-local-module-probe`n            name: 'file:///nonexistent/Muse-Missing-Module.cjs'`n          - id: aih-muse-isolation")
+    $missingModule = ([Uri]::new((Join-Path $disposable 'Muse-Missing-Module.cjs'))).AbsoluteUri
+    $brokenPatch = $patch.Replace("          - id: aih-muse-isolation", "          - id: missing-local-module-probe`n            name: '$missingModule'`n          - id: aih-muse-isolation")
     if ($brokenPatch -eq $patch) { throw 'FAIL: could not construct the broken-module probe.' }
     [IO.File]::WriteAllText($patchPath, $brokenPatch, [Text.UTF8Encoding]::new($false))
     $verifyExit = Invoke-FixtureVerifier $disposable
