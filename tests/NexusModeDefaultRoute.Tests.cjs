@@ -17,8 +17,8 @@ const { pathToFileURL } = require('node:url')
 
 const SOURCE = path.resolve(__dirname, '..')
 const toolchain = process.env.NEXUS_RUNTIME_ROOT || process.env.AIH_INSTALL_ROOT || process.argv[2] || path.join(os.homedir(), '.local/share/nexus')
-const pwsh = process.env.AIH_PWSH_HOST || process.env.AIH_TEST_PWSH || path.join(toolchain, 'runtime', 'pwsh', 'pwsh')
-const nodeBin = path.join(toolchain, 'runtime', 'node', 'bin', 'node')
+const pwsh = process.env.AIH_PWSH_HOST || process.env.AIH_TEST_PWSH || (process.platform === 'win32' ? 'powershell.exe' : path.join(toolchain, 'runtime', 'pwsh', 'pwsh'))
+const nodeBin = path.join(toolchain, 'runtime', 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node')
 
 let passed = 0
 const pass = (name) => { passed += 1; console.log('PASS: ' + name) }
@@ -29,12 +29,13 @@ async function main() {
   const previousHome = process.env.DSH_HOME
   try {
     for (const dir of ['config', 'scripts', 'ui']) fs.cpSync(path.join(SOURCE, dir), path.join(root, dir), { recursive: true, filter: (file) => !file.split(path.sep).includes('node_modules') })
-    fs.symlinkSync(path.join(toolchain, 'app'), path.join(root, 'app'))
-    fs.symlinkSync(path.join(toolchain, 'runtime'), path.join(root, 'runtime'))
+    fs.symlinkSync(path.join(toolchain, 'app'), path.join(root, 'app'), process.platform === 'win32' ? 'junction' : 'dir')
+    fs.symlinkSync(path.join(toolchain, 'runtime'), path.join(root, 'runtime'), process.platform === 'win32' ? 'junction' : 'dir')
     fs.mkdirSync(data, { recursive: true })
     fs.copyFileSync(path.join(SOURCE, 'config', 'settings.yaml'), path.join(data, 'nexus-settings.yaml'))
     const install = spawnSync(pwsh, ['-NoLogo', '-NoProfile', '-File', path.join(root, 'scripts', 'Install-NexusPresets.ps1'), '-InstallRoot', root], { encoding: 'utf8' })
-    assert.equal(install.status, 0, 'disposable plane install must succeed: ' + (install.stderr || install.stdout).slice(-300))
+    assert.ifError(install.error)
+    assert.equal(install.status, 0, 'disposable plane install must succeed: ' + (install.stderr || install.stdout || '').slice(-300))
 
     process.env.DSH_HOME = data
     process.env.AIH_PWSH_HOST = pwsh

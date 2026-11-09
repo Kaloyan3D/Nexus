@@ -52,6 +52,17 @@ function makeGitRepo(dirty) {
 }
 function makeShimDir(failStatus, failRevParse) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'f8shim-'));
+  if (process.platform === 'win32') {
+    const realGit = execFileSync('where.exe', ['git.exe'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
+    fs.writeFileSync(path.join(dir, 'git.cmd'), [
+      '@echo off',
+      failStatus ? 'if "%~3"=="status" exit /b 3' : '',
+      failRevParse ? 'if "%~3"=="rev-parse" exit /b 4' : '',
+      '"' + realGit + '" %*',
+      'exit /b %errorlevel%',
+    ].filter(Boolean).join('\r\n') + '\r\n');
+    return dir;
+  }
   const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
   fs.writeFileSync(path.join(dir, 'git'), [
     '#!/bin/sh',

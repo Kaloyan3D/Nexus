@@ -109,8 +109,10 @@ exit 1
 
     [IO.File]::WriteAllText($log,''); 'com.other'|Set-Content -LiteralPath $state -NoNewline
     $p1=Start-Process $aihPsHost -PassThru -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $InstallRoot 'scripts/Capture-VisualEvidence.ps1'),'-OutputPath',(Join-Path $fixture 'parallel-a.png'),'-AdbPath',$fakeCmd,'-DeviceSerial','emulator-5554','-PackageName','app.openrank.mobile','-ScenarioId','a','-Iteration','1','-Force')
+    $null = $p1.Handle
     $p2=Start-Process $aihPsHost -PassThru -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $InstallRoot 'scripts/Capture-VisualEvidence.ps1'),'-OutputPath',(Join-Path $fixture 'parallel-b.png'),'-AdbPath',$fakeCmd,'-DeviceSerial','emulator-5554','-PackageName','com.autopulse.mobile','-ScenarioId','b','-Iteration','1','-Force')
-    $p1.WaitForExit(); $p2.WaitForExit()
+    $null = $p2.Handle
+    Assert-Aih ($p1.WaitForExit(60000) -and $p2.WaitForExit(60000)) 'parallel capture workers finish within their deadlines'
     $capturePackages=@(Get-Content $log|Where-Object{$_-like'captured-package=*'}|ForEach-Object{$_-replace'^captured-package=',''} )
     Assert-Aih ($p1.ExitCode-eq0-and$p2.ExitCode-eq0-and$capturePackages.Count-eq2-and$capturePackages.Contains('app.openrank.mobile')-and$capturePackages.Contains('com.autopulse.mobile')) 'shared-device critical sections cannot interleave'
 

@@ -56,7 +56,7 @@ try {
     $r = Complete-F4Task $root 'F4 sweep task' @($crit) @([ordered]@{ criterion = $crit; status = 'met'; evidence = ('fixture evidence for ' + $crit) }) @([ordered]@{ name = 'verify password=F4_FAKE_VERIFY_SECRET'; kind = 'verify'; status = 'PASS'; exitCode = 0; attempt = 1 }) $userText $asstText
     Assert-NoSentinels $r.raw 'persisted checkpoint JSON (sweep)'
     Assert-NoSentinels $r.text 'rendered checkpoint text (sweep)'
-    Assert-Aih ($r.raw.Contains('<redacted>')) 'stable replacement marker present'
+    Assert-Aih (([regex]::Unescape($r.raw)).Contains('<redacted>')) 'stable replacement marker present'
     Assert-Aih (-not $r.raw.Contains('BEGIN PRIVATE KEY')) 'PEM block header absent from JSON'
     Assert-Aih (-not $r.text.Contains('BEGIN PRIVATE KEY')) 'PEM block header absent from rendered text'
     Assert-Aih ($r.text.Contains('src-shape-check') -eq $false) 'sweep carries no stray content'

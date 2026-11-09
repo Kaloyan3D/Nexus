@@ -33,6 +33,13 @@ function Link-Directory([string]$Link, [string]$Target) {
     if (Test-AihIsWindows) { New-Item -ItemType Junction -Path $Link -Target $Target | Out-Null }
     else { New-Item -ItemType SymbolicLink -Path $Link -Target $Target | Out-Null }
 }
+function Invoke-FixtureVerifier([string]$Root) {
+    # Windows PowerShell 5.1 turns merged native stderr into ErrorRecords.
+    # The verifier uses stderr for diagnostics even when it succeeds.
+    $ErrorActionPreference = 'Continue'
+    & $layout.Node $verifier $Root 2>&1 | Out-Null
+    return $LASTEXITCODE
+}
 function Test-SameBytes([string]$Path, [byte[]]$Expected) {
     $actual = [IO.File]::ReadAllBytes($Path)
     if ($actual.Length -ne $Expected.Length) { return $false }
@@ -82,12 +89,10 @@ try {
     $brokenPatch = $patch.Replace("          - id: aih-muse-isolation", "          - id: missing-local-module-probe`n            name: 'file:///nonexistent/Muse-Missing-Module.cjs'`n          - id: aih-muse-isolation")
     if ($brokenPatch -eq $patch) { throw 'FAIL: could not construct the broken-module probe.' }
     [IO.File]::WriteAllText($patchPath, $brokenPatch, [Text.UTF8Encoding]::new($false))
-    $verifyExit = 0
-    try { & $layout.Node $verifier $disposable 2>&1 | Out-Null; $verifyExit = $LASTEXITCODE } catch { $verifyExit = 1 }
+    $verifyExit = Invoke-FixtureVerifier $disposable
     [IO.File]::WriteAllBytes($patchPath, $goodPatch)
     if ($verifyExit -eq 0) { throw 'FAIL: the real composition accepted a Muse plane whose local module cannot load.' }
-    & $layout.Node $verifier $disposable 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'FAIL: restoring the good home patch did not restore a passing composition.' }
+    if ((Invoke-FixtureVerifier $disposable) -ne 0) { throw 'FAIL: restoring the good home patch did not restore a passing composition.' }
     Pass 'the real DSH composition rejects a plane whose local module cannot load'
 
     $firstClosures = Snapshot-Hashes (Join-Path $disposable 'data/.agent-presets')

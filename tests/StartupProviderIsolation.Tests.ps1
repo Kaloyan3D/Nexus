@@ -99,6 +99,8 @@ function Start-AihStartupLauncher {
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     Write-Host "STARTUP [$Stage] launch (stdout $stdout)"
     $process = Start-Process -FilePath $aihPsHost -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',$encoded) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    # Keep the Windows process handle open so ExitCode survives a fast exit.
+    $null = $process.Handle
     Write-Host "STARTUP [$Stage] launched PID $($process.Id)"
     return @{ Process=$process; Stdout=$stdout; Stderr=$stderr }
 }
@@ -110,7 +112,9 @@ function Invoke-AihBoundedStartupLauncher($Fixture, [string]$Stage) {
         if (-not $launcher.Process.WaitForExit(25000)) {
             throw "STARTUP [$Stage] launcher exceeded its 25-second exit deadline. See $($launcher.Stderr)"
         }
-        return $launcher.Process.ExitCode
+        $exitCode = $launcher.Process.ExitCode
+        Write-Host "STARTUP [$Stage] launcher exited with code [$exitCode]"
+        return $exitCode
     } finally {
         if (-not $launcher.Process.HasExited) { $launcher.Process.Kill(); [void]$launcher.Process.WaitForExit(5000) }
         $launcher.Process.Dispose()
@@ -214,6 +218,7 @@ try {
     $originalPid = [int](Get-Content -Raw (Join-Path $absent.Root 'data/aih-state.json') | ConvertFrom-Json).Pid
     $reuseExit = Invoke-AihBoundedStartupLauncher $absent 'reuse'
     $reusedState = Get-Content -Raw (Join-Path $absent.Root 'data/aih-state.json') | ConvertFrom-Json
+    Write-Host "STARTUP [reuse] state=$($reusedState.Status) PID=$($reusedState.Pid) expected=$originalPid"
     Assert-Aih ($reuseExit -eq 0 -and $reusedState.Status -eq 'READY' -and [int]$reusedState.Pid -eq $originalPid) 'aih reuses the verified READY Web UI process'
 
     Stop-AihFixtureProcess $absent.Root

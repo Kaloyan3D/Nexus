@@ -3,19 +3,22 @@
 // across a delay (simulating append/flush/verify), appends a marker record,
 // then releases. Usage: node xproc_worker.cjs <workspace> <taskId> <taskInstanceId> <sessionId> <operationId> <holdMs> <tag>
 const { execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const INSTALL_ROOT = path.resolve(__dirname, '..');
 const CLI = path.join(INSTALL_ROOT, 'scripts', 'ContextLifecycleCli.ps1');
 const PWSH = 'pwsh';
 function cli(action, taskId, payload) {
-  const payloadFile = '/tmp/ccv1_xproc_' + process.pid + '_' + action + '.json';
-  require('node:fs').writeFileSync(payloadFile, JSON.stringify(payload));
+  const payloadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccv1-xproc-'));
+  const payloadFile = path.join(payloadDir, 'payload.json');
   try {
+    fs.writeFileSync(payloadFile, JSON.stringify(payload));
     const out = execFileSync(PWSH, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', CLI, '-Action', action, '-TaskId', taskId, '-PayloadFile', payloadFile], { encoding: 'utf8', timeout: 120000 });
     const text = out.trim();
     return text === '' ? null : JSON.parse(text);
   } finally {
-    try { require('node:fs').unlinkSync(payloadFile); } catch {}
+    fs.rmSync(payloadDir, { recursive: true, force: true });
   }
 }
 async function main() {

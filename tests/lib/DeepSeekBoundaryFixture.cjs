@@ -120,6 +120,7 @@ async function createBoundaryFixture(installRoot, fault) {
       return handle.agent;
     }
     async function probe(sessionId, action, extra = {}) {
+      const startedAt = Date.now();
       const agent = agents.get(sessionId);
       assert(agent, 'probe requires a live fixture-owned DSH agent');
       if (action === 'prepare') {
@@ -155,6 +156,8 @@ async function createBoundaryFixture(installRoot, fault) {
         if (typeof error.code !== 'string') throw error;
         return { nextCount, result: { kind: 'reject', refused: true, code: error.code } };
       } finally {
+        const elapsed = Date.now() - startedAt;
+        if (elapsed >= 5000) console.log(`DSH boundary probe ${action} took ${elapsed} ms`);
         if (extra.noHeader) delete agent.session.id;
         if (extra.worker || extra.noHeader) {
           if (header) Object.defineProperty(agent.session, 'header', header);

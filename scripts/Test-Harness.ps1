@@ -309,7 +309,11 @@ foreach ($suite in $suites) {
     try {
         $application = Get-Command -Name $executable -CommandType Application -ErrorAction Stop
         $watchdog = Join-Path $PSScriptRoot 'Test-SuiteProcess.cjs'
-        $timeout = if ($suite.name -eq 'StartupProviderIsolation') { [Math]::Min(150, $SuiteTimeoutSeconds) } else { $SuiteTimeoutSeconds }
+        $timeout = if ((Test-AihIsWindows) -and $suite.name -eq 'DeepSeekRequestBoundaryHost' -and -not $PSBoundParameters.ContainsKey('SuiteTimeoutSeconds')) {
+            # The hosted Windows trace shows repeated 20-second intervals between case results.
+            # Keep a finite budget for the full real-host matrix.
+            960
+        } elseif ($suite.name -eq 'StartupProviderIsolation') { [Math]::Min(150, $SuiteTimeoutSeconds) } else { $SuiteTimeoutSeconds }
         $output = @(& $researchNode $watchdog $timeout $application.Source @arguments 2>&1 | ForEach-Object {
             $line = [string]$_
             Write-Host $line
