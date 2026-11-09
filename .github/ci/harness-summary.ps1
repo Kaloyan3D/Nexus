@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory)][string]$ReportPath,
-    [ValidateSet('production', 'ccv2-lab')][string]$Lane = 'production'
+    [ValidateSet('production', 'ccv2-lab')][string]$Lane = 'production',
+    [ValidateSet('full', 'general', 'boundary')][string]$ProductionShard = 'full'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,7 +13,7 @@ if (-not (Test-Path -LiteralPath $ReportPath -PathType Leaf)) {
     throw 'Expected harness report is missing'
 }
 
-$inventoryJson = & node (Join-Path $PSScriptRoot 'harness-inventory.cjs') $Lane
+$inventoryJson = & node (Join-Path $PSScriptRoot 'harness-inventory.cjs') $Lane $ProductionShard
 if ($LASTEXITCODE -ne 0) { throw 'Could not read the required suite inventory' }
 $inventory = @($inventoryJson | ConvertFrom-Json)
 $rawPath = [IO.Path]::ChangeExtension([IO.Path]::GetFullPath($ReportPath), '.log')

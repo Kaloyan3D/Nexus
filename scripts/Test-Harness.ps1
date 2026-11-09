@@ -17,7 +17,8 @@ param(
     # product keeps disabled); 'all' (default) runs both. Nothing is deleted or weakened:
     # the lab lane is runnable on demand and its size is always printed. See
     # docs/testing/CCV2-LAB-SUITES.md.
-    [ValidateSet('production','ccv2-lab','all')][string]$Lane = 'all'
+    [ValidateSet('production','ccv2-lab','all')][string]$Lane = 'all',
+    [ValidateSet('full','general','boundary')][string]$ProductionShard = 'full'
 )
 
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent $PSScriptRoot }
@@ -238,6 +239,13 @@ foreach ($suite in $suites) { $suite['lane'] = Get-AihSuiteLane $suite.name }
 $labCount = @($suites | Where-Object { $_.lane -eq 'ccv2-lab' }).Count
 $productionCount = @($suites | Where-Object { $_.lane -eq 'production' }).Count
 if ($Lane -ne 'all') { $suites = @($suites | Where-Object { $_.lane -eq $Lane }) }
+if ($ProductionShard -ne 'full') {
+    if ($Lane -ne 'production') { throw 'Production shards require the production lane' }
+    $boundaryName = 'DeepSeekRequestBoundaryHost'
+    if (@($suites | Where-Object name -CEQ $boundaryName).Count -ne 1) { throw 'Expected exactly one boundary suite' }
+    if ($ProductionShard -eq 'boundary') { $suites = @($suites | Where-Object name -CEQ $boundaryName) }
+    else { $suites = @($suites | Where-Object name -CNE $boundaryName) }
+}
 Write-Host ('HARNESS LANE: {0} | production suites {1} | ccv2-lab suites {2} | running {3}' -f $Lane, $productionCount, $labCount, $suites.Count)
 if ($Lane -eq 'production') { Write-Host ('NOTE: {0} CCv2 lab suites are not run in this lane; run -Lane ccv2-lab (docs/testing/CCV2-LAB-SUITES.md).' -f $labCount) }
 
@@ -312,7 +320,7 @@ foreach ($suite in $suites) {
         $timeout = if ((Test-AihIsWindows) -and $suite.name -eq 'DeepSeekRequestBoundaryHost' -and -not $PSBoundParameters.ContainsKey('SuiteTimeoutSeconds')) {
             # The hosted Windows trace shows repeated 20-second intervals between case results.
             # Keep a finite budget for the full real-host matrix.
-            960
+            1500
         } elseif ($suite.name -eq 'StartupProviderIsolation') { [Math]::Min(150, $SuiteTimeoutSeconds) } else { $SuiteTimeoutSeconds }
         $output = @(& $researchNode $watchdog $timeout $application.Source @arguments 2>&1 | ForEach-Object {
             $line = [string]$_

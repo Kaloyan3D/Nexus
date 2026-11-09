@@ -79,10 +79,22 @@ jobs:
             runner: windows-2022
             windows_host: windows-powershell
             artifact: Windows-X64-PS51
+            shard: general
+          - platform: Windows x64 PowerShell 5.1 security
+            runner: windows-2022
+            windows_host: windows-powershell
+            artifact: Windows-X64-PS51-security
+            shard: boundary
           - platform: Windows x64 PowerShell 7
             runner: windows-2022
             windows_host: pwsh
             artifact: Windows-X64-PS7
+            shard: general
+          - platform: Windows x64 PowerShell 7 security
+            runner: windows-2022
+            windows_host: pwsh
+            artifact: Windows-X64-PS7-security
+            shard: boundary
           - platform: Linux x64
             runner: ubuntu-24.04
             artifact: Linux-X64
@@ -92,6 +104,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     env:
+      DSH_PRODUCTION_SHARD: ${{ matrix.shard || 'full' }}
       npm_config_prefer_offline: 'true'
       npm_config_audit: 'false'
     steps:
@@ -198,7 +211,7 @@ jobs:
           $env:TEMP = $env:RUNNER_TEMP
           $env:TMP = $env:RUNNER_TEMP
           Set-Location $env:RUNNER_TEMP
-          & "$env:DSH_ROOT/bin/aih-test.cmd" -Lane production -ContinueOnFailure -ReportPath "$env:DSH_REPORTS/production.json"
+          & "$env:DSH_ROOT/bin/aih-test.cmd" -Lane production -ProductionShard $env:DSH_PRODUCTION_SHARD -ContinueOnFailure -ReportPath "$env:DSH_REPORTS/production.json"
           exit $LASTEXITCODE
       - name: Installed production harness on pinned POSIX PowerShell
         if: runner.os != 'Windows' && !cancelled() && steps.posix_install.outcome == 'success'
@@ -223,7 +236,7 @@ jobs:
           Write-Host "Runner PowerShell version $($PSVersionTable.PSVersion)"
           Set-Location $env:RUNNER_TEMP
           $harness = "$env:DSH_ROOT/scripts/Test-Harness.ps1"
-          & $env:AIH_TEST_PWSH -NoProfile -File $harness -InstallRoot $env:DSH_ROOT -PowerShellExecutable $env:AIH_TEST_PWSH -Lane production -ContinueOnFailure -ReportPath "$env:DSH_REPORTS/production.json"
+          & $env:AIH_TEST_PWSH -NoProfile -File $harness -InstallRoot $env:DSH_ROOT -PowerShellExecutable $env:AIH_TEST_PWSH -Lane production -ProductionShard $env:DSH_PRODUCTION_SHARD -ContinueOnFailure -ReportPath "$env:DSH_REPORTS/production.json"
           exit $LASTEXITCODE
 
       - name: Run opt-in CCv2 laboratory from source
@@ -242,7 +255,7 @@ jobs:
       - name: Validate and summarize production report
         if: '!cancelled()'
         shell: pwsh
-        run: ./.github/ci/harness-summary.ps1 -ReportPath "$env:DSH_REPORTS/production.json"
+        run: ./.github/ci/harness-summary.ps1 -ReportPath "$env:DSH_REPORTS/production.json" -ProductionShard "$env:DSH_PRODUCTION_SHARD"
       - name: Validate and summarize CCv2 lab report
         if: runner.os == 'Linux' && !cancelled() && inputs.ccv2_lab
         shell: pwsh

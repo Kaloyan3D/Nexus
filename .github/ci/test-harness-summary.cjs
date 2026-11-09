@@ -58,6 +58,43 @@ try {
     assert.equal(result.status === 0, pass, name + ': ' + result.stderr);
     console.log('PASS: report validator ' + name);
   }
+  const shardInventory = shard => {
+    const result = spawnSync(process.execPath, [path.join(__dirname, 'harness-inventory.cjs'), 'production', shard],
+      { encoding: 'utf8', timeout: 15000 });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const general = shardInventory('general');
+  const boundary = shardInventory('boundary');
+  assert.deepEqual(boundary, [security]);
+  assert.equal(new Set([...general, ...boundary].map(suite => suite.name)).size, inventory.length);
+  assert.deepEqual([...general, ...boundary].map(suite => suite.name).sort(), inventory.map(suite => suite.name).sort());
+  for (const [shard, rows, proof, expected] of [
+    ['general', general, '', true],
+    ['boundary', boundary, marker, true],
+    ['boundary', boundary, '', false],
+    ['general', inventory, marker, false],
+    ['full', general, '', false],
+    ['boundary', general, '', false],
+  ]) {
+    const dir = fs.mkdtempSync(path.join(root, 'shard-'));
+    const reportPath = path.join(dir, 'report.json');
+    const value = structuredClone(report);
+    value.suites = rows.map(row => value.suites.find(suite => suite.name === row.name));
+    value.suiteCount = rows.length;
+    value.statusCounts.PASS = rows.length;
+    fs.writeFileSync(reportPath, JSON.stringify(value));
+    const verdicts = rows.map(suite => '===== RESULT ' + suite.name + ': PASS (exit 0) =====');
+    fs.writeFileSync(path.join(dir, 'report.log'), [proof, ...verdicts, ''].join('\n'));
+    const result = spawnSync('pwsh', ['-NoProfile', '-File', path.join(__dirname, 'harness-summary.ps1'),
+      '-ReportPath', reportPath, '-ProductionShard', shard], {
+      encoding: 'utf8', timeout: 15000, env: { ...process.env, GITHUB_STEP_SUMMARY: path.join(dir, 'summary.md') },
+    });
+    assert.ifError(result.error);
+    assert.notEqual(result.status, null);
+    assert.equal(result.status === 0, expected, result.stderr);
+  }
+  console.log('PASS: production shard inventories are complete, disjoint, and require boundary proof');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
