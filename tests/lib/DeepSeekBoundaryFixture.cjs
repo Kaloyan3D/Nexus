@@ -40,7 +40,22 @@ async function createBoundaryFixture(installRoot, fault) {
       Object.assign(process.env, initialEnvironment);
       process.chdir(initialCwd);
       Socket.prototype.connect = originalConnect;
-      fs.rmSync(base, { recursive: true, force: true, maxRetries: 3 });
+      // Remove the fixture-owned links themselves before any recursive
+      // deletion. In particular the Windows junction targets are the shared
+      // test installation and must never be part of the cleanup traversal.
+      for (const item of ['app', 'runtime']) {
+        const link = path.join(install, item);
+        const stat = fs.lstatSync(link, { throwIfNoEntry: false });
+        if (!stat) continue;
+        assert(stat.isSymbolicLink(), 'expected fixture-owned link: ' + link);
+        await fs.promises.unlink(link);
+      }
+      try {
+        await fs.promises.rm(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+      } catch (cause) {
+        const remaining = fs.readdirSync(base, { recursive: true }).slice(0, 20);
+        throw new Error('Boundary fixture cleanup failed; remaining entries: ' + JSON.stringify(remaining), { cause });
+      }
     }
   }
 
