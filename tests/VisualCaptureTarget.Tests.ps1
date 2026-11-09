@@ -108,10 +108,20 @@ exit 1
     Assert-Aih ($override.deviceId-eq'emulator-7777'-and$override.packageName-eq'com.autopulse.override'-and$override.activity-eq'.DebugActivity') 'explicit project runtime target overrides manifest defaults'
 
     [IO.File]::WriteAllText($log,''); 'com.other'|Set-Content -LiteralPath $state -NoNewline
-    $p1=Start-Process -RedirectStandardOutput (Join-Path $fixture 'parallel-a.out') -RedirectStandardError (Join-Path $fixture 'parallel-a.err') $aihPsHost -PassThru -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $InstallRoot 'scripts/Capture-VisualEvidence.ps1'),'-OutputPath',(Join-Path $fixture 'parallel-a.png'),'-AdbPath',$fakeCmd,'-DeviceSerial','emulator-5554','-PackageName','app.openrank.mobile','-ScenarioId','a','-Iteration','1','-Force')
-    $null = $p1.Handle
-    $p2=Start-Process -RedirectStandardOutput (Join-Path $fixture 'parallel-b.out') -RedirectStandardError (Join-Path $fixture 'parallel-b.err') $aihPsHost -PassThru -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $InstallRoot 'scripts/Capture-VisualEvidence.ps1'),'-OutputPath',(Join-Path $fixture 'parallel-b.png'),'-AdbPath',$fakeCmd,'-DeviceSerial','emulator-5554','-PackageName','com.autopulse.mobile','-ScenarioId','b','-Iteration','1','-Force')
-    $null = $p2.Handle
+    $savedModulePath = $env:PSModulePath
+    try {
+        if (Test-AihIsWindows) {
+            # Start-Process inherits the PS7 environment even though the
+            # capture worker uses Windows PowerShell. Use its own modules.
+            $env:PSModulePath = Join-Path (Split-Path -Parent (Get-Command $aihPsHost).Source) 'Modules'
+        }
+        $p1=Start-Process -RedirectStandardOutput (Join-Path $fixture 'parallel-a.out') -RedirectStandardError (Join-Path $fixture 'parallel-a.err') $aihPsHost -PassThru -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $InstallRoot 'scripts/Capture-VisualEvidence.ps1'),'-OutputPath',(Join-Path $fixture 'parallel-a.png'),'-AdbPath',$fakeCmd,'-DeviceSerial','emulator-5554','-PackageName','app.openrank.mobile','-ScenarioId','a','-Iteration','1','-Force')
+        $null = $p1.Handle
+        $p2=Start-Process -RedirectStandardOutput (Join-Path $fixture 'parallel-b.out') -RedirectStandardError (Join-Path $fixture 'parallel-b.err') $aihPsHost -PassThru -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $InstallRoot 'scripts/Capture-VisualEvidence.ps1'),'-OutputPath',(Join-Path $fixture 'parallel-b.png'),'-AdbPath',$fakeCmd,'-DeviceSerial','emulator-5554','-PackageName','com.autopulse.mobile','-ScenarioId','b','-Iteration','1','-Force')
+        $null = $p2.Handle
+    } finally {
+        $env:PSModulePath = $savedModulePath
+    }
     Assert-Aih ($p1.WaitForExit(60000) -and $p2.WaitForExit(60000)) 'parallel capture workers finish within their deadlines'
     $capturePackages=@(Get-Content $log|Where-Object{$_-like'captured-package=*'}|ForEach-Object{$_-replace'^captured-package=',''} )
     if ($p1.ExitCode -ne 0 -or $p2.ExitCode -ne 0 -or $capturePackages.Count -ne 2) {

@@ -11,6 +11,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { createRequire } = require('node:module');
 const { pathToFileURL } = require('node:url');
+const { resolveAihPowerShellHost } = require('./AihTestTransport.cjs');
 
 async function createBoundaryFixture(installRoot, fault) {
   if (!installRoot) throw new Error('NEXUS_RUNTIME_ROOT must name a composed DSH installation');
@@ -93,9 +94,11 @@ async function createBoundaryFixture(installRoot, fault) {
       fs.mkdirSync(process.env.LOCALAPPDATA, { recursive: true });
       process.env.HOMEDRIVE = path.parse(home).root.slice(0, 2);
       process.env.HOMEPATH = home.slice(2);
+      const windowsHost = resolveAihPowerShellHost(source);
+      process.env.PSModulePath = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules');
       const startedAt = Date.now();
-      await promisify(execFile)('powershell.exe',
-        ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'exit 0'],
+      await promisify(execFile)(windowsHost,
+        ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Get-FileHash -InputStream ([IO.MemoryStream]::new()) | Out-Null; if (-not $?){exit 1}'],
         { timeout: 30000, windowsHide: true });
       console.log('DSH boundary Windows PowerShell startup: ' + (Date.now() - startedAt) + ' ms');
     }
