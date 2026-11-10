@@ -131,6 +131,8 @@ $suites = @(
     [ordered]@{ name='NexusManagedTasksRealHost'; script='tests/NexusManagedTasks.RealHost.Tests.mjs'; executable=$layout.Node; kind='node' },
     # P2-B2C session durability: format-v4 source kinds, protected-head notice ordering, identity ledger.
     [ordered]@{ name='NexusSessionDurability'; script='tests/NexusSessionDurability.Tests.cjs'; executable=$layout.Node; kind='node' },
+    # P2-B2C real host: fresh Dual/Muse sessions (first message armed at claim) survive full restarts.
+    [ordered]@{ name='NexusSessionColdRestoreRealHost'; script='tests/NexusSessionColdRestore.RealHost.Tests.mjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCheckpointV2'; script='tests/ContextCheckpointV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextTrustV2'; script='tests/ContextTrustV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextSnapshotV2'; script='tests/ContextSnapshotV2.Tests.cjs'; executable=$layout.Node; kind='node' },

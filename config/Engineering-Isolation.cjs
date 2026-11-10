@@ -30,6 +30,7 @@ const path = require('node:path')
 const profiles = require('./Engineering-Profiles.cjs')
 const requestBoundary = require('./Controller-RequestBoundary.cjs')
 const registryBinding = require('./registry/session-binding.cjs')
+const nexusProfiles = require('./Nexus-Profiles.cjs')
 
 /** Read the persisted session binding (workspace/taskId/preset) for a session. */
 function bindingFor(installRoot, sessionId) {
@@ -205,6 +206,27 @@ function apply(ctx) {
       if (binding && binding.engine !== 'dual') throw enforcementError('session-binding-is-not-dual-engine', binding, null, 'engine-binding-violation')
       if (binding && sessionPreset(session) === 'aih-muse') throw enforcementError('session-preset-does-not-match-bound-engine', binding, null, 'engine-binding-violation')
       return { ...controllerTargetFor(installRoot, binding), binding }
+    },
+    // A brand-new Dual session has no task binding at message claim (the
+    // bridge creates it in pre-step), yet DSH fixes the first step's model
+    // selection right after the claim. Arm-only provisional target: the active
+    // Dual profile's role for the policy's default execution class. Never used
+    // for request authorization: the guard verifies the real routed target.
+    provisionalTargetFor(payload) {
+      const session = payload && payload.agent && payload.agent.session
+      const header = session && session.header
+      if (!session || !header || header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0) return null
+      if (sessionPreset(session) !== 'aih-engineering') return null
+      const installRoot = profiles.installRootOf()
+      if (bindingFor(installRoot, session.id)) return null
+      const active = nexusProfiles.resolveActiveNexusProfile(installRoot, 'aih-engineering')
+      if (!active || active.engine !== 'dual' || active.runnable === false) return null
+      const policy = profiles.loadPolicy(installRoot)
+      const role = profiles.roleOfExecutionClass(policy && policy.defaultExecutionClass ? policy.defaultExecutionClass : 'engineer_normal')
+      if (!role) return null
+      const target = profiles.resolveTarget(installRoot, (active.source && active.source.profileId) || active.id, role)
+      if (!target || !target.provider || !target.model || !target.reasoning) return null
+      return { provider: target.provider, model: target.model, reasoning: target.reasoning }
     },
     finalize(proposed, target) {
       return {

@@ -180,7 +180,8 @@ async function hostStart(io, json, requestId, flags) {
     if (!/^\d{2,5}$/.test(String(flags['--port'])) || Number(flags['--port']) > 65535) throw new CliError('USAGE', '--port must be a TCP port')
     args.push('-Port', String(flags['--port']))
   }
-  if (flags['--open']) args.push('-Open')
+  // --open is handled below with the tokenized URL (the launcher only knows the
+  // bare URL when the host was already running, which the browser cannot use).
   if (flags['--workspace'] !== undefined) args.push(validateWorkspace(flags['--workspace'], io))
   const launched = await (io.launch || launchProcess)(io.pwshHost || defaultPwshHost(io.installRoot), args, { cwd: io.installRoot })
   if (!json) io.stderr(launched.stdout.split('\n').filter(Boolean).map((line) => 'nexus: ' + line).join('\n') + (launched.stdout ? '\n' : ''))
@@ -188,7 +189,7 @@ async function hostStart(io, json, requestId, flags) {
     const tail = (launched.stderr || launched.stdout || '').trim().split('\n').slice(-3).join(' | ').slice(0, 400)
     throw new CliError('HOST_UNAVAILABLE', 'the Nexus launcher failed (exit ' + launched.code + ')' + (tail ? ': ' + tail : ''))
   }
-  const url = (launched.stdout.match(/https?:\/\/127\.0\.0\.1:\d+\/\S*/g) || []).pop() || null
+  const url = tokenizedUrl(launched.stdout) || tokenizedUrlFromState(io) || (launched.stdout.match(/https?:\/\/127\.0\.0\.1:\d+\S*/g) || []).pop() || null
   const deadline = Date.now() + (flags['--timeout'] ? parseDuration(flags['--timeout']) : 60000)
   let hello = null
   let lastError = null
@@ -198,9 +199,33 @@ async function hostStart(io, json, requestId, flags) {
     await new Promise((resolve) => setTimeout(resolve, 500))
   }
   if (!hello || !hello.ok || !hello.data.ready) throw new CliError('HOST_NOT_READY', 'the host started but the Nexus Controller did not become ready' + (lastError ? ': ' + lastError.message : ''))
+  if (flags['--open'] && url) (io.openUrl || openInBrowser)(url)
   const data = { started: true, url, ready: true, controllerBuild: hello.data.controllerBuild, ownership: hello.data.ownership.state, managedAdmission: hello.data.managedAdmission, operations: hello.data.operations }
   render(io, json, { schemaVersion: 1, ok: true, requestId, data }, (d) => `Nexus host READY · ${d.url || 'url unknown'} · managed tasks ${d.managedAdmission}`)
   return EXIT.ok
+}
+
+function tokenizedUrl(text) {
+  return (String(text || '').match(/https?:\/\/127\.0\.0\.1:\d+\/\?token=[A-Za-z0-9_-]+/g) || []).pop() || null
+}
+
+/** The running host's login URL, from its own stdout log (recorded in aih-state.json). */
+function tokenizedUrlFromState(io) {
+  try {
+    const state = JSON.parse(fs.readFileSync(path.join(io.dataRoot, 'aih-state.json'), 'utf8').replace(/^\uFEFF/, ''))
+    if (!state || typeof state.StdoutLog !== 'string') return null
+    const log = fs.readFileSync(state.StdoutLog, 'utf8')
+    const found = tokenizedUrl(log)
+    if (!found) return null
+    const port = String(state.Url || '').match(/:(\d+)/)
+    return port && !found.includes(':' + port[1] + '/') ? null : found
+  } catch { return null }
+}
+
+function openInBrowser(url) {
+  const { spawn } = require('node:child_process')
+  const command = process.platform === 'darwin' ? ['open', [url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : ['xdg-open', [url]]
+  try { spawn(command[0], command[1], { stdio: 'ignore', detached: true }).unref() } catch { /* the URL is printed anyway */ }
 }
 
 function defaultPwshHost(installRoot) {

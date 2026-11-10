@@ -98,7 +98,7 @@ async function main() {
     assert.ok(a.includes(path.join(sourceRoot, 'scripts', 'aih.ps1')))
     assert.deepEqual(a.slice(a.indexOf('-Preset'), a.indexOf('-Preset') + 2), ['-Preset', 'aih-muse'])
     assert.deepEqual(a.slice(a.indexOf('-Port'), a.indexOf('-Port') + 2), ['-Port', '3090'])
-    assert.ok(a.includes('-Open')); assert.equal(a[a.length - 1], fs.realpathSync(ws))
+    assert.ok(!a.includes('-Open'), 'the CLI opens the tokenized URL itself'); assert.equal(a[a.length - 1], fs.realpathSync(ws))
     const bad = await exec(['host', 'start', '--mode', 'nova', '--json'], noHost)
     assert.equal(bad.code, 2); assert.equal(bad.json.error.code, 'MODE_UNKNOWN')
   }

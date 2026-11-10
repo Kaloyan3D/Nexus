@@ -218,6 +218,23 @@ function processedSignalIdsOf(block) {
  * Pure policy lives only in the governor; this function performs no policy
  * of its own (no phase mapping, no thresholds, no ladder logic).
  */
+/**
+ * The effort prepareMuseRequestEffort resolves for a task that has no Muse
+ * reasoning or activity state yet (a brand-new task: routing never writes
+ * these blocks). Pure: reads only the model registry, writes nothing. Used to
+ * arm a new session's first step before its task binding exists.
+ */
+function initialMuseRequestEffort({ installRoot, target } = {}) {
+  if (typeof installRoot !== 'string' || installRoot === '') throw new TypeError('initialMuseRequestEffort requires installRoot.');
+  const reasoningState = museReasoningStateOf(null);
+  const activityState = museActivityStateOf(null);
+  const effective = activity.reduceEffectiveState({ phase: reasoningState.phase, activity: activityState });
+  const effectiveState = effective.effectivePhase === reasoningState.phase
+    ? reasoningState
+    : governor.updateMuseReasoningState(reasoningState, { phase: effective.effectivePhase });
+  return governor.resolveMuseReasoningEffortForRequest({ state: effectiveState, registryEntry: registryEntryFor(installRoot, target) }).effort;
+}
+
 function prepareMuseRequestEffort({ installRoot, binding, target } = {}) {
   if (typeof installRoot !== 'string' || installRoot === '') {
     throw new TypeError('prepareMuseRequestEffort requires installRoot.');
@@ -555,6 +572,7 @@ module.exports = {
   },
   registryEntryFor,
   prepareMuseRequestEffort,
+  initialMuseRequestEffort,
   transitionMuseReasoningState,
   invalidateMuseRootCause,
   invalidateMuseSolution,

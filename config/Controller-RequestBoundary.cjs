@@ -157,7 +157,25 @@ function installControllerRequestBoundary(ctx, boundary) {
       armedByAgent.set(agent, { target, prepared, selection })
     } catch (error) {
       armedByAgent.set(agent, { error, target })
+      armProvisional(agent, payload)
     }
+  }
+
+  // No controller target yet (a brand-new session is bound later, in
+  // pre-step): record the plane's provisional selection so the step DSH fixes
+  // right after this claim already carries the expected route and effort.
+  // Selection only — the armed state stays the refusal above, and the request
+  // guard verifies the real target as always.
+  function armProvisional(agent, payload) {
+    if (typeof boundary.provisionalTargetFor !== 'function') return
+    try {
+      const provisional = boundary.provisionalTargetFor(payload)
+      if (!provisional) return
+      const selection = selectionOf(provisional, provisional.reasoning)
+      const current = currentSelection(agent)
+      if (current && sameRoute(current, selection) && current.reasoningEffort === selection.reasoningEffort) return
+      agent.model.select(selection)
+    } catch { /* provisional arming is best effort; the guard stays authoritative */ }
   }
 
   ctx.on('agent/inbox/claimed', (payload) => {
