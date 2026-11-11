@@ -45,7 +45,7 @@ fs.copyFileSync(installedPatch, path.join(dataRoot, 'cordis.patch.yml'))
 for (const name of ['nexus-settings.yaml', 'Routing-Integrity.cjs', 'OpenCode-SessionHeader.cjs']) if (fs.existsSync(path.join(root, 'data', name))) fs.copyFileSync(path.join(root, 'data', name), path.join(dataRoot, name))
 if (fs.existsSync(path.join(root, 'data', 'profiles'))) fs.cpSync(path.join(root, 'data', 'profiles'), path.join(dataRoot, 'profiles'), { recursive: true })
 const workspace = fs.mkdtempSync(path.join(scratch, 'ws-'))
-const { createFakePwshHost } = require('./lib/FakePwshHost.cjs')
+const { createFakePwshHost, FAKE_HOST_SUPPORTED, declareWindowsFakeHostGap } = require('./lib/FakePwshHost.cjs')
 const fake = createFakePwshHost(path.join(scratch, 'pwsh'))
 fake.install()
 fake.respond({ '*': { json: {} } })
@@ -120,10 +120,19 @@ try {
   const legacyId = legacy.body && legacy.body.result && legacy.body.result.value && legacy.body.result.value.sessionId || legacy.body && legacy.body.value && legacy.body.value.sessionId
   assert.ok(legacyId && legacyId !== sessionId)
   fake.reset()
+  const refusedBeforeLegacy = controller.metrics().managedStepsRefused
   await call('session/prompt', { requestId: crypto.randomUUID(), sessionId: legacyId, mode: 'queue', content: [{ type: 'text', text: 'Ordinary legacy turn.' }] })
-  await waitFor(() => fake.invocations().length > 0, 20000)
-  evidence.results.legacy = { controllerCli: fake.invocations().map((i) => i.script + ':' + i.action), managed: controller.admission.isManaged(legacyId) }
-  assert.ok(fake.invocations().length > 0, 'an ordinary legacy session is not affected by the managed gate (bridge ran its controller CLI)')
+  const legacyTurnEnded = await waitFor(() => { const s = ctx.get('sessions').get(legacyId); const events = s ? sessionEvents(s) : []; return Array.isArray(events) && events.some((e) => e && e.type === 'turn/end') }, 30000)
+  evidence.results.legacy = { controllerCli: fake.invocations().map((i) => i.script + ':' + i.action), managed: controller.admission.isManaged(legacyId), turnEnded: legacyTurnEnded, managedRefusals: controller.metrics().managedStepsRefused - refusedBeforeLegacy }
+  // Every platform: the session is unmanaged and the managed gate refused none of its steps.
+  assert.equal(controller.admission.isManaged(legacyId), false, 'an ordinary legacy session is not managed')
+  assert.equal(controller.metrics().managedStepsRefused, refusedBeforeLegacy, 'the managed-session gate refused none of the ordinary session\'s steps')
+  if (FAKE_HOST_SUPPORTED) {
+    await waitFor(() => fake.invocations().length > 0, 20000)
+    assert.ok(fake.invocations().length > 0, 'an ordinary legacy session is not affected by the managed gate (bridge ran its controller CLI)')
+  } else {
+    declareWindowsFakeHostGap('NexusOwnerPeerGuard', 'the controller-CLI invocation proof for the ordinary session')
+  }
   pass('ordinary legacy sessions are untouched by the managed-session gate')
 
   // ── P2-B1 owner-peer coverage matrix on the managed session ──────────────

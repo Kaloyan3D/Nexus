@@ -10,6 +10,7 @@
 // NEXUS_TEST_GATEWAY=production (default) — pinned DSH 0.2.2: activation must
 //   stay inactive (hook absent), submit must be refused fail-closed through
 //   both CLI and GUI, and nothing is created.
+import { IPC_SUPPORTED, taskOp, assertWindowsCliRefused, declareWindowsIpcGap } from './lib/NexusRealHostPlatform.mjs'
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import crypto from 'node:crypto'
@@ -144,15 +145,21 @@ try {
     // ── Pinned DSH: fail closed ─────────────────────────────────────────
     assert.equal(ready.activation.active, false)
     assert.ok(ready.activation.problems.some((p) => p.startsWith('gateway-hook-unverified:gateway-build-not-allowlisted')), JSON.stringify(ready.activation))
-    const refused = await nexus(['submit', '--workspace', workspace, '--mode', 'engineering-v2', '--prompt', 'Implement it.', '--idempotency-key', 'prod-1', '--json'])
-    assert.equal(refused.code, 4, refused.stdout + refused.stderr); assert.equal(refused.json.error.code, 'REQUIRED_CAPABILITY_UNAVAILABLE')
+    const refused = await taskOp({ nexus, owner, cliArgs: ['submit', '--workspace', workspace, '--mode', 'engineering-v2', '--prompt', 'Implement it.', '--idempotency-key', 'prod-1', '--json'], operation: 'submit', input: { idempotencyKey: 'prod-1', workspace, mode: 'engineering-v2', prompt: prompt('Implement it.') } })
+    if (refused.via === 'cli') assert.equal(refused.code, 4, refused.stdout + refused.stderr)
+    assert.equal(refused.json.error.code, 'REQUIRED_CAPABILITY_UNAVAILABLE')
     assert.ok(refused.json.error.details.problems.some((p) => p.startsWith('gateway-hook-unverified')))
     const gui = await owner.task('submit', { idempotencyKey: 'prod-2', workspace, mode: 'engineering-v1', prompt: prompt('x') })
     assert.equal(gui.body.ok, false); assert.equal(gui.body.error && gui.body.error.code, 'REQUIRED_CAPABILITY_UNAVAILABLE', JSON.stringify(gui))
-    const modes = await nexus(['modes', '--json'])
+    const modes = await taskOp({ nexus, owner, cliArgs: ['modes', '--json'], operation: 'listModes', input: {} })
     assert.ok(modes.json.data.modes.every((m) => m.submittable === false && m.blockedReason === 'managed-admission-disabled'))
-    const status = await nexus(['host', 'status', '--json'])
-    assert.equal(status.json.data.managedAdmission, 'disabled')
+    if (IPC_SUPPORTED) {
+      const status = await nexus(['host', 'status', '--json'])
+      assert.equal(status.json.data.managedAdmission, 'disabled')
+    } else {
+      await assertWindowsCliRefused(nexus, assert)
+      assert.equal(ready.activation.problems.some((p) => p === 'platform-not-qualified:win32'), true, 'Windows is reported as an unqualified platform')
+    }
     const after = await host.report()
     assert.deepEqual(after.intake, [], 'nothing was reserved, created or delivered')
     assert.equal(fs.existsSync(path.join(dataRoot, 'nexus', 'intake')) ? fs.readdirSync(path.join(dataRoot, 'nexus', 'intake')).length : 0, 0)
@@ -160,7 +167,8 @@ try {
     const noGuiForged = await (await fetch(`http://127.0.0.1:${ready.port}/nexus/tasks/v1/submit`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status
     assert.equal(noGuiForged, 401, 'the GUI task route requires connection admission')
     evidence.scenarios.production = { activation: ready.activation, cli: refused.json.error, gui: gui.body.error }
-    pass('pinned DSH 0.2.2 (hook absent): activation inactive, CLI and GUI submit refused fail-closed (exit 4), nothing created, no model call, GUI route requires admission')
+    pass('pinned DSH 0.2.2 (hook absent): activation inactive, CLI and GUI submit refused fail-closed (exit 4), nothing created, no model call, GUI route requires admission' + (IPC_SUPPORTED ? '' : ' (win32: CLI has no IPC transport and reports HOST_UNAVAILABLE; refusals proven through the GUI route)'))
+    declareWindowsIpcGap('NexusManagedTasks.RealHost', 'CLI submit/modes/host status over IPC and patched-mode managed lifecycle')
   } else {
     // ── Patched PoC: activation and lifecycle ───────────────────────────
     assert.equal(ready.activation.active, true, JSON.stringify({ activation: ready.activation, gates: ready.gates }))

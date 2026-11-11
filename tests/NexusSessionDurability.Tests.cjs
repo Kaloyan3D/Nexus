@@ -22,7 +22,7 @@ const os = require('node:os')
 const path = require('node:path')
 const { createRequire } = require('node:module')
 const { pathToFileURL } = require('node:url')
-const { createFakePwshHost } = require('./lib/FakePwshHost.cjs')
+const { createFakePwshHost, FAKE_HOST_SUPPORTED, declareWindowsFakeHostGap } = require('./lib/FakePwshHost.cjs')
 
 const sourceRoot = path.join(__dirname, '..')
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-session-durability-'))
@@ -139,6 +139,7 @@ async function main() {
     pass('protected surface head detection follows the v4 rule (first surface event must be system/message)')
   }
 
+  if (FAKE_HOST_SUPPORTED) {
   // ── 3. Notice ordering through the real bridge pre-step ──────────────────
   for (const engine of ['muse', 'dual']) {
     fake.reset()
@@ -228,6 +229,10 @@ async function main() {
     assert.ok(appended.some((e) => e.type === 'user/message' && e.data.source.kind === 'aih-controller'), 'legacy-shaped sessions are unchanged: notice appended directly')
     assert.equal(fs.existsSync(path.join(dataRoot, 'routing', 'pending-notices')), false)
     pass('sessions without the v4 private log (legacy/test doubles) keep the pre-P2-B2C direct append')
+  }
+
+  } else {
+    declareWindowsFakeHostGap('NexusSessionDurability', 'groups 3-5 (bridge notice ordering, rejected-first-turn queue, legacy direct append)')
   }
 
   // ── 6. Managed identity retention (tombstones) ───────────────────────────

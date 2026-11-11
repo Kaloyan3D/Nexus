@@ -133,6 +133,19 @@ async function main() {
     async unset(ref) { vault.delete(ref) },
   }
   const core = controllerModule.createControllerCore({ installRoot: sourceRoot, dataRoot, workspaceAuthorizer: async () => true, credentials })
+  if (process.platform === 'win32') {
+    // Windows native IPC qualification is pending (roadmap R02): the transport
+    // refuses explicitly instead of serving an endpoint without an ACL.
+    await assert.rejects(ipc.startIpcServer({ core, dataRoot, generation: 'cli-gen' }), (error) => error && error.code === 'ipc-transport-unsupported-platform')
+    const hostStatus = await exec(['host', 'status', '--json'], dataRoot)
+    assert.equal(hostStatus.code, 3); assert.equal(hostStatus.json.error.code, 'HOST_UNAVAILABLE')
+    pass('win32: the local IPC transport is explicitly unsupported (named-pipe ACL not implemented): startIpcServer refuses with ipc-transport-unsupported-platform and the CLI reports HOST_UNAVAILABLE (exit 3)')
+    console.log('INFO: win32 IPC-backed CLI groups (host status/modes/status/result/wait, submit refusal, credentials, host start, session check over IPC) need the IPC transport and run on Linux and macOS only; Windows IPC is not claimed')
+    await core.dispose()
+    console.log(`NexusCli: ${passed} assertion groups passed.`)
+    fs.rmSync(scratch, { recursive: true, force: true })
+    return
+  }
   const server = await ipc.startIpcServer({ core, dataRoot, generation: 'cli-gen' })
   const hostStatus = await exec(['host', 'status', '--json'], dataRoot)
   assert.equal(hostStatus.code, 0); assert.equal(hostStatus.json.data.managedAdmission, 'disabled')

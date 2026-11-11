@@ -10,6 +10,7 @@
 // verification to completion, failed verification, concurrent GUI+CLI
 // responses, duplicate requests, verification after a host restart, an
 // interrupted task closed safely, no additional inference.
+import { IPC_SUPPORTED, taskOp, assertManagedRefused, declareWindowsIpcGap } from './lib/NexusRealHostPlatform.mjs'
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import crypto from 'node:crypto'
@@ -52,8 +53,17 @@ let passed = 0
 const pass = (name) => { passed += 1; console.log('PASS: ' + name) }
 const evidence = { mode, platform: process.platform, arch: process.arch, runs: {} }
 const settingsFile = path.join(dataRoot, 'nexus-settings.yaml')
-const originalSettings = fs.existsSync(settingsFile) ? fs.readFileSync(settingsFile, 'utf8') : null
-const setPreference = (profile) => { if (originalSettings !== null) fs.writeFileSync(settingsFile, profile === null ? originalSettings : originalSettings.replace(/^engineering-profile:.*$/m, 'engineering-profile: ' + profile)) }
+// A clean install selects the Dual profile (`engineering-profile: deepseek-codex`)
+// and refuses ordinary Muse turns until a Muse profile is chosen. This suite
+// selects its engineering profile explicitly instead of inheriting the
+// installation's preference: the Muse profile is the baseline, Dual runs
+// switch to their profile and back. A missing settings file fails loudly.
+const MUSE_TEST_PROFILE = 'muse-spark-1.3-contributor-opencode'
+if (!fs.existsSync(settingsFile)) throw new Error('installed nexus-settings.yaml is missing: ' + settingsFile)
+const withProfile = (text, profile) => (/^engineering-profile:.*$/m.test(text) ? text.replace(/^engineering-profile:.*$/m, 'engineering-profile: ' + profile) : 'engineering-profile: ' + profile + '\n\n' + text)
+const originalSettings = withProfile(fs.readFileSync(settingsFile, 'utf8'), MUSE_TEST_PROFILE)
+fs.writeFileSync(settingsFile, originalSettings)
+const setPreference = (profile) => fs.writeFileSync(settingsFile, profile === null ? originalSettings : withProfile(originalSettings, profile))
 
 function startHost() {
   const child = spawn(node, [path.join(root, 'tests', 'lib', 'NexusManagedHost.mjs')], { env, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -124,12 +134,13 @@ try {
   host = startHost()
   let ready = await host.next((m) => m.type === 'ready')
   let owner = await ownerClient(ready)
+  const addWorkspace = (ws) => taskOp({ nexus, owner, cliArgs: ['workspace', 'add', '--path', ws, '--json'], operation: 'registerWorkspace', input: { path: ws } })
   const passing = makeRepo('pass', 0)
-  for (const ws of [passing]) assert.equal((await nexus(['workspace', 'add', '--path', ws, '--json'])).code, 0)
+  for (const ws of [passing]) assert.equal((await addWorkspace(ws)).code, 0)
 
   // ── Legacy GUI /verify parity (ordinary session, both modes) ──────────────
   {
-    const created = await owner.api('session/create', { workspaceId: (await nexus(['workspace', 'add', '--path', passing, '--json'])).json.data.workspaceId, agentPreset: 'aih-muse' })
+    const created = await owner.api('session/create', { workspaceId: (await addWorkspace(passing)).json.data.workspaceId, agentPreset: 'aih-muse' })
     const id = created.value.sessionId
     await owner.api('session/prompt', { requestId: crypto.randomUUID(), sessionId: id, mode: 'queue', content: [{ type: 'text', text: 'Ordinary task turn.' }] })
     await waitFor(async () => (await host.inspect(id)).turnEnds.length >= 1, 'ordinary turn')
@@ -145,14 +156,14 @@ try {
   }
 
   if (mode === 'production') {
-    const refused = await nexus(['submit', '--workspace', passing, '--mode', 'engineering-v2', '--prompt', 'x', '--idempotency-key', 'prod', '--json'])
-    assert.equal(refused.code, 4); assert.equal(refused.json.error.code, 'REQUIRED_CAPABILITY_UNAVAILABLE')
-    pass('standard unpatched DSH: managed submission still refused fail-closed')
+    await assertManagedRefused({ nexus, owner, assert, workspace: passing, mode: 'engineering-v2', withContinue: false })
+    pass('standard unpatched DSH: managed submission still refused fail-closed' + (IPC_SUPPORTED ? '' : ' (win32: via the GUI task route; the CLI reports HOST_UNAVAILABLE without IPC)'))
+    declareWindowsIpcGap('NexusTaskVerification.RealHost', 'patched-mode managed verification (PoC gateway is macOS-only and Windows activation is unqualified)')
   } else {
     assert.equal(ready.activation.active, true, JSON.stringify(ready.activation))
     const failing = makeRepo('fail', 1)
     const passingDual = makeRepo('pass-dual', 0)
-    for (const ws of [failing, passingDual]) assert.equal((await nexus(['workspace', 'add', '--path', ws, '--json'])).code, 0)
+    for (const ws of [failing, passingDual]) assert.equal((await addWorkspace(ws)).code, 0)
     async function executed(label, ws, modeId, preference) {
       setPreference(preference)
       const text = `Managed ${label}: add a line to README.md.`

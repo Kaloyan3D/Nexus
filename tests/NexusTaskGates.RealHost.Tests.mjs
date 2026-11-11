@@ -5,6 +5,7 @@
 // Synthetic engineering model transport; the independent reviewer is a local
 // synthetic HTTP endpoint (AIH_OAUTH_BASE_URL on 127.0.0.1) that returns a
 // configured verdict and counts requests; blocked egress; no credential.
+import { IPC_SUPPORTED, taskOp, assertManagedRefused, declareWindowsIpcGap } from './lib/NexusRealHostPlatform.mjs'
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import crypto from 'node:crypto'
@@ -52,8 +53,17 @@ let passed = 0
 const pass = (name) => { passed += 1; console.log('PASS: ' + name) }
 const evidence = { mode, platform: process.platform, arch: process.arch, runs: {} }
 const settingsFile = path.join(dataRoot, 'nexus-settings.yaml')
-const originalSettings = fs.existsSync(settingsFile) ? fs.readFileSync(settingsFile, 'utf8') : null
-const setPreference = (profile) => { if (originalSettings !== null) fs.writeFileSync(settingsFile, profile === null ? originalSettings : originalSettings.replace(/^engineering-profile:.*$/m, 'engineering-profile: ' + profile)) }
+// A clean install selects the Dual profile (`engineering-profile: deepseek-codex`)
+// and refuses ordinary Muse turns until a Muse profile is chosen. This suite
+// selects its engineering profile explicitly instead of inheriting the
+// installation's preference: the Muse profile is the baseline, Dual runs
+// switch to their profile and back. A missing settings file fails loudly.
+const MUSE_TEST_PROFILE = 'muse-spark-1.3-contributor-opencode'
+if (!fs.existsSync(settingsFile)) throw new Error('installed nexus-settings.yaml is missing: ' + settingsFile)
+const withProfile = (text, profile) => (/^engineering-profile:.*$/m.test(text) ? text.replace(/^engineering-profile:.*$/m, 'engineering-profile: ' + profile) : 'engineering-profile: ' + profile + '\n\n' + text)
+const originalSettings = withProfile(fs.readFileSync(settingsFile, 'utf8'), MUSE_TEST_PROFILE)
+fs.writeFileSync(settingsFile, originalSettings)
+const setPreference = (profile) => fs.writeFileSync(settingsFile, profile === null ? originalSettings : withProfile(originalSettings, profile))
 
 function startHost(extraEnv = {}) {
   const child = spawn(node, [path.join(root, 'tests', 'lib', 'NexusManagedHost.mjs')], { env: { ...env, ...extraEnv }, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -145,6 +155,7 @@ try {
   host = startHost()
   let ready = await host.next((m) => m.type === 'ready')
   let owner = await ownerClient(ready)
+  const addWorkspace = (ws) => taskOp({ nexus, owner, cliArgs: ['workspace', 'add', '--path', ws, '--json'], operation: 'registerWorkspace', input: { path: ws } })
   const restart = async (extraEnv = {}, kill = false) => {
     if (kill) await host.kill(); else await host.stop()
     host = startHost(extraEnv)
@@ -152,12 +163,12 @@ try {
     owner = await ownerClient(ready)
   }
   const repoA = makeRepo('gates', 0)
-  assert.equal((await nexus(['workspace', 'add', '--path', repoA, '--json'])).code, 0)
+  assert.equal((await addWorkspace(repoA)).code, 0)
 
   // ── Ordinary GUI explicit /review on a Dual session (both modes) ─────────
   {
     setPreference('deepseek-codex')
-    const workspaceId = (await nexus(['workspace', 'add', '--path', repoA, '--json'])).json.data.workspaceId
+    const workspaceId = (await addWorkspace(repoA)).json.data.workspaceId
     const id = (await owner.api('session/create', { workspaceId, agentPreset: 'aih-engineering' })).value.sessionId
     await owner.api('session/prompt', { requestId: crypto.randomUUID(), sessionId: id, mode: 'queue', content: [{ type: 'text', text: '[turn-1] Improve token verification in src/token.js.' }] })
     await waitFor(async () => (await host.inspect(id)).turnEnds.length >= 1, 'ordinary dual turn')
@@ -176,11 +187,9 @@ try {
   }
 
   if (mode === 'production') {
-    const refused = await nexus(['submit', '--workspace', repoA, '--mode', 'engineering-v1', '--prompt', 'x', '--idempotency-key', 'prod', '--json'])
-    assert.equal(refused.code, 4); assert.equal(refused.json.error.code, 'REQUIRED_CAPABILITY_UNAVAILABLE')
-    const cont = await nexus(['continue', 'nt_' + '0'.repeat(32), '--prompt', 'x', '--revision', '1', '--json'])
-    assert.equal(cont.code, 4); assert.equal(cont.json.error.code, 'REQUIRED_CAPABILITY_UNAVAILABLE')
-    pass('standard unpatched DSH: managed submit and continue are refused fail-closed')
+    await assertManagedRefused({ nexus, owner, assert, workspace: repoA, mode: 'engineering-v1', withContinue: true })
+    pass('standard unpatched DSH: managed submit and continue are refused fail-closed' + (IPC_SUPPORTED ? '' : ' (win32: via the GUI task route; the CLI reports HOST_UNAVAILABLE without IPC)'))
+    declareWindowsIpcGap('NexusTaskGates.RealHost', 'the CLI-over-IPC paths and patched-mode review/gate tasks')
   } else {
     assert.equal(ready.activation.active, true, JSON.stringify(ready.activation))
     const statusOf = async (taskId) => { const r = await nexus(['status', taskId, '--json']); assert.ok(r.json && r.json.ok, r.stdout + r.stderr); return r.json.data }
@@ -248,7 +257,7 @@ try {
     {
       reviewer.verdict = 'fail'
       const repoG = makeRepo('gate', 0)
-      assert.equal((await nexus(['workspace', 'add', '--path', repoG, '--json'])).code, 0)
+      assert.equal((await addWorkspace(repoG)).code, 0)
       const t = await submitted('dual-gate', repoG, 'engineering-v1', 'deepseek-codex')
       let view = await statusOf(t.taskId)
       await respond(t.taskId, actionOf(view, 'review'), 'run')
@@ -288,7 +297,7 @@ try {
     // 4. Multi-turn: a turn-1 review never certifies turn 2.
     {
       const repoM = makeRepo('multi', 0)
-      assert.equal((await nexus(['workspace', 'add', '--path', repoM, '--json'])).code, 0)
+      assert.equal((await addWorkspace(repoM)).code, 0)
       const t = await submitted('dual-multi', repoM, 'engineering-v1', 'deepseek-codex')
       let view = await statusOf(t.taskId)
       await respond(t.taskId, actionOf(view, 'review'), 'run')
@@ -313,7 +322,7 @@ try {
     //    unavailable in this environment -> blocked, never a fabricated PASS.
     {
       const repoV = makeRepo('visual', 0, { requirement: 'required' })
-      assert.equal((await nexus(['workspace', 'add', '--path', repoV, '--json'])).code, 0)
+      assert.equal((await addWorkspace(repoV)).code, 0)
       const t = await submitted('dual-visual', repoV, 'engineering-v1', 'deepseek-codex')
       await new Promise((r) => setTimeout(r, 2000))
       let view = await statusOf(t.taskId)
@@ -338,7 +347,7 @@ try {
     // 6. Restart during review: never re-run automatically, never counted.
     {
       const repoR = makeRepo('restart', 0)
-      assert.equal((await nexus(['workspace', 'add', '--path', repoR, '--json'])).code, 0)
+      assert.equal((await addWorkspace(repoR)).code, 0)
       const t = await submitted('dual-restart', repoR, 'engineering-v1', 'deepseek-codex')
       let view = await statusOf(t.taskId)
       reviewer.hold = true

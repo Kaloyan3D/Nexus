@@ -13,6 +13,7 @@
 //   valid, same identities/attempts/status via CLI, no duplicate prompt,
 //   attempt or model request; interrupted execution reconciled to an explicit
 //   hold without replay; a deleted intake record never releases its session.
+import { IPC_SUPPORTED, taskOp, assertManagedRefused, declareWindowsIpcGap } from './lib/NexusRealHostPlatform.mjs'
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import crypto from 'node:crypto'
@@ -46,8 +47,17 @@ let passed = 0
 const pass = (name) => { passed += 1; console.log('PASS: ' + name) }
 const evidence = { mode, platform: process.platform, arch: process.arch, holds: {}, managed: {} }
 const settingsFile = path.join(dataRoot, 'nexus-settings.yaml')
-const originalSettings = fs.existsSync(settingsFile) ? fs.readFileSync(settingsFile, 'utf8') : null
-const setPreference = (profile) => { if (originalSettings !== null) fs.writeFileSync(settingsFile, profile === null ? originalSettings : originalSettings.replace(/^engineering-profile:.*$/m, 'engineering-profile: ' + profile)) }
+// A clean install selects the Dual profile (`engineering-profile: deepseek-codex`)
+// and refuses ordinary Muse turns until a Muse profile is chosen. This suite
+// selects its engineering profile explicitly instead of inheriting the
+// installation's preference: the Muse profile is the baseline, Dual runs
+// switch to their profile and back. A missing settings file fails loudly.
+const MUSE_TEST_PROFILE = 'muse-spark-1.3-contributor-opencode'
+if (!fs.existsSync(settingsFile)) throw new Error('installed nexus-settings.yaml is missing: ' + settingsFile)
+const withProfile = (text, profile) => (/^engineering-profile:.*$/m.test(text) ? text.replace(/^engineering-profile:.*$/m, 'engineering-profile: ' + profile) : 'engineering-profile: ' + profile + '\n\n' + text)
+const originalSettings = withProfile(fs.readFileSync(settingsFile, 'utf8'), MUSE_TEST_PROFILE)
+fs.writeFileSync(settingsFile, originalSettings)
+const setPreference = (profile) => fs.writeFileSync(settingsFile, profile === null ? originalSettings : withProfile(originalSettings, profile))
 
 function startHost(extraEnv = {}) {
   const child = spawn(node, [path.join(root, 'tests', 'lib', 'NexusManagedHost.mjs')], { env: { ...env, ...extraEnv }, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -91,6 +101,11 @@ async function ownerClient(ready) {
       const body = await response.json().catch(() => ({}))
       const result = body && body.result
       return { ok: Boolean(result && result.ok), code: result && result.error ? result.error.code : null, reason: result && result.error && result.error.details ? result.error.details.reason : null, message: result && result.error ? result.error.message : null, value: result && result.value }
+    },
+    // The SAME Task API through the authenticated GUI route (used on win32, where the IPC transport is unsupported).
+    async task(operation, input) {
+      const response = await fetch(base + 'nexus/tasks/v1/' + operation, { method: 'POST', headers, body: JSON.stringify({ schemaVersion: 1, requestId: crypto.randomUUID(), input }) })
+      return response.json()
     },
   }
 }
@@ -149,9 +164,11 @@ try {
   let ready = await host.next((m) => m.type === 'ready')
   assert.equal(ready.ownership, 'held')
   let owner = await ownerClient(ready)
+  const addWorkspace = (ws) => taskOp({ nexus, owner, cliArgs: ['workspace', 'add', '--path', ws, '--json'], operation: 'registerWorkspace', input: { path: ws } })
+  const checkSession = (id) => taskOp({ nexus, owner, cliArgs: ['session', 'check', id, '--json'], operation: 'checkSession', input: { sessionId: id } })
   const workspace = makeRepo('ws')
-  const added = await nexus(['workspace', 'add', '--path', workspace, '--json'])
-  assert.equal(added.code, 0, 'CLI workspace add: ' + added.stdout + added.stderr)
+  const added = await addWorkspace(workspace)
+  assert.ok(added.via === 'gui' ? added.json.ok : added.code === 0, 'workspace add (' + added.via + '): ' + added.stdout + added.stderr)
   const workspaceId = added.json.data.workspaceId
 
   // ── Part C: historical broken sessions are held ─────────────────────────
@@ -171,15 +188,15 @@ try {
   assert.equal(latentAfter.llmCalls, 0, 'no model request for a held session')
   assert.equal(latentAfter.firstSurface.type, 'user/message'); assert.ok(!latentAfter.surfaceOrder.some((s) => s.includes('system/message')), 'no system message was appended: the history was not corrupted')
   assert.equal(latentAfter.readable, true, 'the held latent session stays readable')
-  const latentCheck = await nexus(['session', 'check', latent, '--json'])
-  assert.equal(latentCheck.code, 7, latentCheck.stdout + latentCheck.stderr); assert.equal(latentCheck.json.data.reason, 'session-history-notice-before-head-pending'); assert.equal(latentCheck.json.data.repair, 'not-repairable-losslessly')
+  const latentCheck = await checkSession(latent)
+  if (latentCheck.via === 'cli') assert.equal(latentCheck.code, 7, latentCheck.stdout + latentCheck.stderr); assert.equal(latentCheck.json.data.reason, 'session-history-notice-before-head-pending'); assert.equal(latentCheck.json.data.repair, 'not-repairable-losslessly')
   // Retired kind: stored notice with `plugin` source after the head.
   const retired = await mk()
   await prompt(retired, 'Retired-kind session first turn.')
   await waitFor(async () => (await host.inspect(retired)).turnEnds.length >= 1, 'retired first turn')
   const refusedLive = await host.inject('retired', retired)
   assert.equal(refusedLive.ok, false, 'current DSH refuses a retired source kind on live append')
-  assert.equal((await nexus(['session', 'check', valid, '--json'])).json.data.state, 'healthy', 'a valid session checks healthy')
+  assert.equal((await checkSession(valid)).json.data.state, 'healthy', 'a valid session checks healthy')
   await host.stop()
   await appendRetiredOnDisk(retired)
   const auditAfter = audit()
@@ -191,8 +208,8 @@ try {
   host = startHost()
   ready = await host.next((m) => m.type === 'ready')
   owner = await ownerClient(ready)
-  const retiredCheck = await nexus(['session', 'check', retired, '--json'])
-  assert.equal(retiredCheck.code, 7); assert.equal(retiredCheck.json.data.state, 'held'); assert.equal(retiredCheck.json.data.reason, 'session-history-retired-source-kind'); assert.equal(retiredCheck.json.data.source, 'durable')
+  const retiredCheck = await checkSession(retired)
+  if (retiredCheck.via === 'cli') assert.equal(retiredCheck.code, 7); assert.equal(retiredCheck.json.data.state, 'held'); assert.equal(retiredCheck.json.data.reason, 'session-history-retired-source-kind'); assert.equal(retiredCheck.json.data.source, 'durable')
   const retiredPrompt = await prompt(retired, 'Must not run after restart.')
   await new Promise((r) => setTimeout(r, 2500))
   const retiredInspect = await host.inspect(retired)
@@ -236,9 +253,9 @@ try {
   pass('tool-call/result pairing preserved next to first-turn notices; the stored history audits valid, cold-reads after restart and continues')
 
   if (mode === 'production') {
-    const refused = await nexus(['submit', '--workspace', workspace, '--mode', 'engineering-v2', '--prompt', 'x', '--idempotency-key', 'prod', '--json'])
-    assert.equal(refused.code, 4); assert.equal(refused.json.error.code, 'REQUIRED_CAPABILITY_UNAVAILABLE')
-    pass('standard unpatched DSH: managed submission still refused fail-closed')
+    await assertManagedRefused({ nexus, owner, assert, workspace, mode: 'engineering-v2', withContinue: false })
+    pass('standard unpatched DSH: managed submission still refused fail-closed' + (IPC_SUPPORTED ? '' : ' (win32: via the GUI task route; the CLI reports HOST_UNAVAILABLE without IPC)'))
+    declareWindowsIpcGap('NexusDurabilityRestart.RealHost', 'the CLI session-check exit codes and patched-mode managed restart tasks')
   } else {
     // ── Part B: managed CLI tasks across a complete restart ────────────────
     assert.equal(ready.activation.active, true, JSON.stringify(ready.activation))

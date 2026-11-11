@@ -42,9 +42,18 @@ let passed = 0
 const pass = (name) => { passed += 1; console.log('PASS: ' + name) }
 const evidence = { mode, platform: process.platform, arch: process.arch, runs: {} }
 const settingsFile = path.join(dataRoot, 'nexus-settings.yaml')
-const originalSettings = fs.existsSync(settingsFile) ? fs.readFileSync(settingsFile, 'utf8') : null
+// A clean install selects the Dual profile (`engineering-profile: deepseek-codex`)
+// and refuses ordinary Muse turns until a Muse profile is chosen. This suite
+// selects its engineering profile explicitly instead of inheriting the
+// installation's preference: the Muse profile is the baseline, Dual runs
+// switch to their profile and back. A missing settings file fails loudly.
+const MUSE_TEST_PROFILE = 'muse-spark-1.3-contributor-opencode'
+if (!fs.existsSync(settingsFile)) throw new Error('installed nexus-settings.yaml is missing: ' + settingsFile)
+const withProfile = (text, profile) => (/^engineering-profile:.*$/m.test(text) ? text.replace(/^engineering-profile:.*$/m, 'engineering-profile: ' + profile) : 'engineering-profile: ' + profile + '\n\n' + text)
+const originalSettings = withProfile(fs.readFileSync(settingsFile, 'utf8'), MUSE_TEST_PROFILE)
+fs.writeFileSync(settingsFile, originalSettings)
 // null keeps the installation's own preference (the Muse preset's configured profile).
-const setPreference = (profile) => { if (originalSettings !== null) fs.writeFileSync(settingsFile, profile === null ? originalSettings : originalSettings.replace(/^engineering-profile:.*$/m, 'engineering-profile: ' + profile)) }
+const setPreference = (profile) => fs.writeFileSync(settingsFile, profile === null ? originalSettings : withProfile(originalSettings, profile))
 
 function startHost() {
   const child = spawn(node, [path.join(root, 'tests', 'lib', 'NexusManagedHost.mjs')], { env, stdio: ['pipe', 'pipe', 'pipe'] })

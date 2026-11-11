@@ -18,6 +18,9 @@ const fake = createFakePwshHost(path.join(scratch, 'pwsh'))
 fake.install()
 delete process.env.AIH_TOOLCHAIN_ROOT
 const legacyCli = require('../config/nexus/legacy-cli.cjs')
+// A synthetic, credential-shaped value assembled at runtime: the installed
+// source credential scan (Harness) must never see a literal token in source.
+const SYNTHETIC_SECRET = 'sk-' + 'abcdefghijklmnopqrstuvwx'
 const installRoot = path.join(scratch, 'install')
 const dataRoot = path.join(scratch, 'data')
 fs.mkdirSync(installRoot, { recursive: true })
@@ -27,6 +30,20 @@ const payloadFiles = () => { try { return fs.readdirSync(path.join(dataRoot, 'tm
 
 async function main() {
   const cli = legacyCli.createLegacyCli({ installRoot, dataRoot, ownerRoot: scratch })
+  if (process.platform === 'win32') {
+    // Product contract (scripts/Platform.ps1 Get-AihPowerShellHost): Windows
+    // keeps Windows PowerShell; AIH_PWSH_HOST is a POSIX-only override, so the
+    // synthetic host cannot be installed here.
+    const { resolveAihPowerShellHost } = require('./lib/AihTestTransport.cjs')
+    assert.equal(cli.pwshHost, resolveAihPowerShellHost(installRoot), 'Windows keeps Windows PowerShell and ignores the POSIX-only AIH_PWSH_HOST override')
+    assert.equal(cli.timeoutMs, legacyCli.CLI_TIMEOUT_MS)
+    assert.equal(legacyCli.CLI_TIMEOUT_MS, 320000, 'pre-P1 timeout preserved')
+    pass('win32: the legacy runner uses Windows PowerShell (AIH_PWSH_HOST is POSIX-only) with the pre-P1 timeout')
+    console.log('INFO: win32 synthetic-PowerShell runner groups (payload files, failure redaction, timeouts, profile scoping, accounting) require the POSIX-only AIH_PWSH_HOST injection and run on Linux and macOS only')
+    console.log(`NexusLegacyCli: ${passed} assertion groups passed.`)
+    fs.rmSync(scratch, { recursive: true, force: true })
+    return
+  }
   assert.equal(cli.pwshHost, fake.host, 'AIH_PWSH_HOST override honoured on POSIX')
   assert.equal(cli.timeoutMs, legacyCli.CLI_TIMEOUT_MS)
   assert.equal(legacyCli.CLI_TIMEOUT_MS, 320000, 'pre-P1 timeout preserved')
@@ -66,11 +83,11 @@ async function main() {
   // Partial / garbage output, non-zero exit with secrets in stderr.
   fake.respond({ 'Route.ps1': { stdout: '{"executionClass": "engi', exit: 0 } })
   await assert.rejects(cli.invoke('Route.ps1', ['-Preset', 'aih-muse']), /Route\.ps1 returned non-JSON output: \{"executionClass": "engi/)
-  fake.respond({ 'Route.ps1': { stdout: 'partial', stderr: 'MODEL_API_KEY=sk-abcdefghijklmnopqrstuvwx failure', exit: 9 } })
+  fake.respond({ 'Route.ps1': { stdout: 'partial', stderr: 'MODEL_API_KEY=' + SYNTHETIC_SECRET + ' failure', exit: 9 } })
   await assert.rejects(cli.invoke('Route.ps1', ['-Preset', 'aih-muse'], { payload: { secret: 'payload-secret' } }), (error) => {
     assert.equal(error.code, 'aih-controller-cli-failed')
     assert.equal(error.cliFailure.exitCode, 9)
-    assert.ok(!JSON.stringify(error.cliFailure).includes('sk-abcdefghijklmnopqrstuvwx'), 'secrets redacted')
+    assert.ok(!JSON.stringify(error.cliFailure).includes(SYNTHETIC_SECRET), 'secrets redacted')
     assert.ok(!JSON.stringify(error.cliFailure).includes('payload-secret'), 'payload never enters diagnostics')
     assert.ok(!error.cliFailure.args.some((arg) => arg.includes('aih-payload-')), 'payload path is not part of diagnostic args')
     return true

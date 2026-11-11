@@ -11,6 +11,7 @@
 // three-turn tasks to verified completion, restart between turns, SIGKILL at
 // continuation delivery boundaries, interrupted continued turn, concurrent and
 // duplicate continuations, continuation vs verification.
+import { IPC_SUPPORTED, taskOp, assertManagedRefused, declareWindowsIpcGap } from './lib/NexusRealHostPlatform.mjs'
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import crypto from 'node:crypto'
@@ -53,8 +54,17 @@ let passed = 0
 const pass = (name) => { passed += 1; console.log('PASS: ' + name) }
 const evidence = { mode, platform: process.platform, arch: process.arch, runs: {} }
 const settingsFile = path.join(dataRoot, 'nexus-settings.yaml')
-const originalSettings = fs.existsSync(settingsFile) ? fs.readFileSync(settingsFile, 'utf8') : null
-const setPreference = (profile) => { if (originalSettings !== null) fs.writeFileSync(settingsFile, profile === null ? originalSettings : originalSettings.replace(/^engineering-profile:.*$/m, 'engineering-profile: ' + profile)) }
+// A clean install selects the Dual profile (`engineering-profile: deepseek-codex`)
+// and refuses ordinary Muse turns until a Muse profile is chosen. This suite
+// selects its engineering profile explicitly instead of inheriting the
+// installation's preference: the Muse profile is the baseline, Dual runs
+// switch to their profile and back. A missing settings file fails loudly.
+const MUSE_TEST_PROFILE = 'muse-spark-1.3-contributor-opencode'
+if (!fs.existsSync(settingsFile)) throw new Error('installed nexus-settings.yaml is missing: ' + settingsFile)
+const withProfile = (text, profile) => (/^engineering-profile:.*$/m.test(text) ? text.replace(/^engineering-profile:.*$/m, 'engineering-profile: ' + profile) : 'engineering-profile: ' + profile + '\n\n' + text)
+const originalSettings = withProfile(fs.readFileSync(settingsFile, 'utf8'), MUSE_TEST_PROFILE)
+fs.writeFileSync(settingsFile, originalSettings)
+const setPreference = (profile) => fs.writeFileSync(settingsFile, profile === null ? originalSettings : withProfile(originalSettings, profile))
 
 function startHost(extraEnv = {}) {
   const child = spawn(node, [path.join(root, 'tests', 'lib', 'NexusManagedHost.mjs')], { env: { ...env, ...extraEnv }, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -127,6 +137,7 @@ try {
   host = startHost()
   let ready = await host.next((m) => m.type === 'ready')
   let owner = await ownerClient(ready)
+  const addWorkspace = (ws) => taskOp({ nexus, owner, cliArgs: ['workspace', 'add', '--path', ws, '--json'], operation: 'registerWorkspace', input: { path: ws } })
   const restart = async (extraEnv = {}, kill = false) => {
     if (kill) await host.kill(); else await host.stop()
     host = startHost(extraEnv)
@@ -134,11 +145,11 @@ try {
     owner = await ownerClient(ready)
   }
   const repoA = makeRepo('muse', 0)
-  assert.equal((await nexus(['workspace', 'add', '--path', repoA, '--json'])).code, 0)
+  assert.equal((await addWorkspace(repoA)).code, 0)
 
   // ── Ordinary GUI multi-turn session (both modes): unchanged behavior ──────
   {
-    const workspaceId = (await nexus(['workspace', 'add', '--path', repoA, '--json'])).json.data.workspaceId
+    const workspaceId = (await addWorkspace(repoA)).json.data.workspaceId
     const id = (await owner.api('session/create', { workspaceId, agentPreset: 'aih-muse' })).value.sessionId
     for (const n of [1, 2]) {
       await owner.api('session/prompt', { requestId: crypto.randomUUID(), sessionId: id, mode: 'queue', content: [{ type: 'text', text: `[turn-${n}] ordinary turn ${n}` }] })
@@ -151,11 +162,9 @@ try {
   }
 
   if (mode === 'production') {
-    const refused = await nexus(['submit', '--workspace', repoA, '--mode', 'engineering-v2', '--prompt', 'x', '--idempotency-key', 'prod', '--json'])
-    assert.equal(refused.code, 4); assert.equal(refused.json.error.code, 'REQUIRED_CAPABILITY_UNAVAILABLE')
-    const cont = await nexus(['continue', 'nt_' + '0'.repeat(32), '--prompt', 'x', '--revision', '1', '--json'])
-    assert.equal(cont.code, 4); assert.equal(cont.json.error.code, 'REQUIRED_CAPABILITY_UNAVAILABLE')
-    pass('standard unpatched DSH: managed submit and continue are both refused fail-closed')
+    await assertManagedRefused({ nexus, owner, assert, workspace: repoA, mode: 'engineering-v2', withContinue: true })
+    pass('standard unpatched DSH: managed submit and continue are both refused fail-closed' + (IPC_SUPPORTED ? '' : ' (win32: via the GUI task route; the CLI reports HOST_UNAVAILABLE without IPC)'))
+    declareWindowsIpcGap('NexusTaskContinuation.RealHost', 'the CLI-over-IPC continue/submit paths and patched-mode multi-turn tasks')
   } else {
     assert.equal(ready.activation.active, true, JSON.stringify(ready.activation))
     const statusOf = async (taskId) => { const r = await nexus(['status', taskId, '--json']); assert.ok(r.json && r.json.ok, 'status ' + taskId + ': ' + r.stdout + r.stderr); return r.json.data }
@@ -177,7 +186,7 @@ try {
 
     // 1. Muse and Dual: three sequential turns -> verification -> completed.
     const repoB = makeRepo('dual', 0)
-    assert.equal((await nexus(['workspace', 'add', '--path', repoB, '--json'])).code, 0)
+    assert.equal((await addWorkspace(repoB)).code, 0)
     for (const [label, ws, modeId, preference] of [['muse-3', repoA, 'engineering-v2', null], ['dual-3', repoB, 'engineering-v1', 'deepseek-codex']]) {
       const t = await submitTurn1(label, ws, modeId, preference)
       const trace = []

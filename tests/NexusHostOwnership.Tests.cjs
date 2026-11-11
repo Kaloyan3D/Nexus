@@ -57,7 +57,11 @@ async function main() {
   assert.equal(await first.release(), false, 'release is idempotent')
   const third = await ownership.acquireHostOwnership({ dataRoot: rootA, appRoot, build: 't3' })
   assert.equal(third.state, 'held', 'ownership is reacquirable after a clean release')
-  assert.ok(fs.existsSync(path.join(rootA, 'routing', ownership.LOCK_FILENAME)), 'the lock file is never deleted (stable inode)')
+  // POSIX locks an on-disk file with flock(2), which must never be deleted
+  // (stable inode). Windows uses a named kernel semaphore derived from the
+  // lock path: there is no lock file to keep, and the held/contended/
+  // reacquire assertions above are the Windows proof.
+  if (process.platform !== 'win32') assert.ok(fs.existsSync(path.join(rootA, 'routing', ownership.LOCK_FILENAME)), 'the lock file is never deleted (stable inode)')
   await third.release()
   pass('repeated host startup in one process: one holder, contenders refused, clean release reacquires')
 

@@ -193,7 +193,10 @@ async function interruptedAtomicWrites() {
   assert.equal(killedBeforeRename.status, 91, killedBeforeRename.stderr)
   assert.equal(fs.readFileSync(bindingsPath, 'utf8'), original, 'death after fsync but before rename leaves the previous document intact')
   const killedDuringWrite = crashChild(bindingsPath, 'during-write')
-  assert.equal(killedDuringWrite.signal, 'SIGKILL', killedDuringWrite.stderr)
+  // POSIX reports the signal; Windows terminates the process (TerminateProcess)
+  // with exit status 1 and no signal. Either way the child died mid-write.
+  if (process.platform === 'win32') assert.ok(killedDuringWrite.signal === null && killedDuringWrite.status === 1, JSON.stringify({ status: killedDuringWrite.status, signal: killedDuringWrite.signal, stderr: killedDuringWrite.stderr }))
+  else assert.equal(killedDuringWrite.signal, 'SIGKILL', killedDuringWrite.stderr)
   assert.equal(fs.readFileSync(bindingsPath, 'utf8'), original, 'death during a torn temp write leaves the previous document intact')
   assert.deepEqual(Object.keys(storeModule.loadBindings(bindingsPath)), ['keep'], 'the durable document stays readable (no quarantine)')
   const orphans = fs.readdirSync(path.dirname(bindingsPath)).filter((name) => name.endsWith('.tmp'))

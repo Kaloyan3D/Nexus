@@ -20,7 +20,7 @@ const crypto = require('node:crypto')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { createFakePwshHost } = require('./lib/FakePwshHost.cjs')
+const { createFakePwshHost, FAKE_HOST_SUPPORTED, declareWindowsFakeHostGap } = require('./lib/FakePwshHost.cjs')
 
 const sourceRoot = path.join(__dirname, '..')
 const bridgePath = process.env.NEXUS_BRIDGE_UNDER_TEST ? path.resolve(process.env.NEXUS_BRIDGE_UNDER_TEST) : path.join(sourceRoot, 'config', 'AihController.cjs')
@@ -274,6 +274,19 @@ async function partB() {
 }
 
 async function main() {
+  if (!FAKE_HOST_SUPPORTED) {
+    // Every scenario here drives the real bridge against the synthetic
+    // PowerShell host; on Windows the product keeps Windows PowerShell (the
+    // shared test transport mirrors that production host strategy).
+    const legacyCli = require('../config/nexus/legacy-cli.cjs')
+    const { resolveAihPowerShellHost } = require('./lib/AihTestTransport.cjs')
+    assert.equal(legacyCli.createLegacyCli({ installRoot: scratch, dataRoot: path.join(scratch, 'data'), ownerRoot: scratch }).pwshHost, resolveAihPowerShellHost(scratch))
+    pass('win32: the bridge\'s legacy runner keeps Windows PowerShell (AIH_PWSH_HOST is POSIX-only)')
+    declareWindowsFakeHostGap('NexusControllerBridge', 'parts A and B (bridge scenarios against canned controller CLIs)')
+    console.log(`NexusControllerBridge: ${passed} assertion groups passed.`)
+    fs.rmSync(scratch, { recursive: true, force: true })
+    return
+  }
   await partA()
   if (!partAOnly) await partB()
   if (process.env.NEXUS_TRACE_OUT) fs.writeFileSync(process.env.NEXUS_TRACE_OUT, JSON.stringify(traces, null, 2) + '\n')

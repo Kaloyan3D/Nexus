@@ -74,4 +74,13 @@ function createFakePwshHost(root) {
   }
 }
 
-module.exports = { createFakePwshHost }
+// The synthetic host is installed through AIH_PWSH_HOST, which the product
+// honours on POSIX only (scripts/Platform.ps1 Get-AihPowerShellHost: Windows
+// always runs Windows PowerShell). Suites gate their synthetic-host groups on
+// this flag and, on Windows, assert the product contract instead and state
+// the uncovered groups explicitly (no silent skip).
+const FAKE_HOST_SUPPORTED = process.platform !== 'win32'
+function declareWindowsFakeHostGap(suite, groups) {
+  console.log('INFO: win32 ' + suite + ': ' + groups + ' require the POSIX-only AIH_PWSH_HOST synthetic PowerShell host and run on Linux and macOS only')
+}
+module.exports = { createFakePwshHost, FAKE_HOST_SUPPORTED, declareWindowsFakeHostGap }
