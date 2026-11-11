@@ -133,6 +133,15 @@ $suites = @(
     [ordered]@{ name='NexusSessionDurability'; script='tests/NexusSessionDurability.Tests.cjs'; executable=$layout.Node; kind='node' },
     # P2-B2C real host: fresh Dual/Muse sessions (first message armed at claim) survive full restarts.
     [ordered]@{ name='NexusSessionColdRestoreRealHost'; script='tests/NexusSessionColdRestore.RealHost.Tests.mjs'; executable=$layout.Node; kind='node' },
+    # P2-B2C real host (pinned DSH): historical broken-session holds, tool pairing across restart, submit still refused.
+    [ordered]@{ name='NexusDurabilityRestartRealHost'; script='tests/NexusDurabilityRestart.RealHost.Tests.mjs'; executable=$layout.Node; kind='node' },
+    # P2-B2D verification and operator recovery through the shared Task API.
+    [ordered]@{ name='NexusTaskVerification'; script='tests/NexusTaskVerification.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusTaskVerificationRealHost'; script='tests/NexusTaskVerification.RealHost.Tests.mjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusTaskContinuation'; script='tests/NexusTaskContinuation.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusTaskContinuationRealHost'; script='tests/NexusTaskContinuation.RealHost.Tests.mjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusTaskGates'; script='tests/NexusTaskGates.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusTaskGatesRealHost'; script='tests/NexusTaskGates.RealHost.Tests.mjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCheckpointV2'; script='tests/ContextCheckpointV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextTrustV2'; script='tests/ContextTrustV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextSnapshotV2'; script='tests/ContextSnapshotV2.Tests.cjs'; executable=$layout.Node; kind='node' },

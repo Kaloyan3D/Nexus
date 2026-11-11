@@ -44,8 +44,8 @@ const MAX_FRAME_BYTES = 2 * 1024 * 1024
 const HANDSHAKE_TIMEOUT_MS = 5000
 const MAX_CONNECTIONS = 16
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/
-const OPERATIONS = Object.freeze(['hello', 'listModes', 'getStatus', 'getResult', 'follow', 'submit', 'cancel', 'respond', 'registerWorkspace', 'listCredentials', 'setCredential', 'unsetCredential'])
-const INPUT_FIELDS = Object.freeze({ hello: [], listModes: [], getStatus: ['taskId'], getResult: ['taskId'], follow: ['taskId', 'afterRevision', 'waitMs'], submit: ['idempotencyKey', 'workspace', 'mode', 'prompt'], cancel: ['taskId'], respond: ['taskId', 'actionId', 'expectedRevision', 'choiceId'], registerWorkspace: ['path'], listCredentials: ['refs'], setCredential: ['ref', 'value'], unsetCredential: ['ref'] })
+const OPERATIONS = Object.freeze(['hello', 'listModes', 'getStatus', 'getResult', 'follow', 'submit', 'continueTask', 'cancel', 'respond', 'registerWorkspace', 'listCredentials', 'setCredential', 'unsetCredential', 'checkSession'])
+const INPUT_FIELDS = Object.freeze({ hello: [], listModes: [], getStatus: ['taskId'], getResult: ['taskId'], follow: ['taskId', 'afterRevision', 'waitMs'], submit: ['idempotencyKey', 'workspace', 'mode', 'prompt'], continueTask: ['taskId', 'idempotencyKey', 'prompt', 'expectedRevision'], cancel: ['taskId'], respond: ['taskId', 'actionId', 'expectedRevision', 'choiceId'], registerWorkspace: ['path'], listCredentials: ['refs'], setCredential: ['ref', 'value'], unsetCredential: ['ref'], checkSession: ['sessionId'] })
 
 class IpcError extends Error {
   constructor(code, message) { super(message); this.code = code }

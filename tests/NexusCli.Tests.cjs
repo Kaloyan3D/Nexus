@@ -192,6 +192,50 @@ async function main() {
   assert.equal(removed.code, 0); assert.equal(vault.has('OPENCODE_API_KEY'), false)
   pass('credentials: list shows set/missing only, set reads stdin only and never echoes the value, unset removes; changes refused while a task runs')
 
+  // host start success path: the launcher only printed the bare URL (host already
+  // running); the CLI recovers the running host's login link from its own stdout
+  // log (aih-state.json -> StdoutLog), confirms readiness over IPC and opens it.
+  {
+    const token = crypto.randomBytes(16).toString('base64url')
+    const stdoutLog = path.join(dataRoot, 'dsh.out.log')
+    fs.writeFileSync(stdoutLog, 'dsh web: http://127.0.0.1:3090/?token=' + token + '\n')
+    fs.writeFileSync(path.join(dataRoot, 'aih-state.json'), JSON.stringify({ Url: 'http://127.0.0.1:3090', StdoutLog: stdoutLog }))
+    const opened = []
+    const harness = io(dataRoot)
+    harness.value.launch = async () => ({ code: 0, stdout: 'Nexus status: READY (universal runtime already running)\nhttp://127.0.0.1:3090\n', stderr: '' })
+    harness.value.pwshHost = '/fake/pwsh'
+    harness.value.openUrl = (url) => opened.push(url)
+    const code = await cli.run(['host', 'start', '--open', '--json'], harness.value)
+    const envelope = JSON.parse(harness.out.stdout)
+    assert.equal(code, 0, harness.out.stdout + harness.out.stderr)
+    assert.equal(envelope.data.ready, true); assert.equal(envelope.data.url, 'http://127.0.0.1:3090/?token=' + token)
+    assert.deepEqual(opened, ['http://127.0.0.1:3090/?token=' + token], '--open opens the tokenized login URL, not the bare URL')
+    // A log from another port is never used.
+    fs.writeFileSync(path.join(dataRoot, 'aih-state.json'), JSON.stringify({ Url: 'http://127.0.0.1:3091', StdoutLog: stdoutLog }))
+    const other = io(dataRoot)
+    other.value.launch = harness.value.launch; other.value.pwshHost = '/fake/pwsh'; other.value.openUrl = () => {}
+    await cli.run(['host', 'start', '--json'], other.value)
+    assert.equal(JSON.parse(other.out.stdout).data.url, 'http://127.0.0.1:3090', 'a login link for a different port is not reused')
+    fs.rmSync(path.join(dataRoot, 'aih-state.json')); fs.rmSync(stdoutLog)
+  }
+  pass('host start: recovers the running host\'s login link from its own log (same port only), confirms readiness over IPC, --open opens the tokenized URL')
+
+  // session check (read-only): held/healthy verdicts map to exit 7/0, no session -> NOT_FOUND.
+  {
+    const verdicts = new Map([['session-ok', { state: 'healthy', reason: null, repair: null, source: 'durable' }], ['session-held', { state: 'held', reason: 'session-history-notice-before-head', repair: 'not-repairable-losslessly', source: 'durable' }]])
+    const hc = controllerModule.createControllerCore({ installRoot: sourceRoot, dataRoot: path.join(scratch, 'health', 'data'), workspaceAuthorizer: async () => true, sessionHealth: { check: async (id) => verdicts.get(id) || { state: 'unknown' }, checkLive: () => null, peek: () => null, cwdOf: async () => workspace } })
+    fs.mkdirSync(path.join(scratch, 'health', 'data', 'routing'), { recursive: true })
+    const hs = await ipc.startIpcServer({ core: hc, dataRoot: path.join(scratch, 'health', 'data'), generation: 'health-gen' })
+    const ok = await exec(['session', 'check', 'session-ok', '--json'], path.join(scratch, 'health', 'data'))
+    assert.equal(ok.code, 0); assert.equal(ok.json.data.state, 'healthy')
+    const held = await exec(['session', 'check', 'session-held', '--json'], path.join(scratch, 'health', 'data'))
+    assert.equal(held.code, 7); assert.equal(held.json.data.reason, 'session-history-notice-before-head')
+    const missing = await exec(['session', 'check', 'session-missing', '--json'], path.join(scratch, 'health', 'data'))
+    assert.equal(missing.code, 4); assert.equal(missing.json.error.code, 'NOT_FOUND')
+    await hs.close(); await hc.dispose()
+  }
+  pass('session check: healthy exit 0, typed hold exit 7, unknown session NOT_FOUND; read-only')
+
   await server.close()
   await core.dispose()
   console.log(`NexusCli: ${passed} assertion groups passed.`)

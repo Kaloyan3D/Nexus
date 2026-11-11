@@ -780,6 +780,10 @@ function apply(ctx) {
     error.reason = resolved.reason
     throw error
   }
+  /** Whether the session belongs to a Nexus-managed task (false when unknown). */
+  function turnControllerManaged(session) {
+    try { const resolved = controllerAccess.get(); return Boolean(resolved.core && resolved.core.admission && resolved.core.admission.isManaged(session)) } catch { return false }
+  }
   // Attach now when the host service is already live; otherwise the first
   // authority point attaches. Detach exactly once when this bridge unloads.
   // Attachment is registration, not authority: attach to the live host service
@@ -2049,8 +2053,11 @@ function apply(ctx) {
   }
 
   /** Completion decision after a passed verification (review disposition aware). */
-  async function runCompletionTail(binding, session) {
-    const review = readReviewResult(binding.workspace, binding.taskId)
+  // `options.reviewUsable === false` (P2-B2F, managed Task API only): the
+  // review on disk does not belong to the current candidate (an older turn),
+  // so it is treated as absent — it can neither pass review nor open a gate.
+  async function runCompletionTail(binding, session, options) {
+    const review = options && options.reviewUsable === false ? null : readReviewResult(binding.workspace, binding.taskId)
     const reviewPass = Boolean(review && String(review.verdict) === 'pass')
     // V2: automatic visual loop at the completion boundary. Failures of the
     // loop infrastructure must never block non-visual completion accounting.
@@ -2128,10 +2135,15 @@ function apply(ctx) {
   }
 
   /** Controller-owned deterministic verification (explicit /verify command). */
-  async function executeVerifyTurn(agent, binding) {
+  // `report` (optional, P2-B2D): the shared Task API's verification action
+  // passes an object that receives the structured outcome. The /verify chat
+  // command passes none; its behavior is unchanged.
+  async function executeVerifyTurn(agent, binding, report) {
     const session = agent.session
     const latest = latestAttemptOf(binding.workspace, binding.taskId)
+    if (report) Object.assign(report, { attempt: latest ? latest.sequence : null })
     if (!latest || !attemptIsOpen(latest)) {
+      if (report) Object.assign(report, { verification: 'rejected', reason: 'no-open-attempt' })
       appendMessage(
         session,
         createControllerMessage(
@@ -2196,11 +2208,13 @@ function apply(ctx) {
       )
       await completeEngineeringEpistemicAction(binding, epistemicAction && epistemicAction.actionId, failed > 0 ? 'failed' : 'succeeded', passed + ' passed, ' + failed + ' failed, ' + skipped + ' skipped')
       await writeEvidence(binding, evidence)
+      if (report) Object.assign(report, { verification: failed > 0 ? 'failed' : 'passed', checks: { total: normalized.length, passed, failed, skipped }, failingChecks: normalized.filter((c) => c.status === 'FAIL').map((c) => c.name), evidencePath: '.ai-harness/runs/' + binding.taskId + '/evidence.json' })
       if (failed > 0) {
         await recordFailure(binding, 'verification-failed', failed + ' of ' + normalized.length + ' check(s) failed during verification of attempt ' + latest.sequence)
       } else {
         await attemptEvent(binding, 'passed')
-        await runCompletionTail(binding, session).catch((error) => log({ event: 'verify-completion-failed', error: String(error) }))
+        const completion = await runCompletionTail(binding, session, report && report.reviewUsable === false ? { reviewUsable: false } : undefined).catch((error) => { log({ event: 'verify-completion-failed', error: String(error) }); return { complete: false, error: String(error && error.message ? error.message : error) } })
+        if (report) report.completion = completionSummary(completion)
       }
       appendMessage(
         session,
@@ -2225,6 +2239,7 @@ function apply(ctx) {
       if (latestAfter && latestAfter.status === 'verifying') {
         await attemptEvent(binding, 'interrupted', { reason: 'verification-incomplete' }).catch(() => null)
       }
+      if (report) Object.assign(report, { verification: 'incomplete', reason: String(error && error.message ? error.message : error).slice(0, 300) })
       appendMessage(
         session,
         createControllerMessage(
@@ -2237,6 +2252,24 @@ function apply(ctx) {
     }
   }
 
+  // Bounded projection of a completion-check result (no raw payloads).
+  function completionSummary(completion) {
+    if (!completion || typeof completion !== 'object') return { complete: false, reason: 'completion-result-missing' }
+    const reasons = []
+    for (const key of ['reason', 'blockedReason', 'error']) if (typeof completion[key] === 'string' && completion[key]) reasons.push(completion[key])
+    // TaskController `complete` returns its denial reasons as `reasons`.
+    if (Array.isArray(completion.reasons)) for (const item of completion.reasons.slice(0, 10)) reasons.push(String(item).slice(0, 300))
+    if (Array.isArray(completion.blockers)) for (const blocker of completion.blockers.slice(0, 10)) reasons.push(typeof blocker === 'string' ? blocker : JSON.stringify(blocker).slice(0, 200))
+    if (Array.isArray(completion.missing)) for (const item of completion.missing.slice(0, 10)) reasons.push('missing: ' + (typeof item === 'string' ? item : JSON.stringify(item).slice(0, 200)))
+    if (completion.visualBlocked) reasons.push('visual-status:' + String(completion.visualStatus || 'unknown'))
+    return {
+      complete: completion.complete === true,
+      ...(reasons.length ? { reason: reasons.join('; ').slice(0, 900) } : {}),
+      ...(typeof completion.codexRequired === 'boolean' ? { reviewRequired: completion.codexRequired } : {}),
+      ...(completion.visualBlocked ? { visualBlocked: true, visualStatus: String(completion.visualStatus || 'unknown') } : {}),
+    }
+  }
+
   async function automaticallyVerifyVisualTask(session, binding) {
     if (!session || !binding || binding.visualAutoGateRunning) return null
     const latest = latestAttemptOf(binding.workspace, binding.taskId)
@@ -2246,6 +2279,14 @@ function apply(ctx) {
       const detection = await detectVisualLoop(binding)
       const required = Boolean(detection && (detection.required === true || (detection.state && detection.state.required === true)))
       if (!required) return detection
+      // P2-B2F: a Nexus-managed task verifies only through its explicit
+      // operator action (shared Task API), after its last turn: the
+      // requirement is recorded now and enforced by that verification's
+      // completion tail; no automatic verification between managed turns.
+      if (turnControllerManaged(session)) {
+        log({ event: 'managed-visual-required-deferred', taskId: binding.taskId, sessionId: session.id })
+        return detection
+      }
       appendMessage(
         session,
         createControllerMessage(
@@ -2425,8 +2466,12 @@ function apply(ctx) {
     ].filter(Boolean).join('\n')
   }
 
+  // `options.report` (optional, P2-B2F): the shared Task API's review action
+  // passes an object that receives the structured outcome. The /review chat
+  // command and automatic escalation pass none; their behavior is unchanged.
   async function executeReviewTurn(agent, binding, question, options) {
     const session = agent.session
+    const report = options && options.report ? options.report : null
     const workspace = binding.workspace
     const taskId = binding.taskId
     const taskInstanceId = binding.taskInstanceId || null
@@ -2461,10 +2506,12 @@ function apply(ctx) {
           ),
         )
         log({ event: 'review-context-quality', taskId, contextMode, quality: contextQuality })
+        if (report) Object.assign(report, { review: 'rejected', reason: 'context-quality: ' + String(contextQuality.reason || 'no meaningful evidence selected').slice(0, 200) })
         return { kind: 'reject' }
       }
       const latest = latestAttemptOf(workspace, taskId)
       const reviewAttempt = latest && Number.isInteger(latest.sequence) ? latest.sequence : null
+      if (report) Object.assign(report, { attempt: reviewAttempt })
       const review = await runReview(workspace, taskId, question, fileSlices, contextMode, reviewAttempt, taskInstanceId)
       if (review && review.ok === false && review.kind === 'packet-too-large') {
         appendMessage(
@@ -2477,6 +2524,7 @@ function apply(ctx) {
           ),
         )
         log({ event: 'review-packet-too-large', taskId, contextMode, violations: review.violations })
+        if (report) Object.assign(report, { review: 'rejected', reason: 'packet-too-large' })
         return { kind: 'reject' }
       }
       if (!review || review.ok !== true) {
@@ -2500,6 +2548,17 @@ function apply(ctx) {
         supersedeGateFor(binding, 'review-passed')
       }
       log({ event: 'review-completed', taskId, contextMode, summary: reviewSummary(review) })
+      if (report) {
+        const findings = review.result && Array.isArray(review.result.findings) ? review.result.findings : []
+        Object.assign(report, {
+          review: verdict === 'pass' ? 'passed' : verdict === 'fail' ? 'failed' : 'uncertain',
+          verdict: verdict || null,
+          findings: findings.length,
+          blockingFindings: findings.filter((item) => item && (item.severity === 'blocker' || item.severity === 'high')).length,
+          completedAt: review.result && review.result.completedAtUtc ? String(review.result.completedAtUtc) : new Date().toISOString(),
+          gateOpened: verdict === 'fail' && Boolean(binding.reviewRequired),
+        })
+      }
       return { kind: 'reject' }
     } catch (error) {
       appendMessage(
@@ -2510,6 +2569,7 @@ function apply(ctx) {
         ),
       )
       log({ event: 'review-failed', taskId, error: String(error) })
+      if (report) Object.assign(report, { review: 'incomplete', reason: String(error && error.message ? error.message : error).slice(0, 300) })
       return { kind: 'reject' }
     }
   }
@@ -2871,6 +2931,102 @@ function apply(ctx) {
   // session.create semantics or host RPC schema is changed.
   ctx.on('nexus/session-prepare', (request) => prepareSession(request))
 
+  // ── P2-B2D host hooks for the shared Task API (managed tasks) ─────────────
+  // Same authorities as the GUI: the existing /verify pipeline
+  // (Verify-Project + Engineering verification plan + Task.ps1 evidence/
+  // failure/complete) and TaskController attempt events. The Controller has
+  // already authorized the operator action; these re-validate identity.
+  function managedBindingFor(request) {
+    const fail = (code, message) => { const error = new Error(message); error.code = code; throw error }
+    if (!request || typeof request.sessionId !== 'string' || typeof request.taskInstanceId !== 'string') fail('task-action-invalid', 'sessionId and taskInstanceId are required')
+    if (bindingsLoadFailure) throw bindingsLoadFailure
+    loadBindings(bindingsPath)
+    const binding = bindings[request.sessionId]
+    if (!binding || binding.taskInstanceId !== request.taskInstanceId) fail('task-identity-mismatch', 'the session is not bound to that task instance')
+    return binding
+  }
+  async function verifyForTaskApi(request) {
+    const binding = managedBindingFor(request)
+    const identity = await testTaskIdentity(binding.workspace, binding.taskId, binding.taskInstanceId)
+    if (classifyBindingIdentity(binding, identity).verdict !== 'valid') { const error = new Error('task identity is not valid'); error.code = 'task-identity-mismatch'; throw error }
+    const latest = latestAttemptOf(binding.workspace, binding.taskId)
+    if (!latest || (request.attempt !== undefined && String(latest.sequence) !== String(request.attempt))) { const error = new Error('the task attempt changed'); error.code = 'attempt-changed'; throw error }
+    let session
+    try { const store = typeof ctx.get === 'function' ? ctx.get('sessions') : ctx.sessions; session = store && store.get(request.sessionId) } catch { session = undefined }
+    const guard = guardRegistryCommandTurn(binding, session, 'verify')
+    if (guard) return { attempt: latest.sequence, verification: 'rejected', reason: 'registry-refused' }
+    const report = request.reviewUsable === false ? { reviewUsable: false } : {}
+    await executeVerifyTurn({ session }, binding, report)
+    delete report.reviewUsable
+    const after = latestAttemptOf(binding.workspace, binding.taskId)
+    return { ...report, attemptStatus: after ? after.status : null }
+  }
+  function liveSessionOf(sessionId) {
+    try { const store = typeof ctx.get === 'function' ? ctx.get('sessions') : ctx.sessions; return store && store.get(sessionId) } catch { return undefined }
+  }
+  // P2-B2F: the existing explicit review (EMv1 Dual only, by strategy) for
+  // the current candidate. The strategy decides; Muse refuses (typed).
+  async function reviewForTaskApi(request) {
+    const binding = managedBindingFor(request)
+    const identity = await testTaskIdentity(binding.workspace, binding.taskId, binding.taskInstanceId)
+    if (classifyBindingIdentity(binding, identity).verdict !== 'valid') { const error = new Error('task identity is not valid'); error.code = 'task-identity-mismatch'; throw error }
+    const latest = latestAttemptOf(binding.workspace, binding.taskId)
+    if (!latest || !attemptIsOpen(latest) || (request.attempt !== undefined && String(latest.sequence) !== String(request.attempt))) { const error = new Error('the task attempt changed'); error.code = 'attempt-changed'; throw error }
+    const session = liveSessionOf(request.sessionId)
+    const turnController = controllerCore('task review')
+    const decision = turnController.decide(binding.engine, { sessionId: request.sessionId, taskId: binding.taskId, preset: binding.preset }, { type: 'explicit-review' })
+    if (decision.kind !== 'runReview') return { attempt: latest.sequence, review: 'unavailable', reason: decision.code || decision.kind }
+    const guard = guardRegistryCommandTurn(binding, session, 'review')
+    if (guard) return { attempt: latest.sequence, review: 'rejected', reason: 'registry-refused' }
+    const report = {}
+    // The review question is the task's own user instructions (all managed
+    // turns, newest last): a managed binding is prepared before its first
+    // prompt, so its description is a generic placeholder.
+    let instructions = []
+    try {
+      const events = session ? sessionReader.sessionEvents(session) : null
+      instructions = (Array.isArray(events) ? events : []).filter((event) => event && event.type === 'user/message' && event.data && event.data.source && event.data.source.kind === 'user').map((event) => textOf(event.data).trim()).filter(Boolean)
+    } catch { instructions = [] }
+    const question = instructions.length ? instructions.slice(-4).join('\n').slice(0, 2000) : binding.description
+    await executeReviewTurn({ session }, binding, question, { explicit: true, report })
+    return { attempt: latest.sequence, ...report }
+  }
+  // P2-B2F: resolve the existing controller-owned review gate exactly as the
+  // Control Room does (validate current gate + action + requestId replay,
+  // append the journal record, and on approve run the ONE bounded transition:
+  // TaskController completion with the review passed). `complete-approved`
+  // re-runs that transition for an already approved gate (crash recovery).
+  async function gateForTaskApi(request) {
+    const binding = managedBindingFor(request)
+    if (!gateModule) { const error = new Error('gate module unavailable'); error.code = 'gate-unavailable'; throw error }
+    const instance = typeof binding.taskInstanceId === 'string' && binding.taskInstanceId !== '' ? binding.taskInstanceId : null
+    if (request.mode === 'complete-approved') {
+      const current = gateModule.currentGateFor(dataRoot, binding.sessionId, binding.workspace, binding.taskId, instance)
+      if (!current || String(current.gateId) !== String(request.gateId) || current.status !== 'approved') return { disposition: 'stale', reason: 'gate-not-approved' }
+      return { disposition: 'completion-rerun', gateStatus: 'approved', completion: completionSummary(await completionCheck(binding, true)) }
+    }
+    const validation = gateModule.validateGateAction(dataRoot, binding, { sessionId: binding.sessionId, gateId: request.gateId, actionId: request.choice, requestId: request.requestId })
+    if (!validation.ok) return validation.replay ? { disposition: 'duplicate' } : { disposition: 'stale', reason: validation.error }
+    const resolved = gateModule.resolveGate(dataRoot, binding, validation.gate, request.choice, request.requestId, 'operator-task-api')
+    let completion = null
+    if (request.choice === 'approve') completion = completionSummary(await completionCheck(binding, true))
+    return { disposition: 'resolved', gateStatus: resolved.status, gateRevision: resolved.revision, ...(completion ? { completion } : {}) }
+  }
+  async function closeForTaskApi(request) {
+    const binding = managedBindingFor(request)
+    const latest = latestAttemptOf(binding.workspace, binding.taskId)
+    let attemptClosed = false
+    if (latest && attemptIsOpen(latest)) {
+      await attemptEvent(binding, 'interrupted', { reason: 'operator-closed' })
+      attemptClosed = true
+    }
+    return { attempt: latest ? latest.sequence : null, attemptClosed }
+  }
+  ctx.on('nexus/task-verify', (request) => verifyForTaskApi(request))
+  ctx.on('nexus/task-close', (request) => closeForTaskApi(request))
+  ctx.on('nexus/task-review', (request) => reviewForTaskApi(request))
+  ctx.on('nexus/task-gate', (request) => gateForTaskApi(request))
+
   // Phase M3: the effective agent preset is resolved from the newest
   // agent-preset/selected event (the same authority the isolation layer uses),
   // falling back to the session header. A session recomposed onto another
@@ -3222,6 +3378,13 @@ function apply(ctx) {
       // P1: every session step requires the live host Controller. Missing,
       // closed or incompatible => typed refusal below (no next(), no model).
       const turnController = controllerCore('turn admission')
+      // P2-B2C: a history held by the host (invalid DSH 0.2 log from older
+      // writers) gets no binding, attempt, notice or model call here either.
+      const heldHistory = turnController.sessionHealth && typeof turnController.sessionHealth.checkLive === 'function' ? turnController.sessionHealth.checkLive(session.id) : null
+      if (heldHistory && heldHistory.state === 'held') {
+        log({ event: 'session-held-step-refused', sessionId: session.id, reason: heldHistory.reason, gate: 'bridge' })
+        return { kind: 'reject' }
+      }
       // P2-A: Nexus-managed sessions (registered by the future shared task API)
       // are refused while managed admission is disabled; ordinary sessions pass.
       // P2-B2B: the same idempotent admission ticket as the host gate (either

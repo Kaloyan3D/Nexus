@@ -6,7 +6,7 @@
 //   - a synthetic `llm/stream` transport: every model request is answered
 //     locally with a short text reply and counted per session; no network;
 //   - optional hold: `hold\n` makes conversation replies wait until `release\n`;
-//   - NEXUS_TEST_CRASH_AT=delivering|accepted SIGKILLs this process at an intake
+//   - NEXUS_TEST_CRASH_AT=delivering|accepted|turn-delivering|turn-accepted SIGKILLs this process at an intake
 //     crash boundary by observing the atomic rename of the intake record:
 //       delivering -> right AFTER the durable delivery intent (before DSH write)
 //       accepted   -> right BEFORE the acceptance record replaces the intent
@@ -25,10 +25,15 @@ if (crashAt) {
   fs.renameSync = function patchedRename(from, to) {
     if (String(to).includes(path.join('nexus', 'intake')) && String(to).endsWith('.json')) {
       let state = null
-      try { state = JSON.parse(fs.readFileSync(from, 'utf8')).state } catch { /* not a record */ }
-      if (crashAt === 'accepted' && state === 'accepted') process.kill(process.pid, 'SIGKILL')
+      let turnState = null
+      try { const record = JSON.parse(fs.readFileSync(from, 'utf8')); state = record.state; const turns = record.continuations || []; turnState = turns.length ? turns[turns.length - 1].state : null } catch { /* not a record */ }
+      if (crashAt === 'accepted' && state === 'accepted' && turnState === null) process.kill(process.pid, 'SIGKILL')
+      // P2-B2E continuation boundaries: before the turn's acceptance commit
+      // (message already in DSH) / right after its delivery intent is durable.
+      if (crashAt === 'turn-accepted' && turnState === 'accepted') process.kill(process.pid, 'SIGKILL')
       const result = rename.call(fs, from, to)
       if (crashAt === 'delivering' && state === 'delivering') process.kill(process.pid, 'SIGKILL')
+      if (crashAt === 'turn-delivering' && turnState === 'delivering') process.kill(process.pid, 'SIGKILL')
       return result
     }
     return rename.call(fs, from, to)
@@ -44,6 +49,7 @@ const booted = await runProfile({ environment: createLaunchEnvironmentSnapshot([
 const ctx = booted.ctx
 
 const llm = { conversation: {}, auxiliary: 0, held: false, waiters: [] }
+const toolCalled = new Set()
 ctx.on('llm/stream', function synthetic(options) {
   const sessionId = String(options.sessionId || 'none')
   if (options.purpose) llm.auxiliary += 1
@@ -52,7 +58,28 @@ ctx.on('llm/stream', function synthetic(options) {
   return (async function* reply() {
     if (conversational && llm.held) await new Promise((resolve) => { llm.waiters.push(resolve); options.signal && options.signal.addEventListener('abort', resolve, { once: true }) })
     if (options.signal && options.signal.aborted) { yield { type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: 'aborted' } } }; return }
-    const text = options.purpose ? 'Synthetic title' : 'Synthetic reply.'
+    // Opt-in (NEXUS_TEST_TOOL_CALL=1): the first conversational request of a
+    // session asks for one read-only tool, so histories carry a real
+    // tool-call/tool-result pair; the follow-up request answers with text.
+    if (conversational && process.env.NEXUS_TEST_TOOL_CALL === '1' && !toolCalled.has(sessionId)) {
+      toolCalled.add(sessionId)
+      const id = 'call_' + crypto.randomBytes(6).toString('hex')
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 0, id, name: 'working_directory', argumentsDelta: '{}' }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'working_directory', arguments: '{}' } }
+      yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
+    // Opt-in (NEXUS_TEST_ECHO_TURNS=1): the reply names every `[turn-N]` marker
+    // found in the request's user messages, proving which conversation history
+    // the model actually received for this turn.
+    let text = options.purpose ? 'Synthetic title' : 'Synthetic reply.'
+    if (conversational && process.env.NEXUS_TEST_ECHO_TURNS === '1') {
+      const textOf = (m) => typeof m.content === 'string' ? m.content : (Array.isArray(m.content) ? m.content.map((b) => (b && typeof b.text === 'string' ? b.text : '')).join(' ') : '')
+      const markers = (Array.isArray(options.messages) ? options.messages : []).filter((m) => m && m.role === 'user').flatMap((m) => textOf(m).match(/\[turn-\d+\]/g) || [])
+      text = 'Synthetic reply. Seen: ' + (markers.length ? markers.join(',') : 'none')
+    }
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text }
     yield { type: 'block-end', index: 0, block: { type: 'text', text } }
@@ -154,6 +181,8 @@ async function inspectSession(sessionId) {
     userPrompts: events.filter((e) => e.type === 'user/message' && e.data.source && e.data.source.kind === 'user').map((e) => e.data.content && e.data.content[0] && e.data.content[0].text),
     controllerNotices: events.filter((e) => e.type === 'user/message' && e.data.source && e.data.source.kind === 'aih-controller').map((e) => e.seq + ':' + e.data.source.form),
     turnEnds: events.filter((e) => e.type === 'turn/end').map((e) => e.data && e.data.reason && e.data.reason.kind),
+    toolCalls: events.filter((e) => e.type === 'assistant/message').flatMap((e) => ((e.data.message && e.data.message.content) || []).filter((b) => b.type === 'tool-call').map((b) => b.id)),
+    toolResults: events.filter((e) => e.type === 'tool/result').map((e) => e.data && e.data.message && e.data.message.toolCallId),
     modelSelections: events.filter((e) => e.type === 'model/selection').map((e) => e.data && (e.data.provider + '/' + e.data.model)),
     llmCalls: llm.conversation[sessionId] || 0,
   }
@@ -169,6 +198,22 @@ process.stdin.on('data', async (chunk) => {
     buffer = buffer.slice(index + 1)
     if (line === 'report') process.stdout.write(JSON.stringify({ type: 'report', ...(await report()) }) + '\n')
     else if (line.startsWith('inspect ')) process.stdout.write(JSON.stringify({ type: 'inspect', ...(await inspectSession(line.slice(8))) }) + '\n')
+    else if (line.startsWith('inject ')) {
+      // Test-only: reproduce what pre-P2-B2C Nexus writers left in DSH 0.2 logs.
+      //   latent  -> a surface Controller notice before any system message
+      //   retired -> a surface notice carrying the retired `plugin` source kind
+      const [, kind, sessionId] = line.split(' ')
+      let ok = false
+      let error = null
+      try {
+        const live = ctx.get('sessions').get(sessionId)
+        const source = kind === 'retired' ? { kind: 'plugin', plugin: 'aih-controller', form: 'notice' } : { kind: 'aih-controller', plugin: 'aih-controller', form: 'controller-binding' }
+        live.append('user/message', { id: crypto.randomUUID(), role: 'user', content: [{ type: 'text', text: 'Controller: legacy notice (' + kind + ')' }], source }, { surfaceOp: 'append' })
+        await ctx.get('sessions').flush(live)
+        ok = true
+      } catch (err) { error = String(err && err.message ? err.message : err) }
+      process.stdout.write(JSON.stringify({ type: 'injected', kind, sessionId, ok, error }) + '\n')
+    }
     else if (line === 'hold') { llm.held = true; process.stdout.write(JSON.stringify({ type: 'ack', line }) + '\n') }
     else if (line === 'release') { llm.held = false; for (const resolve of llm.waiters.splice(0)) resolve(); process.stdout.write(JSON.stringify({ type: 'ack', line }) + '\n') }
     else if (line.startsWith('approve ')) {

@@ -1,0 +1,131 @@
+{
+  "mode": "patched",
+  "platform": "darwin",
+  "arch": "arm64",
+  "runs": {
+    "emv2-muse": {
+      "sessionId": "session-f871f84b-51bd-4221-bc4b-0834a2713d34",
+      "first": {
+        "surfaceOrder": [
+          "8:system/message",
+          "9:user/message:aih-controller",
+          "10:user/message:aih-controller",
+          "11:user/message:user",
+          "12:user/message:runtime-context",
+          "13:user/message:time-context"
+        ],
+        "notices": [
+          "9:controller-binding",
+          "10:controller-attempt"
+        ],
+        "turnEnds": [
+          "completed"
+        ]
+      },
+      "cold": {
+        "readable": true,
+        "dshEvents": 22
+      },
+      "second": {
+        "userPrompts": [
+          "First turn: add a CHANGELOG entry.",
+          "Second turn: also update the README."
+        ],
+        "turnEnds": [
+          "completed",
+          "completed"
+        ],
+        "llmCalls": 1,
+        "notices": [
+          "9:controller-binding",
+          "10:controller-attempt"
+        ]
+      },
+      "binding": {
+        "taskId": "TASK-0001",
+        "taskInstanceId": "task_5563ec6c5a954764b0b9e1ea94057be7",
+        "engine": "muse"
+      },
+      "attempts": {
+        "before": 1,
+        "after": 1
+      },
+      "audit": "valid"
+    },
+    "emv1-dual": {
+      "sessionId": "session-e5c5804b-2b16-4944-9145-a802b9a7e849",
+      "first": {
+        "surfaceOrder": [
+          "8:system/message",
+          "9:user/message:aih-controller",
+          "10:user/message:aih-controller",
+          "11:user/message:aih-controller",
+          "12:user/message:user",
+          "13:user/message:runtime-context"
+        ],
+        "notices": [
+          "9:controller-binding",
+          "10:controller-epistemic-action",
+          "11:controller-attempt"
+        ],
+        "turnEnds": [
+          "completed"
+        ]
+      },
+      "cold": {
+        "readable": true,
+        "dshEvents": 23
+      },
+      "second": {
+        "userPrompts": [
+          "First turn: add a CHANGELOG entry.",
+          "Second turn: also update the README."
+        ],
+        "turnEnds": [
+          "completed",
+          "completed"
+        ],
+        "llmCalls": 1,
+        "notices": [
+          "9:controller-binding",
+          "10:controller-epistemic-action",
+          "11:controller-attempt"
+        ]
+      },
+      "binding": {
+        "taskId": "TASK-0001",
+        "taskInstanceId": "task_81c6e5cbec334266aa1adbf4fffcee76",
+        "engine": "dual"
+      },
+      "attempts": {
+        "before": 1,
+        "after": 1
+      },
+      "audit": "valid"
+    },
+    "managed-emv2": {
+      "surfaceOrder": [
+        "8:system/message",
+        "9:user/message:aih-controller",
+        "10:user/message:user",
+        "11:user/message:runtime-context",
+        "12:user/message:time-context",
+        "17:assistant/message"
+      ],
+      "coldReadable": true,
+      "status": "blocked"
+    },
+    "managed-emv1": {
+      "surfaceOrder": [
+        "8:system/message",
+        "9:user/message:aih-controller",
+        "10:user/message:aih-controller",
+        "11:user/message:user",
+        "12:user/message:runtime-context",
+        "13:user/message:time-context"
+      ],
+      "coldReadable": true,
+      "status": "blocked"
+    }
+  }
+}

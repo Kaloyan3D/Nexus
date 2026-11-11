@@ -140,7 +140,7 @@ function createIntakeStore(options) {
           if (!(tornTail && index === lines.length - 1)) problems.push('ledger-invalid-line:' + (index + 1))
           return
         }
-        if (entry.op === 'identity') identities.set(entry.intakeId, { intakeId: entry.intakeId, taskId: entry.taskId, sessionId: entry.sessionId, principalId: entry.principalId, fingerprint: entry.fingerprint })
+        if (entry.op === 'identity') identities.set(entry.intakeId, { intakeId: entry.intakeId, taskId: entry.taskId, sessionId: entry.sessionId, principalId: entry.principalId, fingerprint: entry.fingerprint, workspacePath: typeof entry.workspacePath === 'string' ? entry.workspacePath : null })
       })
     }
     for (const [intakeId, identity] of identities) {
@@ -160,7 +160,7 @@ function createIntakeStore(options) {
     try { fs.writeSync(fd, JSON.stringify(entry) + '\n'); fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
   }
   function ledgerIdentity(record) {
-    return { op: 'identity', intakeId: record.intakeId, taskId: record.taskId, sessionId: record.sessionId, principalId: record.principalId, fingerprint: record.fingerprint, at: new Date().toISOString() }
+    return { op: 'identity', intakeId: record.intakeId, taskId: record.taskId, sessionId: record.sessionId, principalId: record.principalId, fingerprint: record.fingerprint, workspacePath: record.canonical && record.canonical.workspacePath ? record.canonical.workspacePath : null, at: new Date().toISOString() }
   }
 
   /** Re-enter records missing from the ledger (owner only; adds protection). */
@@ -282,6 +282,8 @@ function createIntakeStore(options) {
     transition,
     annotate,
     get: (intakeId) => records.get(intakeId) || null,
+    /** The record reserved under (principal, key), if any (read-only). */
+    existing: (principalId, idempotencyKey) => records.get(fileKey(principalId, idempotencyKey)) || null,
     bySessionId: (sessionId) => { const id = bySession.get(sessionId); return id ? records.get(id) : null },
     byTaskId: (taskId) => { const id = byTask.get(taskId); return id ? records.get(id) : null },
     list: () => [...records.values()],
@@ -290,7 +292,7 @@ function createIntakeStore(options) {
     /** Every retained managed identity with its disposition (active, retired, missing-record). */
     identityStatus: () => [...identities.values()].map((identity) => {
       const record = records.get(identity.intakeId)
-      return { intakeId: identity.intakeId, taskId: identity.taskId, sessionId: identity.sessionId, disposition: !record ? 'record-missing' : record.retiredAt ? 'retired' : 'active' }
+      return { intakeId: identity.intakeId, taskId: identity.taskId, sessionId: identity.sessionId, workspacePath: identity.workspacePath || null, disposition: !record ? 'record-missing' : record.retiredAt ? 'retired' : 'active' }
     }),
     retire,
     repairLedger,

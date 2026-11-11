@@ -1,0 +1,66 @@
+{
+  "mode": "production",
+  "platform": "darwin",
+  "arch": "arm64",
+  "holds": {
+    "latent": {
+      "check": {
+        "sessionId": "session-1144e2b8-6d5f-4bb9-9215-e259e89a81c6",
+        "state": "held",
+        "reason": "session-history-notice-before-head-pending",
+        "repair": "not-repairable-losslessly",
+        "source": "live",
+        "managed": false
+      },
+      "audit": "latent-notice-before-head",
+      "digestBefore": "162e2cdab4283cef2552e0191c24131f93fe003cf25c9322a63cd350e8ee320f",
+      "promptAfterRestart": {
+        "ok": true,
+        "code": null
+      }
+    },
+    "retired": {
+      "check": {
+        "sessionId": "session-f808c679-8a1e-4d5d-8610-569215383021",
+        "state": "held",
+        "reason": "session-history-retired-source-kind",
+        "repair": "mappable-not-implemented",
+        "source": "durable",
+        "managed": false
+      },
+      "audit": "invalid-retired-source-kind",
+      "dshError": "session \"session-f808c679-8a1e-4d5d-8610-569215383021\": stored log is corrupt: SessionFormatError: format v4 message requires a producer-owned source kind (raw log: <scratch>/p3/tmp/nexus-session-audit-fo7hgR/<encoded-scratch-path>",
+      "filesUnchanged": true,
+      "promptAfterRestart": {
+        "ok": false,
+        "code": "gateway/internal",
+        "message": "resume failed for session \"session-f808c679-8a1e-4d5d-8610-569215383021\": SessionQueryError: stored session \"session-f808c679-8a1e-4d5d-8610-569215383021\" is corrupt: session \"session-f808c679-8a1e-4d"
+      }
+    },
+    "valid": {
+      "audit": "valid",
+      "secondTurnModelCalls": 1
+    }
+  },
+  "managed": {},
+  "toolPairing": {
+    "surfaceOrder": [
+      "8:system/message",
+      "9:user/message:aih-controller",
+      "10:user/message:aih-controller",
+      "11:user/message:user",
+      "12:user/message:runtime-context",
+      "13:user/message:time-context"
+    ],
+    "notices": [
+      "9:controller-binding",
+      "10:controller-attempt"
+    ],
+    "toolCalls": 1,
+    "toolResults": 1,
+    "afterRestart": [
+      "completed",
+      "completed"
+    ]
+  }
+}

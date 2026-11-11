@@ -1,0 +1,6 @@
+node: v24.18.1
+pwsh: 7.5.3
+dsh app: @deepseek-ai/dsh@0.2.2-rc.1
+os: macOS 27.2 arm64
+runner: pwsh -NoLogo -NoProfile -File scripts/Test-Harness.ps1 -InstallRoot <fresh-root> -Lane production -ContinueOnFailure -ReportPath <results>/production-p2b2f-final.json
+install: mkroot.sh (clone of the local 0.2.2-rc.1 test install + working-tree scripts/tests/ui + preset closures) then Install-NexusPresets.ps1; HOME/TMPDIR isolated; egress proxied to 127.0.0.1:9; provider keys unset

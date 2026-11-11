@@ -1,0 +1,17 @@
+{
+  "mode": "production",
+  "platform": "darwin",
+  "arch": "arm64",
+  "runs": {
+    "ordinaryReview": {
+      "notices": [
+        "9:controller-binding",
+        "10:controller-epistemic-action",
+        "11:controller-attempt",
+        "26:review-result"
+      ],
+      "verdict": "pass",
+      "reviewerRequests": 1
+    }
+  }
+}

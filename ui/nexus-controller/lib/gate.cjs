@@ -191,7 +191,7 @@ function validateGateAction(dataRoot, binding, request) {
 }
 
 /** Resolve a waiting gate with the operator action (append + journal the action). */
-function resolveGate(dataRoot, binding, gate, actionId, requestId) {
+function resolveGate(dataRoot, binding, gate, actionId, requestId, resolvedBy) {
   const record = {
     schemaVersion: 1,
     gateId: gate.gateId,
@@ -201,11 +201,15 @@ function resolveGate(dataRoot, binding, gate, actionId, requestId) {
     allowedActions: gate.allowedActions,
     createdAtUtc: gate.createdAtUtc,
     resolvedAtUtc: new Date().toISOString(),
-    resolvedBy: 'operator-gui',
+    resolvedBy: typeof resolvedBy === 'string' && resolvedBy ? resolvedBy : 'operator-gui',
     actionId,
     sessionId: gate.sessionId,
     workspace: gate.workspace,
     taskId: gate.taskId,
+    // The resolution joins the same lifecycle instance as the gate it
+    // resolves (as supersedeGate does); without it an instance-bound lookup
+    // would still see the waiting record and accept a second resolution.
+    taskInstanceId: typeof gate.taskInstanceId === 'string' ? gate.taskInstanceId : null,
     attempt: gate.attempt,
     reviewVerdict: gate.reviewVerdict,
     revision: (Number.isInteger(gate.revision) ? gate.revision : 0) + 1,

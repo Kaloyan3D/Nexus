@@ -1,0 +1,40 @@
+ M config/AihController.cjs
+ M config/nexus/controller.cjs
+ M config/nexus/intake-store.cjs
+ M config/nexus/ipc.cjs
+ M config/nexus/managed-tasks.cjs
+A  config/nexus/session-health.cjs
+ M config/nexus/task-api.cjs
+ M scripts/NexusSessionAudit.cjs
+ M scripts/Test-Harness.ps1
+ M scripts/nexus-cli.cjs
+ M tests/NexusCli.Tests.cjs
+ M tests/NexusManagedIntake.Tests.cjs
+ M tests/NexusSessionColdRestore.RealHost.Tests.mjs
+ M tests/NexusSessionDurability.Tests.cjs
+ M tests/lib/NexusManagedHost.mjs
+?? docs/architecture/NEXUS-PLUGIN-FIRST-P2B2C-IMPLEMENTATION-REPORT.md
+?? docs/architecture/NEXUS-PLUGIN-FIRST-P2B2D-IMPLEMENTATION-REPORT.md
+?? docs/architecture/evidence/p2b2c/
+?? docs/architecture/evidence/p2b2d/
+?? docs/architecture/evidence/p2b2e/
+?? tests/NexusDurabilityRestart.RealHost.Tests.mjs
+?? tests/NexusTaskContinuation.RealHost.Tests.mjs
+?? tests/NexusTaskContinuation.Tests.cjs
+?? tests/NexusTaskVerification.RealHost.Tests.mjs
+?? tests/NexusTaskVerification.Tests.cjs
+ config/AihController.cjs                         |  72 +++-
+ config/nexus/controller.cjs                      |  48 ++-
+ config/nexus/intake-store.cjs                    |   8 +-
+ config/nexus/ipc.cjs                             |   4 +-
+ config/nexus/managed-tasks.cjs                   | 462 ++++++++++++++++++++++-
+ config/nexus/task-api.cjs                        | 219 ++++++++++-
+ scripts/NexusSessionAudit.cjs                    |   7 +-
+ scripts/Test-Harness.ps1                         |   7 +
+ scripts/nexus-cli.cjs                            |  48 ++-
+ tests/NexusCli.Tests.cjs                         |  44 +++
+ tests/NexusManagedIntake.Tests.cjs               |   7 +
+ tests/NexusSessionColdRestore.RealHost.Tests.mjs |   2 +-
+ tests/NexusSessionDurability.Tests.cjs           |  55 +++
+ tests/lib/NexusManagedHost.mjs                   |  53 ++-
+ 14 files changed, 984 insertions(+), 52 deletions(-)

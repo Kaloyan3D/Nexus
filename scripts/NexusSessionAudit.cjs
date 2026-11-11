@@ -37,6 +37,7 @@ const zlib = require('node:zlib')
 const { createRequire } = require('node:module')
 const { pathToFileURL } = require('node:url')
 const messageSource = require('../config/Nexus-MessageSource.cjs')
+const sessionHealth = require('../config/nexus/session-health.cjs')
 
 const SURFACE = new Set(['system/message', 'user/message', 'developer/message', 'assistant/message', 'tool/result'])
 
@@ -142,9 +143,11 @@ async function main() {
         : /producer-owned source kind/.test(readError) ? 'invalid-retired-source-kind'
           : /protected first surface head/.test(readError) ? 'invalid-notice-before-head'
             : facts.tornTail ? 'partial-tail' : 'unreadable-other'
-      verdict = { sessionId, file: path.relative(path.resolve(args.data), file), class: klass, held: !readable, dshReadable: readable, dshError: readError, ...facts }
+      // Same typed hold reason the Nexus host reports (config/nexus/session-health.cjs).
+      const holdReason = readable ? sessionHealth.classifyEvents(raw.events).reason : sessionHealth.reasonOfReadError(readError)
+      verdict = { sessionId, file: path.relative(path.resolve(args.data), file), class: klass, held: Boolean(holdReason), holdReason, dshReadable: readable, dshError: readError, ...facts }
     } catch (error) {
-      verdict = { sessionId, file: path.relative(path.resolve(args.data), file), class: 'unreadable-other', held: true, dshReadable: false, dshError: String(error && error.message ? error.message : error).slice(0, 400) }
+      verdict = { sessionId, file: path.relative(path.resolve(args.data), file), class: 'unreadable-other', held: true, holdReason: sessionHealth.HOLD.UNREADABLE, dshReadable: false, dshError: String(error && error.message ? error.message : error).slice(0, 400) }
     } finally { fs.rmSync(copyRoot, { recursive: true, force: true }) }
     results.push(verdict)
   }

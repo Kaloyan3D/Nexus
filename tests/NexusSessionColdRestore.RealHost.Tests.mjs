@@ -203,7 +203,7 @@ try {
       const status = await run(['status', r.taskId, '--json'])
       assert.equal(status.json.data.taskId, r.taskId, label + ': managed identity restored')
       const prompt = await owner.api('session/prompt', { requestId: crypto.randomUUID(), sessionId: r.sessionId, mode: 'queue', content: [{ type: 'text', text: 'x' }] })
-      assert.equal(prompt.reason, 'nexus-managed-session', label + ': a second turn stays mediated (one admitted turn per managed task)')
+      assert.equal(prompt.reason, 'nexus-managed-session', label + ': a direct GUI prompt stays mediated (further turns only through the Task API continueTask)')
       evidence.runs[label] = { surfaceOrder: r.first.surfaceOrder, coldReadable: cold.readable, status: status.json.data.status }
     }
     await host.stop()

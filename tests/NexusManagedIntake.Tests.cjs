@@ -135,6 +135,13 @@ async function main() {
     const replay = await engine.submit('local-owner', submission('key-1'))
     assert.equal(replay.ok, true); assert.equal(replay.data.taskId, result.data.taskId); assert.equal(replay.data.replay, true)
     assert.equal(dsh.calls.filter((call) => call[0] === 'prompt').length, 1, 'a replay never re-delivers')
+    const resolveProfile = dsh.resolveProfile
+    dsh.resolveProfile = () => null
+    const replayWithoutProfile = await engine.submit('local-owner', submission('key-1'))
+    assert.equal(replayWithoutProfile.ok, true, 'a retry of an accepted intake does not depend on the current profile choice: ' + JSON.stringify(replayWithoutProfile))
+    assert.equal(replayWithoutProfile.data.taskId, result.data.taskId)
+    assert.equal((await engine.submit('local-owner', submission('key-new'))).code, 'MODE_UNAVAILABLE', 'a NEW submission still needs a resolvable profile')
+    dsh.resolveProfile = resolveProfile
     const conflict = await engine.submit('local-owner', submission('key-1', 'different text'))
     assert.equal(conflict.code, 'IDEMPOTENCY_CONFLICT')
     // Concurrent GUI + CLI submissions under one key: one task, one message.

@@ -46,6 +46,7 @@ const intakeStoreModule = require('./intake-store.cjs')
 const brokerModule = require('./broker.cjs')
 const managedTasksModule = require('./managed-tasks.cjs')
 const gatewayPolicyModule = require('./gateway-policy.cjs')
+const sessionHealthModule = require('./session-health.cjs')
 
 const CONTROLLER_SERVICE = 'nexusController'
 const CONTROLLER_CONTRACT_MAJOR = 1
@@ -151,7 +152,10 @@ function createControllerCore(options = {}) {
       broker,
       activation: () => activation(),
       log,
-      ports: Object.fromEntries(['resolveWorkspace', 'resolveProfile', 'sessionExists', 'createSession', 'prepare', 'prompt', 'flush', 'readDurable', 'cancelTurn', 'lastReply'].map((name) => [name, port(name)])),
+      ports: Object.fromEntries(['resolveWorkspace', 'resolveProfile', 'sessionExists', 'createSession', 'prepare', 'prompt', 'flush', 'readDurable', 'cancelTurn', 'lastReply', 'verify', 'closeAttempt', 'review', 'gate'].map((name) => [name, port(name)])),
+      // Deterministic crash injection for in-process tests only (a function
+      // passed by code; no environment variable or flag can set it).
+      ...(typeof options.managedFaultPoint === 'function' ? { faultPoint: options.managedFaultPoint } : {}),
     })
   }
 
@@ -485,6 +489,7 @@ function createControllerCore(options = {}) {
     setTransport,
     get transport() { return transport },
     workspaceAuthorizer: typeof options.workspaceAuthorizer === 'function' ? options.workspaceAuthorizer : null,
+    sessionHealth: options.sessionHealth && typeof options.sessionHealth.check === 'function' ? options.sessionHealth : null,
     workspaceRegistrar: typeof options.workspaceRegistrar === 'function' ? options.workspaceRegistrar : null,
     credentials: options.credentials && typeof options.credentials === 'object' ? options.credentials : null,
     get ownershipHeld() { return ownershipHeld() },
@@ -641,8 +646,31 @@ function apply(ctx) {
   const dataRoot = resolveDataRoot(installRoot)
   const log = controllerLog(dataRoot)
   const sessions = () => { try { return ctx.get('sessions') } catch { return undefined } }
+  // P2-B2C: typed holds for DSH 0.2 histories older Nexus writers made
+  // invalid (read-only checks: live log or a persistence READ handle).
+  const healthSession = (id) => { const store = sessions(); try { return store && typeof store.get === 'function' ? store.get(id) : undefined } catch { return undefined } }
+  const sessionHealth = sessionHealthModule.createSessionHealth({
+    liveEvents: (id) => { const live = healthSession(id); return live ? require('../Dsh-SessionEvents.cjs').sessionEvents(live) : undefined },
+    async readDurable(id) {
+      let persistence
+      try { persistence = ctx.get('sessionPersistence') } catch { persistence = undefined }
+      if (!persistence) throw new Error('session persistence unavailable')
+      const handle = await persistence.open(id, 'read')
+      try { const result = await handle.read(0); return Array.isArray(result) ? result : (result && result.events) || [] } finally { await handle.close() }
+    },
+    async sessionCwd(id) {
+      const live = healthSession(id)
+      if (live && live.header && typeof live.header.cwd === 'string') return live.header.cwd
+      let persistence
+      try { persistence = ctx.get('sessionPersistence') } catch { persistence = undefined }
+      if (!persistence) return null
+      const handle = await persistence.open(id, 'read')
+      try { return handle.header && typeof handle.header.cwd === 'string' ? handle.header.cwd : null } finally { await handle.close() }
+    },
+    log,
+  })
   const core = createControllerCore({
-    installRoot, dataRoot, log, enforceOwnership: true,
+    installRoot, dataRoot, log, enforceOwnership: true, sessionHealth,
     sessionLookup: (id) => { const store = sessions(); try { return store && typeof store.get === 'function' ? store.get(id) : undefined } catch { return undefined } },
     // DSH's credentials controller (the Models page service); values pass
     // through, never logged or returned.
@@ -814,6 +842,22 @@ function apply(ctx) {
         }
         return null
       },
+      // P2-B2D: the existing /verify pipeline and attempt close, through the
+      // plane bridge (same authorities as the GUI).
+      verify(request) {
+        return ctx.waterfall('nexus/task-verify', request, () => { throw new ControllerError('task-verify-unavailable', 'no plane bridge serves task verification') })
+      },
+      closeAttempt(request) {
+        return ctx.waterfall('nexus/task-close', request, () => { throw new ControllerError('task-close-unavailable', 'no plane bridge serves task close') })
+      },
+      // P2-B2F: the existing explicit review and the existing review gate,
+      // through the plane bridge (same authorities as the GUI).
+      review(request) {
+        return ctx.waterfall('nexus/task-review', request, () => { throw new ControllerError('task-review-unavailable', 'no plane bridge serves task review') })
+      },
+      gate(request) {
+        return ctx.waterfall('nexus/task-gate', request, () => { throw new ControllerError('task-gate-unavailable', 'no plane bridge serves task gates') })
+      },
       async cancelTurn(sessionId) {
         const controller = service('sessionController')
         if (controller) controller.cancel({ sessionId })
@@ -840,6 +884,14 @@ function apply(ctx) {
   ctx.on('agent/pre-step', async (payload, next) => {
     const session = payload && payload.agent && payload.agent.session
     if (session && typeof session.id === 'string') {
+      // A history that older Nexus writers made invalid is held: its next step
+      // would corrupt it (latent) or it can no longer be restored. Typed refusal,
+      // no model call, files untouched.
+      const health = core.sessionHealth ? core.sessionHealth.checkLive(session.id) : null
+      if (health && health.state === 'held') {
+        log({ event: 'session-held-step-refused', sessionId: session.id, reason: health.reason, gate: 'host' })
+        return { kind: 'reject' }
+      }
       const root = core.admission.rootOf(session)
       if (root !== null) {
         const verdict = await core.admission.admit(session, payload)

@@ -1,0 +1,31 @@
+ M config/AihController.cjs
+ M config/nexus/controller.cjs
+ M config/nexus/intake-store.cjs
+ M config/nexus/ipc.cjs
+ M config/nexus/managed-tasks.cjs
+A  config/nexus/session-health.cjs
+ M config/nexus/task-api.cjs
+ M scripts/NexusSessionAudit.cjs
+ M scripts/Test-Harness.ps1
+ M scripts/nexus-cli.cjs
+ M tests/NexusCli.Tests.cjs
+ M tests/NexusManagedIntake.Tests.cjs
+ M tests/NexusSessionColdRestore.RealHost.Tests.mjs
+ M tests/NexusSessionDurability.Tests.cjs
+ M tests/lib/NexusManagedHost.mjs
+ M ui/nexus-controller/lib/gate.cjs
+?? docs/architecture/NEXUS-PLUGIN-FIRST-P2B2C-IMPLEMENTATION-REPORT.md
+?? docs/architecture/NEXUS-PLUGIN-FIRST-P2B2D-IMPLEMENTATION-REPORT.md
+?? docs/architecture/NEXUS-PLUGIN-FIRST-P2B2E-IMPLEMENTATION-REPORT.md
+?? docs/architecture/NEXUS-PLUGIN-FIRST-P2B2F-IMPLEMENTATION-REPORT.md
+?? docs/architecture/evidence/p2b2c/
+?? docs/architecture/evidence/p2b2d/
+?? docs/architecture/evidence/p2b2e/
+?? docs/architecture/evidence/p2b2f/
+?? tests/NexusDurabilityRestart.RealHost.Tests.mjs
+?? tests/NexusTaskContinuation.RealHost.Tests.mjs
+?? tests/NexusTaskContinuation.Tests.cjs
+?? tests/NexusTaskGates.RealHost.Tests.mjs
+?? tests/NexusTaskGates.Tests.cjs
+?? tests/NexusTaskVerification.RealHost.Tests.mjs
+?? tests/NexusTaskVerification.Tests.cjs

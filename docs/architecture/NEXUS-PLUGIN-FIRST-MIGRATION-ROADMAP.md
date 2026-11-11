@@ -15,7 +15,17 @@ Use private fixture installations, nonproduction ports, synthetic credentials an
 
 **GO.** Measured baseline, no unexplained production failures in affected flows, and a documented fail-closed route to shared-host admission. Carry unresolved managed-mutation or startup gaps as blocking P2 gates. **Rollback.** Discard fixture roots. **Preserve.** Runtime pins and production state.
 
+## Status (2026-11-11)
+
+| Phase | Development | Production release |
+|---|---|---|
+| P1 | **Complete** | Pending; releases together with P2 |
+| P2 | **Complete**, GO ([closure report](NEXUS-PLUGIN-FIRST-P2-CLOSURE-REPORT.md)) | **Pending**: NO-GO on standard unpatched DSH; see the [P2 release-hardening backlog](#p2-release-hardening-backlog-does-not-block-p3) |
+| P3 | Not started | — |
+
 ## P1 · Trusted Controller and plugin foundation
+
+**Status.** Development complete ([P1 report](NEXUS-PLUGIN-FIRST-P1-IMPLEMENTATION-REPORT.md)).
 
 **Owners.** A on Controller/composition, B on comparison and fault tests. **Depends on.** P0. **Effort.** 7–12 days, high.
 
@@ -37,6 +47,23 @@ Use private fixture installations, nonproduction ports, synthetic credentials an
 
 ## P2 · First-party Nexus CLI for existing modes
 
+**Status.** **Development complete (GO)**; **production release pending** ([closure report](NEXUS-PLUGIN-FIRST-P2-CLOSURE-REPORT.md); sub-phase reports P2-A through P2-B2F).
+
+Delivered and proven on macOS arm64:
+- the Controller task API (CLI/IPC and GUI parity);
+- durable submission;
+- multi-turn continuation;
+- approvals;
+- authoritative verification;
+- review and visual gates;
+- safe recovery and restart reconciliation.
+
+Not delivered, so the items below are **not** complete:
+- the Linux/Windows launchers (`bin/linux/nexus.sh`, `bin/nexus.cmd`), installer and upgrade channel wiring, and the Windows named-pipe ACL;
+- production admission on the standard DSH: managed `submit`/`continue` stay refused until the gateway authorization extension is released.
+
+These are in the backlog below.
+
 **Owners.** A on launcher/transport and wrappers, B on parity/fault fixtures as capacity allows. **Depends on.** P1 and P0's startup/mutation gates. **Effort.** 9–15 days, high.
 
 1. **L01** Add `scripts/nexus-cli.cjs`, `bin/linux/nexus.sh` and `bin/nexus.cmd`. Wire them through `setup.sh`, `scripts/{Setup,Complete-Install,Platform}.ps1` and `scripts/Update.ps1` where required. Test removal using each supported installer channel’s existing uninstall flow. Implement v1 parsing, UTF-8 input, size and digest checks, stable JSON/exit classes and TTY following. Preserve `aih` shims. Publish pinned Node plus the CLI entrypoint for Windows automation and test direct argv with Unicode and metacharacters.
@@ -45,6 +72,21 @@ Use private fixture installations, nonproduction ports, synthetic credentials an
 4. **L04** Add `tests/{NexusCliContract,NexusCliHost,NexusTaskApiParity,NexusCliRecovery}.Tests.cjs`. Run GUI and concurrent CLI clients on one synthetic host. Compare normalized authority records in both modes, including verification and legacy review/gate behavior. Race startup and same-key requests. Test old running host, endpoint impersonation/ACL, foreign workspace, owner-peer bypass, mode revocation, missing mandatory plugin, Markdown file errors and golden JSON/exit codes. Kill CLI before/after receipt and host at each durable boundary. Test cancel/complete race, restart resume/hold, and approved, denied, expired and simultaneous operator responses. Run `SetupUpgrade`, `NexusRouteAdmission`, `NexusModeContract` and CCv2 restriction tests on appropriate roots.
 
 **GO.** One host and writer, equivalent GUI/CLI semantics, one durable accepted task/input per key, verified disconnect behavior and no raw mutation bypass. Per-platform launch, Unicode path, upgrade, IPC and process tests must pass before support claims. **NO-GO.** Insecure endpoint, second host, lost acceptance or unverifiable task boundary. **Rollback.** Disable managed admissions, drain/park, retain a reader for accepted IDs, restore prior launcher/package selection. **Preserve.** Dual/Muse semantics, existing ledger schema, DSH lifecycle and CCv2 policy.
+
+## P2 release-hardening backlog (does not block P3)
+
+These items gate a **production** release of the managed CLI path. None of them blocks starting P3 in an isolated test environment. Every production admission guard stays enabled meanwhile: the gateway hook digest plus live self-test, host ownership, the platform allowlist, and the managed-session route guards.
+
+| ID | Item | Notes |
+|---|---|---|
+| R01 | DSH gateway authorization | `gateway/authorize` released upstream, or an authorized pinned gateway build with installer integration and digest pinning. Standard `0.2.2-rc.1` refuses managed `submit`/`continue` |
+| R02 | Native qualification | Windows and Linux real-host qualification, plus launchers, the IPC ACL (named pipe / socket) and installer and upgrade channels |
+| R03 | Release packaging | Signed installers and signed CLI packaging; a security-reviewed production admission switch |
+| R04 | Repair loop | Visual repair and re-verification for managed tasks (a new attempt after a verification outcome; review after verification) |
+| R05 | Approvals | Multi-question approvals and long-lived approval UX |
+| R06 | Post-completion protection | Workspace and evidence protection after a managed task ends |
+| R07 | Retention | Retention policy (intake records, tombstones, gate journals) and an optional authorized migration of retired-kind historical session logs |
+| R08 | Real provider tests | Production provider and review-service integration tests (OAuth/provider) in a controlled environment |
 
 ## P3 · Nova authority, evidence and review contracts
 

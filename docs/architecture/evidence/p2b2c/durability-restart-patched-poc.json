@@ -1,0 +1,164 @@
+{
+  "mode": "patched",
+  "platform": "darwin",
+  "arch": "arm64",
+  "holds": {
+    "latent": {
+      "check": {
+        "sessionId": "session-0e2e3ca3-4d50-4b10-8515-e3cfa37ce4ea",
+        "state": "held",
+        "reason": "session-history-notice-before-head-pending",
+        "repair": "not-repairable-losslessly",
+        "source": "live",
+        "managed": false
+      },
+      "audit": "latent-notice-before-head",
+      "digestBefore": "11ec96878758c646647ba5935facf432ea93ec213d193dfa29c8b3b310361485",
+      "promptAfterRestart": {
+        "ok": true,
+        "code": null
+      }
+    },
+    "retired": {
+      "check": {
+        "sessionId": "session-82692aee-0173-431f-a3aa-4b6dbf567208",
+        "state": "held",
+        "reason": "session-history-retired-source-kind",
+        "repair": "mappable-not-implemented",
+        "source": "durable",
+        "managed": false
+      },
+      "audit": "invalid-retired-source-kind",
+      "dshError": "session \"session-82692aee-0173-431f-a3aa-4b6dbf567208\": stored log is corrupt: SessionFormatError: format v4 message requires a producer-owned source kind (raw log: <scratch>/p3poc/tmp/nexus-session-audit-bVH2iN/<encoded-scratch-path>",
+      "filesUnchanged": true,
+      "promptAfterRestart": {
+        "ok": false,
+        "code": "gateway/internal",
+        "message": "resume failed for session \"session-82692aee-0173-431f-a3aa-4b6dbf567208\": SessionQueryError: stored session \"session-82692aee-0173-431f-a3aa-4b6dbf567208\" is corrupt: session \"session-82692aee-0173-43"
+      }
+    },
+    "valid": {
+      "audit": "valid",
+      "secondTurnModelCalls": 1
+    }
+  },
+  "managed": {
+    "activation": {
+      "activation": {
+        "active": true,
+        "problems": []
+      },
+      "hook": {
+        "ok": true,
+        "reason": "verified",
+        "digest": "12e5577b6ae0c19d2d826790f409e086513a41a33014fc45ae57d257a57a14c8",
+        "build": "dsh-v0.2.2-rc.1+nexus-gateway-authorize-1",
+        "detail": null
+      }
+    },
+    "emv2-muse": {
+      "taskId": "nt_b66e32b9d5f0419a4aa307258f230211",
+      "sessionId": "session-fbc44001-f77c-4026-bc17-746f1917e84e",
+      "statusBefore": {
+        "status": "blocked",
+        "statusReason": "turn-completed-awaiting-verification",
+        "attemptId": "1"
+      },
+      "statusAfter": {
+        "status": "blocked",
+        "statusReason": "turn-completed-awaiting-verification",
+        "attemptId": "1"
+      },
+      "attempts": 1,
+      "cold": {
+        "readable": true,
+        "surfaceOrder": [
+          "8:system/message",
+          "9:user/message:aih-controller",
+          "10:user/message:user",
+          "11:user/message:runtime-context",
+          "12:user/message:time-context",
+          "17:assistant/message"
+        ],
+        "userPrompts": 1,
+        "turnEnds": [
+          "completed"
+        ],
+        "modelCallsAfterRestart": 0
+      },
+      "replayKept": true
+    },
+    "emv1-dual": {
+      "taskId": "nt_bd360ce9692441735c0acd24a843a128",
+      "sessionId": "session-b4937e28-a073-4f26-a147-dc776e015c6d",
+      "statusBefore": {
+        "status": "blocked",
+        "statusReason": "turn-completed-awaiting-verification",
+        "attemptId": "1"
+      },
+      "statusAfter": {
+        "status": "blocked",
+        "statusReason": "turn-completed-awaiting-verification",
+        "attemptId": "1"
+      },
+      "attempts": 1,
+      "cold": {
+        "readable": true,
+        "surfaceOrder": [
+          "8:system/message",
+          "9:user/message:aih-controller",
+          "10:user/message:aih-controller",
+          "11:user/message:user",
+          "12:user/message:runtime-context",
+          "13:user/message:time-context"
+        ],
+        "userPrompts": 1,
+        "turnEnds": [
+          "completed"
+        ],
+        "modelCallsAfterRestart": 0
+      },
+      "replayKept": true
+    },
+    "interrupted": {
+      "status": "interrupted",
+      "statusReason": "interrupted",
+      "modelCallsAfterRestart": 0,
+      "readable": true
+    },
+    "historicalHold": {
+      "status": "blocked",
+      "statusReason": "session-history-retired-source-kind",
+      "sessionHealth": {
+        "state": "held",
+        "reason": "session-history-retired-source-kind",
+        "repair": "mappable-not-implemented"
+      }
+    },
+    "tombstone": {
+      "activationWhileMissing": "intake-store-corrupt",
+      "orphanStatus": "intake-record-missing",
+      "keyReuseExit": 4
+    }
+  },
+  "toolPairing": {
+    "surfaceOrder": [
+      "8:system/message",
+      "9:user/message:aih-controller",
+      "10:user/message:aih-controller",
+      "11:user/message:user",
+      "12:user/message:runtime-context",
+      "13:user/message:time-context"
+    ],
+    "notices": [
+      "9:controller-binding",
+      "10:controller-attempt"
+    ],
+    "toolCalls": 1,
+    "toolResults": 1,
+    "afterRestart": [
+      "completed",
+      "completed"
+    ]
+  }
+}

@@ -1,0 +1,17 @@
+2070c617318f2c4990307d04100f4d3db08091a7
+ M config/AihController.cjs
+ M config/nexus/controller.cjs
+ M config/nexus/intake-store.cjs
+ M config/nexus/ipc.cjs
+ M config/nexus/managed-tasks.cjs
+A  config/nexus/session-health.cjs
+ M config/nexus/task-api.cjs
+ M scripts/NexusSessionAudit.cjs
+ M scripts/Test-Harness.ps1
+ M scripts/nexus-cli.cjs
+ M tests/NexusCli.Tests.cjs
+ M tests/NexusManagedIntake.Tests.cjs
+ M tests/NexusSessionDurability.Tests.cjs
+ M tests/lib/NexusManagedHost.mjs
+?? docs/architecture/evidence/p2b2c/
+?? tests/NexusDurabilityRestart.RealHost.Tests.mjs

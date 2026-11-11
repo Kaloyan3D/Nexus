@@ -287,6 +287,61 @@ async function main() {
     pass('identity ledger: deleted records stay managed and keep their key; retirement keeps protection and blocks turns; missing ledger entries are repaired (protection only); torn tail tolerated')
   }
 
+  // ── 7. Historical holds: classification, read-error mapping, managed projection ──
+  {
+    const health = require('../config/nexus/session-health.cjs')
+    const sys = (seq) => ({ type: 'system/message', seq, surfaceOp: 'append', data: { message: { role: 'system', source: { kind: 'system-prompt' } } } })
+    const usr = (seq, kind = 'user') => ({ type: 'user/message', seq, surfaceOp: 'append', data: { role: 'user', source: { kind } } })
+    assert.equal(health.classifyEvents([{ type: 'turn/start', seq: 0 }, sys(1), usr(2, 'aih-controller'), usr(3)]).state, 'healthy')
+    assert.equal(health.classifyEvents([usr(0, 'aih-controller')]).reason, health.HOLD.NOTICE_BEFORE_HEAD_PENDING)
+    assert.equal(health.classifyEvents([usr(0, 'aih-controller'), sys(1)]).reason, health.HOLD.NOTICE_BEFORE_HEAD)
+    assert.equal(health.classifyEvents([sys(0), usr(1, 'plugin')]).reason, health.HOLD.RETIRED_SOURCE_KIND)
+    assert.equal(health.classifyEvents([sys(0), { type: 'agent/inbox/spliced', seq: 1, data: { inserted: [{ source: { kind: 'plugin' } }] } }]).reason, health.HOLD.RETIRED_SOURCE_KIND)
+    assert.equal(health.classifyEvents([]).state, 'healthy', 'an empty new session is healthy')
+    assert.equal(health.reasonOfReadError('stored log is corrupt: SessionFormatError: format v4 message requires a producer-owned source kind'), health.HOLD.RETIRED_SOURCE_KIND)
+    assert.equal(health.reasonOfReadError('SessionFormatError: system/message requires a protected first surface head'), health.HOLD.NOTICE_BEFORE_HEAD)
+    assert.equal(health.reasonOfReadError('unexpected end of zstd frame'), health.HOLD.UNREADABLE)
+    let reads = 0
+    const checker = health.createSessionHealth({
+      liveEvents: (id) => (id === 'live-latent' ? [usr(0, 'aih-controller')] : id === 'live-ok' ? [sys(0), usr(1)] : undefined),
+      async readDurable(id) { reads += 1; if (id === 'stored-retired') throw new Error('format v4 message requires a producer-owned source kind'); if (id === 'gone') throw new Error('session "gone" not found'); return [sys(0), usr(1)] },
+    })
+    assert.equal(checker.checkLive('live-latent').reason, health.HOLD.NOTICE_BEFORE_HEAD_PENDING)
+    assert.equal(checker.checkLive('live-ok').state, 'healthy')
+    const stored = await checker.check('stored-retired')
+    assert.equal(stored.state, 'held'); assert.equal(stored.source, 'durable'); assert.equal(stored.repair, 'mappable-not-implemented')
+    await checker.check('stored-retired'); assert.equal(reads, 1, 'verdicts are cached (one durable read)')
+    assert.equal((await checker.check('gone')).state, 'unknown', 'a missing session is unknown, never held')
+    assert.equal(checker.peek('stored-retired').reason, health.HOLD.RETIRED_SOURCE_KIND)
+    // Managed projection: a held history is never reported as a healthy task.
+    const { createIntakeStore } = require('../config/nexus/intake-store.cjs')
+    const controllerModule = require('../config/nexus/controller.cjs')
+    const dataRoot = path.join(scratch, 'held-projection')
+    const legacyCli = { pwshHost: 'x', toolchainRoot: 'x', timeoutMs: 1, stats: () => ({}) }
+    const seed = createIntakeStore({ dataRoot, canWrite: () => true }); seed.load()
+    const canonical = { workspaceId: 'ws', workspacePath: '/ws', mode: 'engineering-v2', promptDigest: 'sha256:1', promptBytes: 1, sourceKind: 'text' }
+    let rec = seed.reserve({ principalId: 'local-owner', idempotencyKey: 'held', fingerprint: 'f', canonical, preset: 'aih-muse', profileId: 'p', promptText: 'x' }).record
+    rec = seed.transition(rec.intakeId, ['reserved'], 'session-created'); rec = seed.transition(rec.intakeId, ['session-created'], 'bound', { taskInstanceId: 'task_' + 'c'.repeat(32) })
+    rec = seed.transition(rec.intakeId, ['bound'], 'delivering'); rec = seed.transition(rec.intakeId, ['delivering'], 'accepted', { acceptedAt: new Date().toISOString() })
+    const orphanRec = seed.reserve({ principalId: 'local-owner', idempotencyKey: 'orphan', fingerprint: 'g', canonical, preset: 'aih-muse', profileId: 'p', promptText: 'y' }).record
+    const fakeHealth = health.createSessionHealth({ liveEvents: () => undefined, async readDurable(id) { if (id === rec.sessionId) throw new Error('format v4 message requires a producer-owned source kind'); return [] } })
+    const core = controllerModule.createControllerCore({ installRoot: dataRoot, dataRoot, managedIntake: true, legacyCli, sessionHealth: fakeHealth, workspaceAuthorizer: async () => true })
+    const status = await core.tasks.getStatus({ kind: 'internal' }, { taskId: rec.taskId })
+    assert.equal(status.data.status, 'blocked'); assert.equal(status.data.statusReason, health.HOLD.RETIRED_SOURCE_KIND); assert.equal(status.data.sessionHealth.repair, 'mappable-not-implemented')
+    assert.equal(core.admission.isManaged(rec.sessionId), true, 'a held managed session stays managed')
+    const checked = await core.tasks.checkSession({ kind: 'internal' }, { sessionId: rec.sessionId })
+    assert.equal(checked.data.state, 'held'); assert.equal(checked.data.managed, true)
+    await core.dispose()
+    // Orphan identity (record deleted): explicit hold, never NOT_FOUND-as-free.
+    fs.rmSync(path.join(seed.dir, orphanRec.intakeId + '.json'))
+    const core2 = controllerModule.createControllerCore({ installRoot: dataRoot, dataRoot, managedIntake: true, legacyCli, workspaceAuthorizer: async () => true })
+    const orphan = await core2.tasks.getStatus({ kind: 'local-owner', via: 'ipc', capabilities: ['tasks:read'] }, { taskId: orphanRec.taskId })
+    assert.equal(orphan.data.status, 'blocked'); assert.equal(orphan.data.statusReason, 'intake-record-missing')
+    assert.equal((await core2.tasks.cancel({ kind: 'internal' }, { taskId: orphanRec.taskId })).error.details.reason, 'intake-record-missing')
+    await core2.dispose()
+    pass('historical holds: typed classification and read-error mapping, cached read-only checks, held managed tasks project blocked with the reason and stay managed; orphaned identities report intake-record-missing')
+  }
+
   console.log(`NexusSessionDurability: ${passed} assertion groups passed.`)
   fs.rmSync(scratch, { recursive: true, force: true })
 }

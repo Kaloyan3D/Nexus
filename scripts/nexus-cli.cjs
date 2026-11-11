@@ -11,6 +11,8 @@
  *   nexus status <task-id> [--json]
  *   nexus result <task-id> [--json]
  *   nexus wait <task-id> [--timeout <duration>] [--json]
+ *   nexus continue <task-id> (--prompt <text> | --prompt-file <file> | --stdin)
+ *                  [--idempotency-key <key>] [--revision <n>] [--json]
  * Parsed and validated, then explicitly UNAVAILABLE (exit 4,
  * REQUIRED_CAPABILITY_UNAVAILABLE) until managed admission is proven safe:
  *   nexus submit | run | cancel | respond | workspace add | host start
@@ -30,7 +32,7 @@ const EXIT = Object.freeze({ ok: 0, usage: 2, connection: 3, refused: 4, failed:
 const CODE_EXIT = Object.freeze({
   USAGE: 2, PROMPT_UNREADABLE: 2, PROMPT_INVALID_UTF8: 2, PROMPT_LIMIT: 2, PROMPT_BUDGET_UNVERIFIABLE: 2, WORKSPACE_INVALID: 2, MODE_UNKNOWN: 2,
   HOST_UNAVAILABLE: 3, HOST_NOT_READY: 3, HOST_IDENTITY_MISMATCH: 3, PROTOCOL_UNSUPPORTED: 3,
-  AUTH_REQUIRED: 4, FORBIDDEN: 4, NOT_FOUND: 4, MODE_UNAVAILABLE: 4, REQUIRED_CAPABILITY_UNAVAILABLE: 4, IDEMPOTENCY_CONFLICT: 4, STALE_ACTION: 4,
+  AUTH_REQUIRED: 4, FORBIDDEN: 4, NOT_FOUND: 4, MODE_UNAVAILABLE: 4, REQUIRED_CAPABILITY_UNAVAILABLE: 4, IDEMPOTENCY_CONFLICT: 4, STALE_ACTION: 4, TASK_NOT_CONTINUABLE: 4,
   SUBMISSION_REJECTED: 5,
   CREDENTIAL_REJECTED: 4,
   INTERNAL: 8, STORAGE_UNAVAILABLE: 8, SUBMISSION_UNCERTAIN: 8,
@@ -256,7 +258,31 @@ function describeTask(d) {
     : d.status + (d.statusReason ? ` (${d.statusReason})` : '')
   let text = `${d.taskId}\t${label}`
   if (d.turn && d.turn.error) text += `\n  turn error: ${d.turn.error.message}`
-  for (const a of d.operatorActions || []) text += `\n  action ${a.id} rev ${a.revision}: ${a.label} [${a.choices.map((c) => c.id).join('|')}]`
+  if (d.turns && d.turns.current) text += `\n  turns: ${d.turns.total} admitted · current turn ${d.turns.current.seq} ${d.turns.current.status}${d.turns.current.hold ? ' (' + d.turns.current.hold + ')' : ''}`
+  if (d.continuation) text += d.continuation.allowed ? `\n  another turn: allowed — nexus continue ${d.taskId} --prompt <text> --revision ${d.revision}` : `\n  another turn: not allowed (${d.continuation.reason})`
+  const v = d.taskVerification
+  if (v) {
+    text += `\n  verification: ${v.state}${v.checks ? ` (${v.checks.passed} passed, ${v.checks.failed} failed, ${v.checks.skipped} skipped)` : ''}${v.attempt ? ' · attempt ' + v.attempt : ''}`
+    if (v.failingChecks && v.failingChecks.length) text += `\n  failing checks: ${v.failingChecks.join('; ')}`
+    if (v.completion) text += `\n  completion: ${v.completion.complete ? 'granted by the TaskController' : 'denied' + (v.completion.reason ? ' — ' + v.completion.reason : '')}`
+    if (v.reason && !v.completion) text += `\n  reason: ${v.reason}`
+  }
+  if (d.gates) {
+    const r = d.gates.review
+    const basis = { 'reviewer-pass': 'independent reviewer PASS', 'reviewer-fail': 'independent reviewer FAIL', 'operator-override-of-reviewer-fail': 'operator OVERRIDE of an independent reviewer FAIL (gate approved; the reviewer did not pass)', 'reviewer-fail-gate-rejected': 'independent reviewer FAIL, gate rejected by the operator', 'stale-review-ignored': 'earlier review ignored (older turn)', missing: 'required review missing', 'not-required': 'not required', 'not-available-for-engine': 'not available for this engine' }
+    if (r && r.disposition && basis[r.disposition]) text += `\n  review basis: ${basis[r.disposition]}`
+    if (r) text += `\n  review: ${r.policy === 'unavailable-for-engine' ? 'not available for this engine (no independent reviewer)' : r.state + (r.verdict ? ' (verdict ' + r.verdict + ')' : '') + (r.current === false ? ' — for an older turn (does not count)' : '')}${r.required ? ' · required for completion' : ''}${r.reason ? ' · ' + r.reason : ''}`
+    if (d.gates.gate) text += `\n  review gate: ${d.gates.gate.status} (revision ${d.gates.gate.revision}${d.gates.gate.resolvedBy ? ', by ' + d.gates.gate.resolvedBy : ''})`
+    const vis = d.gates.visual
+    if (vis && vis.required) text += `\n  visual verification: required · ${vis.status}${vis.maxIterations ? ' (iteration ' + vis.iteration + '/' + vis.maxIterations + ')' : ''}${vis.reasons && vis.reasons.length ? ' · ' + vis.reasons[vis.reasons.length - 1] : ''}`
+  }
+  if (d.completionProvenance) text += `\n  completed by: the TaskController (ledger ${d.completionProvenance.ledgerStatus || 'complete'})${d.completionProvenance.gate ? ' · gate ' + d.completionProvenance.gate.gateId + ' r' + d.completionProvenance.gate.revision + ' approved by ' + d.completionProvenance.gate.resolvedBy : ''}`
+  if (d.closed) text += `\n  closed: ${d.closed.reason || 'operator'}${d.closed.attemptClosed ? ' (open attempt closed as interrupted)' : ''}`
+  if (d.guidance) text += `\n  ${d.guidance}`
+  for (const a of d.operatorActions || []) {
+    text += `\n  action ${a.id} rev ${a.revision}: ${a.label} [${a.choices.map((c) => c.id).join('|')}]`
+    for (const c of a.choices) text += `\n    nexus respond ${d.taskId} --request ${a.id} --choice ${c.id} --revision ${a.revision}`
+  }
   if (d.reply && d.reply.text) text += `\n\n── Nexus ──\n${d.reply.text}`
   return text
 }
@@ -352,6 +378,27 @@ async function run(argv, io) {
       if (!json) io.stderr(`nexus: accepted ${response.data.taskId}\n`)
       return await followTask(io, json, requestId, response.data.taskId, flags['--timeout'] ? parseDuration(flags['--timeout']) : 24 * 3600 * 1000)
     }
+    if (command === 'continue') {
+      // P2-B2E: one more user turn in an existing managed task (same task id,
+      // DSH session, mode and binding). No new host, Controller or session.
+      const taskId = taskArg()
+      if (flags['--idempotency-key'] !== undefined && !IDEMPOTENCY_KEY.test(flags['--idempotency-key'])) throw new CliError('USAGE', '--idempotency-key must be 1-128 printable characters')
+      if (flags['--revision'] !== undefined && !/^\d+$/.test(flags['--revision'])) throw new CliError('USAGE', '--revision must be a decimal string')
+      const prompt = readPromptBytes(flags, io)
+      const generatedKey = flags['--idempotency-key'] === undefined
+      const idempotencyKey = generatedKey ? 'cli-' + crypto.randomUUID() : flags['--idempotency-key']
+      if (generatedKey && !json) io.stderr(`nexus: idempotency key ${idempotencyKey} (reuse it to retry this exact continuation)\n`)
+      // Without --revision the turn is bound to the state the CLI reads now.
+      let expectedRevision = flags['--revision']
+      if (expectedRevision === undefined) {
+        const status = await call(io, 'getStatus', { taskId })
+        if (!status.ok) { render(io, json, { ...status, requestId }, () => ''); return exitFor(status.error.code) }
+        expectedRevision = status.data.revision
+      }
+      const response = await call(io, 'continueTask', { taskId, idempotencyKey, expectedRevision, prompt: { kind: prompt.kind, text: prompt.text, digest: prompt.digest } })
+      render(io, json, { ...response, requestId }, (d) => `${d.taskId}\tturn ${d.turnSeq} ${d.status}${d.replay ? ' (replay)' : ''}\tsession ${d.sessionId}`)
+      return response.ok ? EXIT.ok : exitFor(response.error.code)
+    }
     if (command === 'cancel') {
       const taskId = taskArg()
       const response = await call(io, 'cancel', { taskId })
@@ -365,6 +412,13 @@ async function run(argv, io) {
       const response = await call(io, 'respond', { taskId, actionId: flags['--request'], expectedRevision: flags['--revision'], choiceId: flags['--choice'] })
       render(io, json, { ...response, requestId }, (d) => `${d.taskId}\t${d.actionId}\t${d.disposition}`)
       return response.ok ? EXIT.ok : exitFor(response.error.code)
+    }
+    if (command === 'session') {
+      if (rest[0] !== 'check' || rest.length !== 2) throw new CliError('USAGE', 'expected: nexus session check <sessionId>')
+      const response = await call(io, 'checkSession', { sessionId: rest[1] })
+      render(io, json, { ...response, requestId }, (d) => `${d.sessionId}\t${d.state}${d.reason ? '\t' + d.reason + ' (repair: ' + d.repair + ')' : ''}${d.managed ? '\tmanaged' : ''}`)
+      if (!response.ok) return exitFor(response.error.code)
+      return response.data.state === 'healthy' ? EXIT.ok : EXIT.pending
     }
     if (command === 'credentials') {
       const sub = rest[0]
@@ -438,7 +492,7 @@ function defaultIo() {
   }
 }
 
-module.exports = { run, parseArgs, readPromptBytes, exitFor, EXIT, PROMPT_MAX_BYTES, CliError }
+module.exports = { run, parseArgs, readPromptBytes, exitFor, describeTask, EXIT, PROMPT_MAX_BYTES, CliError }
 
 if (require.main === module) {
   run(process.argv.slice(2), defaultIo()).then((code) => { process.exitCode = code })
