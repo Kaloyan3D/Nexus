@@ -17,6 +17,19 @@ async function blocked(fn, name) {
 }
 const area = fs.mkdtempSync(path.join(os.tmpdir(), 'ccv2-restricted-'));
 async function main() {
+  const sourceMarker = path.join(root, 'data', 'install-source-root');
+  if (fs.existsSync(sourceMarker) && !fs.existsSync(path.join(root, '.git'))) {
+    // The clean install publishes only the reachable closure. Source CI
+    // independently exercises the full writer and historical-record fixtures.
+    const { validate } = require('../scripts/MusePresetDependencyClosure.cjs');
+    const preset = path.join(root, 'data', '.agent-presets', 'aih-engineering');
+    validate(root, preset, { profile: 'engineering' });
+    const policy = require(path.join(preset, 'ContextDurableMutationPolicyV2.cjs'));
+    check(Object.isFrozen(policy) && policy.durableMutationEnabledV2() === false, 'installed policy is frozen and disabled');
+    await blocked(() => policy.assertDurableMutationAllowedV2(), 'installed policy mutation authority');
+    check(!fs.existsSync(path.join(preset, 'Ccv2ResearchRunner.cjs')), 'research runner is absent from installed preset');
+    return;
+  }
   const active = require('../config/ContextActiveApplyV2.cjs');
   const compaction = require('../config/ContextCompaction.cjs');
   const runtime = require('../config/ContextGenerationRuntimeV2.cjs');

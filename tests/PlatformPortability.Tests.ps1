@@ -67,13 +67,25 @@ Assert-Aih (Test-AihRecordedProcessStart -Recorded $null -ActualStartUtc $instan
 
 # tracked-process identity for a real child
 $child = $null
+$probeRoot = Join-Path ([IO.Path]::GetTempPath()) ('aih argv ' + [guid]::NewGuid().ToString('N'))
 try {
+    New-Item -ItemType Directory -Path $probeRoot | Out-Null
+    $probeScript = Join-Path $probeRoot 'identity probe.cjs'
+    $argvPath = Join-Path $probeRoot 'argv.json'
+    [IO.File]::WriteAllText($probeScript, "require('node:fs').writeFileSync(require('node:path').join(__dirname, 'argv.json'), JSON.stringify(process.argv.slice(2))); setTimeout(() => {}, 30000);")
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     $info.FileName = $layout.Node
-    foreach ($argument in @('-e', 'setTimeout(function(){}, 30000)')) { [void]$info.ArgumentList.Add($argument) }
+    # The legacy Arguments property is available on .NET Framework. These
+    # arguments are a file path and fixed literals with no embedded quotes.
+    $info.Arguments = '"' + $probeScript + '" "two words" "" tail'
     $info.UseShellExecute = $false
     $child = [System.Diagnostics.Process]::Start($info)
-    Start-Sleep -Milliseconds 400
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (-not (Test-Path -LiteralPath $argvPath) -and -not $child.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    Assert-Aih (Test-Path -LiteralPath $argvPath) 'the child reports its actual argument vector'
+    Assert-Aih ((Get-Content -Raw -LiteralPath $argvPath) -ceq '["two words","","tail"]') 'argument boundaries preserve spaces and empty arguments'
     $child.Refresh()
     $state = [pscustomobject]@{ Pid = $child.Id; ProcessStartedAtUtc = $child.StartTime.ToUniversalTime().ToString('o') }
     Assert-Aih (Test-AihTrackedProcessIdentity -Process $child -State $state -ExpectedExecutable $layout.Node) 'the tracked-process identity gate accepts the real child (pid, executable, start time)'
@@ -81,6 +93,12 @@ try {
     Assert-Aih (-not (Test-AihTrackedProcessIdentity -Process $child -State $wrongState -ExpectedExecutable $layout.Node)) 'the identity gate rejects a different start time'
     Assert-Aih (-not (Test-AihTrackedProcessIdentity -Process $child -State $state -ExpectedExecutable (Join-Path $InstallRoot 'scripts/not-the-node'))) 'the identity gate rejects a different executable'
 }
-finally { if ($null -ne $child -and -not $child.HasExited) { $child.Kill() } }
+finally {
+    if ($null -ne $child) {
+        if (-not $child.HasExited) { $child.Kill(); [void]$child.WaitForExit(5000) }
+        $child.Dispose()
+    }
+    if (Test-Path -LiteralPath $probeRoot) { Remove-Item -LiteralPath $probeRoot -Recurse -Force }
+}
 
 Write-Host ('SUITE RESULT: PASS ' + $passed + ' | FAIL 0 | total ' + $passed)

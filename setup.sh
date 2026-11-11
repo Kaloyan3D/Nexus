@@ -35,6 +35,7 @@ AIH_SKIP_DEEPSEEK_LOGIN=0
 AIH_SKIP_OPENAI_LOGIN=0
 AIH_SKIP_DEPENDENCY_INSTALL=0
 AIH_SKIP_PATH_CHECK=0
+AIH_SKIP_LOCAL_CHECKS=0
 # Directory that receives the aih launchers (default ~/.local/bin). An isolated test install
 # passes its own directory so it never replaces another installation's launchers.
 AIH_USER_BIN="${AIH_USER_BIN:-$HOME/.local/bin}"
@@ -51,6 +52,7 @@ Options:
   --skip-deepseek-login     Skip the DeepSeek API key prompt
   --skip-openai-login       Skip the ChatGPT/Codex OAuth sign-in flow
   --skip-dependency-install Skip npm ci (requires an existing DSH runtime)
+  --skip-local-checks       Leave post-install checks to the caller
   --skip-path-check         Skip the ~/.local/bin PATH check
   --user-bin DIR            Directory for the aih launchers (default: ~/.local/bin,
                             overridable through AIH_USER_BIN)
@@ -65,6 +67,7 @@ while [ $# -gt 0 ]; do
     --skip-deepseek-login) AIH_SKIP_DEEPSEEK_LOGIN=1; shift ;;
     --skip-openai-login) AIH_SKIP_OPENAI_LOGIN=1; shift ;;
     --skip-dependency-install) AIH_SKIP_DEPENDENCY_INSTALL=1; shift ;;
+    --skip-local-checks) AIH_SKIP_LOCAL_CHECKS=1; shift ;;
     --skip-path-check) AIH_SKIP_PATH_CHECK=1; shift ;;
     --user-bin) [ $# -ge 2 ] || { echo "--user-bin requires a value" >&2; exit 1; }; AIH_USER_BIN=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -328,8 +331,10 @@ else
   echo 'Skipping ChatGPT/Codex sign-in.'
 fi
 
-echo 'Running local checks ...'
-if [ -s "$AIH_INSTALL_ROOT/data/.credentials.yaml" ]; then
+if [ "$AIH_SKIP_LOCAL_CHECKS" -eq 1 ]; then
+  echo 'Post-install checks delegated to caller.'
+elif [ -s "$AIH_INSTALL_ROOT/data/.credentials.yaml" ]; then
+  echo 'Running offline doctor ...'
   if ! "$AIH_PWSH_DIR/pwsh" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$AIH_INSTALL_ROOT/scripts/Doctor.ps1" -InstallRoot "$AIH_INSTALL_ROOT" -Offline; then
     echo 'Setup completed, but local checks failed. Run: aih-doctor -Offline' >&2
     exit 1

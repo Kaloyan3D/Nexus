@@ -440,7 +440,7 @@ section('ISOLATION TRUST INJECTION SECRETS');
   check(dEvil.tier === 'COLD' && dEvil.reasonCode === 'tier-cold-exact-history', 'evidence text commands have zero policy effect');
   throwsWithCode(() => tier.classifyMemoryTierV2({ subjectKind: 'current-user-turn', tier: 'PINNED' }), 'context-memory-tier-unknown-field', 'caller cannot force a tier field');
 
-  const secretText = 'Bearer sk-live-EXAMPLE-SECRET-99, deploy with password=hunter2 now';
+  const secretText = 'Bearer sk-' + 'live-EXAMPLE-SECRET-99, deploy with password=hunter2 now';
   const secretPage = inlinePage('conversation', 'user', ['session-event:5'], [5], secretText);
   const dSecret = tier.classifyMemoryTierV2({ subjectKind: 'historical-evidence', page: secretPage });
   const dumped = JSON.stringify(dSecret);

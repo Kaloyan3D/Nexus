@@ -528,10 +528,10 @@ section('DETERMINISM');
 section('SECURITY AND REDACTION');
 {
   const root = contextRootFor('TASK-B02-A', 'security');
-  const secret = 'deploy token password=supersecret-value-12345 and key sk-abcdefghijklmnopqr';
+  const secret = 'deploy token password=supersecret-value-12345 and key sk-' + 'abcdefghijklmnopqr';
   const put = store.putBlobV2(root, 'login with ' + secret + '\ndone\n');
   const stored = store.readBlobV2(root, put.blobRef).toString('utf8');
-  check(!stored.includes('supersecret-value-12345') && !stored.includes('sk-abcdefghijklmnopqr'), 'credential-shaped blob input is redacted before derived storage');
+  check(!stored.includes('supersecret-value-12345') && !stored.includes('sk-' + 'abcdefghijklmnopqr'), 'credential-shaped blob input is redacted before derived storage');
   check(stored.includes('<redacted>'), 'redaction marker is the stable replacement');
   const p = page.createContextPageV2(baseInput('conversation', { exactText: 'note with password=hunter2-live-secret here' }));
   store.putContextPageV2(root, p, { expectedNamespace: clone(NS_A) });

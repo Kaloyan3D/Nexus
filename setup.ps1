@@ -3,7 +3,8 @@ param(
     [string]$InstallRoot,
     [switch]$SkipPathUpdate,
     [switch]$SkipDeepSeekLogin,
-    [switch]$SkipOpenAiLogin
+    [switch]$SkipOpenAiLogin,
+    [switch]$SkipLocalChecks
 )
 
 Set-StrictMode -Version Latest
@@ -51,21 +52,26 @@ else {
     Write-Host '3/4 Skipping ChatGPT/Codex sign-in.'
 }
 
-Write-Host '4/4 Running local checks...'
-# Doctor.ps1 and Test-Harness.ps1 are PowerShell scripts, not native
-# executables: a failing local check terminates this process through their
-# own `exit` on failure (or a propagating terminating error), so no
-# exit-code read is defined here either. TASK-0033: the old $LASTEXITCODE
-# read after these .ps1 invocations was unset (StrictMode
-# RuntimeException) or stale - never the invoked script's result.
-. (Join-Path $InstallRoot 'scripts/Common.ps1')
-$hasDeepSeekCredential = -not [string]::IsNullOrWhiteSpace((Get-AihDeepSeekKey -InstallRoot $InstallRoot))
-if ($hasDeepSeekCredential) {
-    & (Join-Path $InstallRoot 'scripts/Doctor.ps1') -InstallRoot $InstallRoot -Preset $(if ($SkipOpenAiLogin) { 'deepseek' } else { 'normal' }) -Offline
+if ($SkipLocalChecks) {
+    Write-Host '4/4 Post-install checks delegated to caller.'
 }
 else {
-    Write-Host 'DeepSeek is not configured yet; running credential-free deterministic tests instead.'
-    & (Join-Path $InstallRoot 'scripts/Test-Harness.ps1') -InstallRoot $InstallRoot
+    Write-Host '4/4 Running local checks...'
+    # Doctor.ps1 and Test-Harness.ps1 are PowerShell scripts, not native
+    # executables: a failing local check terminates this process through their
+    # own `exit` on failure (or a propagating terminating error), so no
+    # exit-code read is defined here either. TASK-0033: the old $LASTEXITCODE
+    # read after these .ps1 invocations was unset (StrictMode
+    # RuntimeException) or stale - never the invoked script's result.
+    . (Join-Path $InstallRoot 'scripts/Common.ps1')
+    $hasDeepSeekCredential = -not [string]::IsNullOrWhiteSpace((Get-AihDeepSeekKey -InstallRoot $InstallRoot))
+    if ($hasDeepSeekCredential) {
+        & (Join-Path $InstallRoot 'scripts/Doctor.ps1') -InstallRoot $InstallRoot -Preset $(if ($SkipOpenAiLogin) { 'deepseek' } else { 'normal' }) -Offline
+    }
+    else {
+        Write-Host 'DeepSeek is not configured yet; running credential-free deterministic tests instead.'
+        & (Join-Path $InstallRoot 'scripts/Test-Harness.ps1') -InstallRoot $InstallRoot
+    }
 }
 
 Write-Host ''

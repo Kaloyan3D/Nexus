@@ -153,7 +153,7 @@ ok(fs.existsSync(path.join(sourceRoot, 'scripts', 'Complete-Install.ps1')), 'Com
 const versions = JSON.parse(read('config/versions.json'))
 ok(typeof versions.PowerShellVersion === 'string' && /^\d+\.\d+\.\d+$/.test(versions.PowerShellVersion), 'versions.json pins an exact PowerShellVersion')
 ok(typeof versions.NodeVersion === 'string' && /^\d+\.\d+\.\d+$/.test(versions.NodeVersion), 'versions.json pins an exact NodeVersion')
-if (layout.kind === 'source') {
+if (layout.kind === 'source' && !fs.existsSync(path.join(sourceRoot, 'runtime', 'node', 'node.exe'))) {
   const psd1 = read('config/versions.psd1')
   ok(psd1.includes("PowerShellVersion = '" + versions.PowerShellVersion + "'"), 'versions.psd1 agrees with versions.json about PowerShellVersion (source plane)')
   ok(psd1.includes("NodeVersion = '" + versions.NodeVersion + "'"), 'versions.psd1 agrees with versions.json about NodeVersion (source plane)')

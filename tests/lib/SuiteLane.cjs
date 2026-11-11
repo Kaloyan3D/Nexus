@@ -8,7 +8,7 @@ function suiteLane(name) {
 }
 function parseSuites(harnessText) {
   const out = []
-  for (const m of harnessText.matchAll(/\[ordered\]@\{\s*name='([^']+)';\s*script='([^']+)';[^}]*?kind='(node|powershell)'/g)) out.push({ name: m[1], script: m[2], kind: m[3], lane: suiteLane(m[1]) })
+  for (const m of harnessText.matchAll(/\[ordered\]@\{\s*name='([^']+)';\s*script='([^']+)';[^}]*?kind='(node|powershell)'(?:; completionMarker='([^']+)')?/g)) out.push({ name: m[1], script: m[2], kind: m[3], completionMarker: m[4] || null, lane: suiteLane(m[1]) })
   return out
 }
 module.exports = { suiteLane, parseSuites }
