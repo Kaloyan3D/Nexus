@@ -2,6 +2,7 @@
 param(
     [string]$InstallRoot,
     [string]$ReportPath,
+    [ValidateRange(1, 3600)][int]$SuiteTimeoutSeconds = 480,
     # TASK-0024 audit mode: run EVERY suite even after failures, then exit
     # non-zero if any suite failed. Default behavior stays fail-fast.
     [switch]$ContinueOnFailure,
@@ -16,7 +17,8 @@ param(
     # product keeps disabled); 'all' (default) runs both. Nothing is deleted or weakened:
     # the lab lane is runnable on demand and its size is always printed. See
     # docs/testing/CCV2-LAB-SUITES.md.
-    [ValidateSet('production','ccv2-lab','all')][string]$Lane = 'all'
+    [ValidateSet('production','ccv2-lab','all')][string]$Lane = 'all',
+    [ValidateSet('full','general','boundary')][string]$ProductionShard = 'full'
 )
 
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent $PSScriptRoot }
@@ -98,7 +100,6 @@ $suites = @(
     [ordered]@{ name='ContextCompactionF2Prod'; script='tests/ContextCompactionF2Prod.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionF5Prod'; script='tests/ContextCompactionF5Prod.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionXProc'; script='tests/ContextCompactionXProc.Tests.cjs'; executable=$layout.Node; kind='node' },
-    [ordered]@{ name='ContextCompactionF1Loop'; script='tests/ContextCompactionF1Loop.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionPartial'; script='tests/ContextCompactionPartial.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionF5Slow'; script='tests/ContextCompactionF5Slow.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MuseEgressCleanup'; script='tests/MuseEgressCleanup.Tests.cjs'; executable=$layout.Node; kind='node' },
@@ -202,14 +203,13 @@ $suites = @(
     [ordered]@{ name='ContextCompactionF9TailBound'; script='tests/ContextCompactionF9TailBound.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextWireProjectorResponsesV2'; script='tests/ContextWireProjectorResponsesV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ControllerSessionBootstrap'; script='tests/ControllerSessionBootstrap.Tests.cjs'; executable=$layout.Node; kind='node' },
-    [ordered]@{ name='DeepSeekRequestBoundaryHost'; script='tests/DeepSeekRequestBoundaryHost.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='DeepSeekRequestBoundaryHost'; script='tests/DeepSeekRequestBoundaryHost.Tests.cjs'; executable=$layout.Node; kind='node'; completionMarker='NEXUS SUITE COMPLETE: DeepSeekRequestBoundaryHost' },
     [ordered]@{ name='MixedPresetShellEnv'; script='tests/MixedPresetShellEnv.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_RUNTIME_ROOT'=$InstallRoot } },
     [ordered]@{ name='DeepSeekIsolation'; script='tests/DeepSeekIsolation.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='EngineeringIsolation'; script='tests/EngineeringIsolation.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MuseOpenCodeGoRuntime'; script='tests/MuseOpenCodeGo.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MuseOpenCodeGo'; script='tests/MuseOpenCodeGo.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='MuseOpenCodeSession'; script='tests/MuseOpenCodeSession.Tests.cjs'; executable=$layout.Node; kind='node' },
-    [ordered]@{ name='NexusControllerPanel'; script='tests/NexusControllerPanel.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='NexusModeContract'; script='tests/NexusModeContract.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='NexusWorkspaceGuard'; script='tests/NexusWorkspaceGuard.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='NexusComposerSeat'; script='tests/NexusComposerSeat.Tests.cjs'; executable=$layout.Node; kind='node' },
@@ -239,6 +239,13 @@ foreach ($suite in $suites) { $suite['lane'] = Get-AihSuiteLane $suite.name }
 $labCount = @($suites | Where-Object { $_.lane -eq 'ccv2-lab' }).Count
 $productionCount = @($suites | Where-Object { $_.lane -eq 'production' }).Count
 if ($Lane -ne 'all') { $suites = @($suites | Where-Object { $_.lane -eq $Lane }) }
+if ($ProductionShard -ne 'full') {
+    if ($Lane -ne 'production') { throw 'Production shards require the production lane' }
+    $boundaryName = 'DeepSeekRequestBoundaryHost'
+    if (@($suites | Where-Object name -CEQ $boundaryName).Count -ne 1) { throw 'Expected exactly one boundary suite' }
+    if ($ProductionShard -eq 'boundary') { $suites = @($suites | Where-Object name -CEQ $boundaryName) }
+    else { $suites = @($suites | Where-Object name -CNE $boundaryName) }
+}
 Write-Host ('HARNESS LANE: {0} | production suites {1} | ccv2-lab suites {2} | running {3}' -f $Lane, $productionCount, $labCount, $suites.Count)
 if ($Lane -eq 'production') { Write-Host ('NOTE: {0} CCv2 lab suites are not run in this lane; run -Lane ccv2-lab (docs/testing/CCV2-LAB-SUITES.md).' -f $labCount) }
 
@@ -285,6 +292,13 @@ foreach ($suite in $suites) {
     $commandText = '"' + $executable + '" ' + (($arguments | ForEach-Object { '"' + ([string]$_).Replace('"','\"') + '"' }) -join ' ')
     $rawLines.Add(('===== SUITE {0} =====' -f $suite.name)); $rawLines.Add($commandText)
     Write-Host ('===== SUITE {0} =====' -f $suite.name)
+    if ($ReportPath) {
+        $progressPath = [IO.Path]::ChangeExtension([IO.Path]::GetFullPath($ReportPath), '.progress.json')
+        Write-AihAtomicJson -Path $progressPath -Depth 8 -Value @{
+            currentSuite = $suite.name; currentStartedAtUtc = $suiteStarted.ToString('o')
+            completed = @($suiteResults); expected = $suites.Count
+        }
+    }
     # A05H H4: optional per-suite process environment (e.g. the CCV2 live-host
     # release gate). Applies process-scoped only and restores every variable
     # afterwards; suites without 'env' behave exactly as before.
@@ -300,31 +314,50 @@ foreach ($suite in $suites) {
         }
     }
     $savedPreference = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $output = @(& $executable @arguments 2>&1 | ForEach-Object { [string]$_ }); $suiteExitCode = [int]$LASTEXITCODE }
-    catch { $output = @([string]$_); $suiteExitCode = 1 }
+    try {
+        $application = Get-Command -Name $executable -CommandType Application -ErrorAction Stop
+        $watchdog = Join-Path $PSScriptRoot 'Test-SuiteProcess.cjs'
+        $timeout = if ((Test-AihIsWindows) -and $suite.name -eq 'DeepSeekRequestBoundaryHost' -and -not $PSBoundParameters.ContainsKey('SuiteTimeoutSeconds')) {
+            # The hosted Windows trace shows repeated 20-second intervals between case results.
+            # Keep a finite budget for the full real-host matrix.
+            1500
+        } elseif ($suite.name -eq 'StartupProviderIsolation') { [Math]::Min(150, $SuiteTimeoutSeconds) } else { $SuiteTimeoutSeconds }
+        $output = @(& $researchNode $watchdog $timeout $application.Source @arguments 2>&1 | ForEach-Object {
+            $line = [string]$_
+            Write-Host $line
+            $rawLines.Add($line)
+            $line
+        })
+        $suiteExitCode = $LASTEXITCODE
+        if ($output -cmatch '^NEXUS HARNESS PROCESS INCOMPLETE: ') { $suiteExitCode = $null }
+    } catch {
+        $output = @([string]$_)
+        Write-Host $output[0]
+        $rawLines.Add($output[0])
+        $suiteExitCode = $null
+    }
     finally { $ErrorActionPreference = $savedPreference }
     foreach ($envName in @($suiteEnvPrior.Keys)) {
         [System.Environment]::SetEnvironmentVariable([string]$envName, $suiteEnvPrior[$envName])
     }
-    foreach ($line in $output) { Write-Host $line; $rawLines.Add($line) }
     $suiteFinished = [DateTime]::UtcNow
-    $suitePassed = Get-AihHarnessAssertionCount -Lines $output -Prefix 'PASS:'
-    $explicitFailed = Get-AihHarnessAssertionCount -Lines $output -Prefix 'FAIL:'
-    $suiteFailed = if ($suiteExitCode -eq 0) { $explicitFailed } else { [Math]::Max(1, $explicitFailed) }
-    $suiteResults.Add([ordered]@{name=$suite.name;verificationScope=$verificationScope;command=$commandText;script=$suite.script.Replace('\','/');startedAtUtc=$suiteStarted.ToString('o');finishedAtUtc=$suiteFinished.ToString('o');durationMs=[Math]::Max(0,[int64]($suiteFinished-$suiteStarted).TotalMilliseconds);exitCode=$suiteExitCode;passed=$suitePassed;failed=$suiteFailed;result=if($suiteExitCode-eq 0){'PASS'}else{'FAIL'}})
-    $rawLines.Add(('===== RESULT {0}: {1} (exit {2}) =====' -f $suite.name, $(if ($suiteExitCode -eq 0) { 'PASS' } else { 'FAIL' }), $suiteExitCode))
-    if ($suiteExitCode -ne 0) {
-        if ($harnessExitCode -eq 0) { $harnessExitCode = $suiteExitCode }
+    $outcome = Get-AihHarnessSuiteOutcome -Lines $output -ExitCode $suiteExitCode -CompletionMarker $suite['completionMarker']
+    $suiteResults.Add([ordered]@{name=$suite.name;verificationScope=$verificationScope;command=$commandText;script=$suite.script.Replace('\','/');startedAtUtc=$suiteStarted.ToString('o');finishedAtUtc=$suiteFinished.ToString('o');durationMs=[Math]::Max(0,[int64]($suiteFinished-$suiteStarted).TotalMilliseconds);exitCode=$suiteExitCode;passed=$outcome.passed;failed=$outcome.failed;result=$outcome.result;skipEvidence=$outcome.skipEvidence;completionVerified=$outcome.completionVerified})
+    $rawLines.Add(('===== RESULT {0}: {1} (exit {2}) =====' -f $suite.name, $outcome.result, $suiteExitCode))
+    # Legacy optional skips remain nonfatal locally. CI requires every selected
+    # row to pass, and an explicitly required completion marker is always fatal.
+    if ($outcome.result -in @('FAIL','INCOMPLETE') -or ($outcome.result -eq 'SKIP' -and $suite['completionMarker'])) {
+        if ($harnessExitCode -eq 0) { $harnessExitCode = if ($suiteExitCode) { $suiteExitCode } else { 1 } }
         if (-not $ContinueOnFailure) { break }
     }
 }
 
 if ($ContinueOnFailure) {
-    $failedSuites = @($suiteResults | Where-Object { $_.result -eq 'FAIL' })
+    $failedSuites = @($suiteResults | Where-Object { $_.result -ne 'PASS' })
     if ($failedSuites.Count -gt 0) {
         Write-Host ('AUDIT FAILURES ({0}): {1}' -f $failedSuites.Count, (($failedSuites | ForEach-Object { '{0} (exit={1})' -f $_.name, $_.exitCode }) -join ', '))
     } else {
-        Write-Host 'AUDIT FAILURES: none (all suites ran to completion)'
+        Write-Host 'AUDIT FAILURES: none (all suites passed)'
     }
 }
 

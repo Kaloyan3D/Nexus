@@ -24,8 +24,8 @@ param()
 $argsList=@($args)
 if($argsList.Count-ge2-and$argsList[0]-eq'-s'){$argsList=@($argsList|Select-Object -Skip 2)}
 $command=$argsList-join' '
-[IO.File]::AppendAllText($env:AIH_FAKE_ADB_LOG,$command+[Environment]::NewLine)
 if($argsList[0]-eq'devices'){ "List of devices attached`nemulator-5554`tdevice"; exit 0 }
+[IO.File]::AppendAllText($env:AIH_FAKE_ADB_LOG,$command+[Environment]::NewLine)
 if($command-like'shell dumpsys activity activities*'){
   Start-Sleep -Milliseconds 100
   $pkg=(Get-Content -Raw $env:AIH_FAKE_ADB_STATE).Trim()
@@ -108,10 +108,28 @@ exit 1
     Assert-Aih ($override.deviceId-eq'emulator-7777'-and$override.packageName-eq'com.autopulse.override'-and$override.activity-eq'.DebugActivity') 'explicit project runtime target overrides manifest defaults'
 
     [IO.File]::WriteAllText($log,''); 'com.other'|Set-Content -LiteralPath $state -NoNewline
-    $p1=Start-Process $aihPsHost -PassThru -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $InstallRoot 'scripts/Capture-VisualEvidence.ps1'),'-OutputPath',(Join-Path $fixture 'parallel-a.png'),'-AdbPath',$fakeCmd,'-DeviceSerial','emulator-5554','-PackageName','app.openrank.mobile','-ScenarioId','a','-Iteration','1','-Force')
-    $p2=Start-Process $aihPsHost -PassThru -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $InstallRoot 'scripts/Capture-VisualEvidence.ps1'),'-OutputPath',(Join-Path $fixture 'parallel-b.png'),'-AdbPath',$fakeCmd,'-DeviceSerial','emulator-5554','-PackageName','com.autopulse.mobile','-ScenarioId','b','-Iteration','1','-Force')
-    $p1.WaitForExit(); $p2.WaitForExit()
+    $savedModulePath = $env:PSModulePath
+    try {
+        if (Test-AihIsWindows) {
+            # Start-Process inherits the PS7 environment even though the
+            # capture worker uses Windows PowerShell. Use its own modules.
+            $env:PSModulePath = Join-Path (Split-Path -Parent (Get-Command $aihPsHost).Source) 'Modules'
+        }
+        $p1=Start-Process -RedirectStandardOutput (Join-Path $fixture 'parallel-a.out') -RedirectStandardError (Join-Path $fixture 'parallel-a.err') $aihPsHost -PassThru -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $InstallRoot 'scripts/Capture-VisualEvidence.ps1'),'-OutputPath',(Join-Path $fixture 'parallel-a.png'),'-AdbPath',$fakeCmd,'-DeviceSerial','emulator-5554','-PackageName','app.openrank.mobile','-ScenarioId','a','-Iteration','1','-Force')
+        $null = $p1.Handle
+        $p2=Start-Process -RedirectStandardOutput (Join-Path $fixture 'parallel-b.out') -RedirectStandardError (Join-Path $fixture 'parallel-b.err') $aihPsHost -PassThru -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $InstallRoot 'scripts/Capture-VisualEvidence.ps1'),'-OutputPath',(Join-Path $fixture 'parallel-b.png'),'-AdbPath',$fakeCmd,'-DeviceSerial','emulator-5554','-PackageName','com.autopulse.mobile','-ScenarioId','b','-Iteration','1','-Force')
+        $null = $p2.Handle
+    } finally {
+        $env:PSModulePath = $savedModulePath
+    }
+    Assert-Aih ($p1.WaitForExit(60000) -and $p2.WaitForExit(60000)) 'parallel capture workers finish within their deadlines'
     $capturePackages=@(Get-Content $log|Where-Object{$_-like'captured-package=*'}|ForEach-Object{$_-replace'^captured-package=',''} )
+    if ($p1.ExitCode -ne 0 -or $p2.ExitCode -ne 0 -or $capturePackages.Count -ne 2) {
+        Write-Host "Parallel captures: exit codes [$($p1.ExitCode), $($p2.ExitCode)], packages [$($capturePackages -join ', ')]"
+        Get-ChildItem -LiteralPath $fixture -Filter 'parallel-*' -File |
+            Where-Object Extension -in '.out', '.err' |
+            ForEach-Object { Write-Host $_.Name; Get-Content -LiteralPath $_.FullName | Write-Host }
+    }
     Assert-Aih ($p1.ExitCode-eq0-and$p2.ExitCode-eq0-and$capturePackages.Count-eq2-and$capturePackages.Contains('app.openrank.mobile')-and$capturePackages.Contains('com.autopulse.mobile')) 'shared-device critical sections cannot interleave'
 
     Write-Host ('RESULT: '+$script:passed+' visual target assertions passed.')

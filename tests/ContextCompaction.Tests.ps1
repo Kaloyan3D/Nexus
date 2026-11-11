@@ -258,7 +258,7 @@ try {
     $raw = Get-Content -Raw -Encoding UTF8 -LiteralPath $checkpoint.path
     Assert-Aih (-not $raw.Contains($secret)) 'api-key-shaped secret never lands in the checkpoint'
     Assert-Aih (-not $raw.Contains('supersecretvalue123')) 'password-shaped secret never lands in the checkpoint'
-    Assert-Aih ($raw.Contains('<redacted>')) 'redaction marker survives'
+    Assert-Aih (([regex]::Unescape($raw)).Contains('<redacted>')) 'redaction marker survives'
 } finally { if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force } }
 
 # == 22/23. PATH BEHAVIOR: LINUX plus PLATFORM-NEUTRAL SERIALIZATION ==========
@@ -268,7 +268,8 @@ try {
     [void](Complete-CompactionTask $root $task)
     $checkpoint = New-AihContextCheckpoint -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId)
     $parsed = Get-Content -Raw -Encoding UTF8 -LiteralPath $checkpoint.path | ConvertFrom-Json
-    Assert-Aih (([string]$parsed.workspace.executionRoot).Contains('\') -eq $false) 'linux workspace serializes without backslashes'
+    $nativeWorkspace = [IO.Path]::GetFullPath($root)
+    Assert-Aih (([string]$parsed.workspace.executionRoot) -eq $nativeWorkspace) 'checkpoint round-trips the native execution root'
     $windowsStyle = 'C:\Nexus\workspace'
     $windowsPaths = Get-AihContextLifecyclePaths -Workspace $windowsStyle -TaskId 'TASK-0004'
     Assert-Aih ([string]$windowsPaths.Checkpoint -like '*context-checkpoint.json') 'lifecycle layout resolves for windows-style roots'

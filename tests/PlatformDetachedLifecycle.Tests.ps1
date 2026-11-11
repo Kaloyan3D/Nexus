@@ -15,15 +15,18 @@ $pidFile = Join-Path $tmp 'pid.txt'
 param($Root,$Node,$Child)
 . (Join-Path $Root 'scripts/Platform.ps1')
 $base = Split-Path -Parent $Child
-$p = Start-AihDetachedProcess -FilePath $Node -ArgumentList @($Child, 'argument with spaces') -WorkingDirectory $base -RedirectStandardOutput (Join-Path $base 'stdout.log') -RedirectStandardError (Join-Path $base 'stderr.log')
+$arguments = if (Test-AihIsWindows) { @(('"' + $Child + '"'), '"argument with spaces"') } else { @($Child, 'argument with spaces') }
+$p = Start-AihDetachedProcess -FilePath $Node -ArgumentList $arguments -WorkingDirectory $base -RedirectStandardOutput (Join-Path $base 'stdout.log') -RedirectStandardError (Join-Path $base 'stderr.log')
 [IO.File]::WriteAllText((Join-Path $base 'pid.txt'), [string]$p.Id)
-[IO.File]::WriteAllText((Join-Path $base 'sid.txt'), [string]$(if ((Get-AihPlatformName) -eq 'macos') { (& ps -o pgid= -p $p.Id).Trim() } else { (& ps -o sid= -p $p.Id).Trim() }))
+if (-not (Test-AihIsWindows)) { [IO.File]::WriteAllText((Join-Path $base 'sid.txt'), [string]$(if ((Get-AihPlatformName) -eq 'macos') { (& ps -o pgid= -p $p.Id).Trim() } else { (& ps -o sid= -p $p.Id).Trim() })) }
 '@)
 try {
     & $pwsh -NoProfile -File $launcher $root $node $child
     $pidValue = [int]([IO.File]::ReadAllText($pidFile))
-    $sidValue = [int]([IO.File]::ReadAllText((Join-Path $tmp 'sid.txt')))
-    if ($sidValue -ne $pidValue) { throw "Child shares launcher session (SID $sidValue, PID $pidValue)." }
+    if (-not (Test-AihIsWindows)) {
+        $sidValue = [int]([IO.File]::ReadAllText((Join-Path $tmp 'sid.txt')))
+        if ($sidValue -ne $pidValue) { throw "Child shares launcher session (SID $sidValue, PID $pidValue)." }
+    }
     $proc = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
     if ($null -eq $proc) { throw 'Detached child did not survive launcher completion.' }
     if ([IO.Path]::GetFullPath($proc.Path) -ne [IO.Path]::GetFullPath($node)) { throw 'Returned PID is not the Node child.' }
@@ -32,12 +35,13 @@ try {
     if (-not ((Get-Content -Raw $stdout) -match [regex]::Escape($tmp))) { throw 'Working directory or stdout redirect failed.' }
     if (-not ((Get-Content -Raw $stdout) -match 'argument with spaces')) { throw 'Argument with spaces was not preserved.' }
     if (-not ((Get-Content -Raw $stderr) -match 'stderr-marker')) { throw 'Stderr redirect failed.' }
-    Write-Host 'PASS: Linux child survives launcher with exact PID, cwd and independent logs.'
+    Write-Host 'PASS: detached child survives launcher with exact PID, cwd and independent logs.'
     $exitScript = Join-Path $tmp 'exit.js'
     [IO.File]::WriteAllText($exitScript, 'process.exit(7)')
-    $waited = Start-AihDetachedProcess -FilePath $node -ArgumentList @($exitScript) -Wait
-    if (-not $waited.HasExited -or $waited.ExitCode -ne 7) { throw 'Linux Wait did not preserve the child exit code.' }
-    Write-Host 'PASS: Linux Wait preserves process exit status.'
+    $exitArgument = if (Test-AihIsWindows) { '"' + $exitScript + '"' } else { $exitScript }
+    $waited = Start-AihDetachedProcess -FilePath $node -ArgumentList @($exitArgument) -Wait
+    if (-not $waited.HasExited -or $waited.ExitCode -ne 7) { throw 'Detached Wait did not preserve the child exit code.' }
+    Write-Host 'PASS: detached Wait preserves process exit status.'
 }
 finally {
     if (Test-Path $pidFile) { Stop-Process -Id ([int]([IO.File]::ReadAllText($pidFile))) -Force -ErrorAction SilentlyContinue }

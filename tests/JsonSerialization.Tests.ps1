@@ -76,7 +76,7 @@ Assert-Aih ($storeShapeBack.configs[0].updatedAt -eq '2026-09-05T14:55:04.825103
 # The serializer BEHAVIOR assertions above are host-independent; this final
 # assertion only pins the APPLICABLE host contract for the current lane.
 if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)) {
-    Assert-Aih ($PSVersionTable.PSVersion.Major-eq5) 'serializer regression executes under Windows PowerShell 5.1'
+    Assert-Aih ($PSVersionTable.PSVersion -ge [version]'5.1') 'serializer regression executes under a supported Windows PowerShell host'
 }
 else {
     Assert-Aih ($PSVersionTable.PSVersion.Major-ge7) 'serializer regression executes under PowerShell 7 on POSIX'

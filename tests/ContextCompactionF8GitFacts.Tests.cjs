@@ -52,6 +52,17 @@ function makeGitRepo(dirty) {
 }
 function makeShimDir(failStatus, failRevParse) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'f8shim-'));
+  if (process.platform === 'win32') {
+    const realGit = execFileSync('where.exe', ['git.exe'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
+    fs.writeFileSync(path.join(dir, 'git.cmd'), [
+      '@echo off',
+      failStatus ? 'if "%~3"=="status" exit /b 3' : '',
+      failRevParse ? 'if "%~3"=="rev-parse" exit /b 4' : '',
+      '"' + realGit + '" %*',
+      'exit /b %errorlevel%',
+    ].filter(Boolean).join('\r\n') + '\r\n');
+    return dir;
+  }
   const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
   fs.writeFileSync(path.join(dir, 'git'), [
     '#!/bin/sh',
@@ -86,13 +97,13 @@ check(f3.CLEAN === 'False', 'F8-3: dirty repo worktreeClean=false');
 check(Number(f3.FILES) >= 1, 'F8-3: changed files enumerated');
 // 4. valid repo + forced status nonzero, empty stdout -> UNKNOWN.
 const shimStatus = makeShimDir(true, false);
-const f4 = factsOf(cleanWs, { PATH: shimStatus + ':' + process.env.PATH });
+const f4 = factsOf(cleanWs, { PATH: shimStatus + path.delimiter + process.env.PATH });
 check(f4.KNOWN === 'False', 'F8-4: failed status => unknown');
 check(f4.REASON === 'status-failed', 'F8-4: reason status-failed (got ' + f4.REASON + ')');
 check(f4.CLEAN === '', 'F8-4: failed-empty output is NOT clean');
 // 5. forced rev-parse failure -> UNKNOWN.
 const shimHead = makeShimDir(false, true);
-const f5 = factsOf(cleanWs, { PATH: shimHead + ':' + process.env.PATH });
+const f5 = factsOf(cleanWs, { PATH: shimHead + path.delimiter + process.env.PATH });
 check(f5.KNOWN === 'False', 'F8-5: failed rev-parse => unknown');
 check(f5.REASON === 'rev-parse-failed', 'F8-5: reason rev-parse-failed');
 check(f5.HEAD === '', 'F8-5: no HEAD accepted as known');

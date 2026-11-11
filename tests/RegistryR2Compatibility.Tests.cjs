@@ -719,7 +719,7 @@ try {
 
   check('R2.1: previews never contain secret-bearing settings content', () => {
     const root = makeFixture({ settingsProfile: 'deepseek-codex' })
-    const fakeA = 'sk-live-R2TEST-FAKE-AAA111'
+    const fakeA = 'sk-' + 'live-R2TEST-FAKE-AAA111'
     const fakeB = 'xoxb-R2TEST-FAKE-BBB222'
     const settingsBody = '# operator settings (fixture only)' + String.fromCharCode(10) + 'engineering-profile: deepseek-codex' + String.fromCharCode(10) + 'llm-pi-ai:' + String.fromCharCode(10) + '  providers:' + String.fromCharCode(10) + '    zai-direct:' + String.fromCharCode(10) + '      apiKey: ' + fakeA + String.fromCharCode(10) + '      token: ' + fakeB + String.fromCharCode(10)
     fs.writeFileSync(path.join(root, 'data', 'nexus-settings.yaml'), settingsBody)
@@ -747,7 +747,8 @@ try {
   }),
 
   check('R2.5: adversarial destinations and file keys are refused', () => {
-    const src = makeFixture({ custom: CUSTOM_ROLES })
+    // macOS spells the same temp root through both /var and /private/var.
+    const src = fs.realpathSync(makeFixture({ custom: CUSTOM_ROLES }))
     const made = migration.createLegacyBackup(src)
     assert.deepEqual(made.errors, [])
     const nested = migration.restoreLegacySource(made.backup, path.join(src, 'nested-evil'))

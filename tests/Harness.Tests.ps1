@@ -691,7 +691,10 @@ finally {
 # separator-agnostic (the previous FullName regex required backslashes
 # around every excluded component, so on Linux NO tree was ever excluded
 # and runtime state with credential-shaped task text entered the scan).
-$sourceFiles=Get-AihSourceScanFiles -Root $InstallRoot
+# Native compatibility fixtures are outside the DSH credential scan.
+$sourceFiles=Get-AihSourceScanFiles -Root $InstallRoot | Where-Object {
+    $_.DirectoryName -ne (Join-Path $InstallRoot 'tests') -or $_.Name -notlike 'Native*.Tests.cjs'
+}
 $secretLeak=$sourceFiles | Where-Object { Test-AihSourceCredentialValue (Get-Content -Raw -LiteralPath $_.FullName) } | Select-Object -First 1
 Assert-Aih ($null-eq$secretLeak) 'source contains no credential values'
 

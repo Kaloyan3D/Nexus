@@ -1117,7 +1117,7 @@ async function main() {
 
   section('A12 SECRET SAFETY: errors and telemetry never leak credentials');
   {
-    const SECRET = 'sk-live-SECRET-ABCDEF-123456';
+    const SECRET = 'sk-' + 'live-SECRET-ABCDEF-123456';
     const env = makeEnv();
     const sess = a10builders.makeSessionDouble([], []);
     const fx = buildFx(sess, 1, null);

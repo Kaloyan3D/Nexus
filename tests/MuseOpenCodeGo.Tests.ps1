@@ -174,7 +174,7 @@ try{
         if($null-ne$hits){$secretLeaks+=$file}
     }
     Assert-Aih (@($secretLeaks).Count -eq 0) 'OC-7.1: no committed config contains key material'
-    Assert-Aih ((Get-Content -Raw (Join-Path $InstallRoot '.env.example')) -match '(?m)^OPENCODE_API_KEY=$') 'OC-7.2: .env.example carries the OPENCODE_API_KEY name reference with an empty value'
+    Assert-Aih ((Get-Content -Raw (Join-Path $InstallRoot '.env.example')) -match '(?m)^OPENCODE_API_KEY=[ \t]*\r?$') 'OC-7.2: .env.example carries the OPENCODE_API_KEY name reference with an empty value'
 
     $staleOcPath=Join-Path $fixture 'data/settings-stale-oc.yaml'
     $staleOcLines=@(
