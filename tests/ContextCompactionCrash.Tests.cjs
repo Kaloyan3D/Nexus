@@ -57,7 +57,7 @@ function toolResult(callId, text, turn, step) {
   return { turn, step, message: { source: { kind: 'tool', callId }, content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text }] }] } };
 }
 function checkpointNode(operationId) {
-  return userMsg('<nexus-context-checkpoint FROZEN/>', { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId });
+  return userMsg('<nexus-context-checkpoint FROZEN/>', { kind: 'aih-controller', plugin: 'aih-controller', form: 'context-checkpoint', operationId });
 }
 // Task A history: binding + task + stale runtime snapshot + tool bulk + tail.
 function buildTaskASession(id) {

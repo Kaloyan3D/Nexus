@@ -1,0 +1,39 @@
+{
+  "mode": "production",
+  "platform": "darwin",
+  "arch": "arm64",
+  "dsh": "0.2.2-rc.1",
+  "gatewayDigest": "91abae7edfaa2bf3154680829e77b1f341aa01ba9094795aa70b96ff3e15f52b",
+  "scenarios": {
+    "production": {
+      "activation": {
+        "active": false,
+        "problems": [
+          "gateway-hook-unverified:gateway-build-not-allowlisted"
+        ]
+      },
+      "cli": {
+        "code": "REQUIRED_CAPABILITY_UNAVAILABLE",
+        "message": "submit is not available: managed Nexus submission stays disabled until every activation gate passes.",
+        "retryable": false,
+        "details": {
+          "reason": "managed-admission-disabled",
+          "problems": [
+            "gateway-hook-unverified:gateway-build-not-allowlisted"
+          ]
+        }
+      },
+      "gui": {
+        "code": "REQUIRED_CAPABILITY_UNAVAILABLE",
+        "message": "submit is not available: managed Nexus submission stays disabled until every activation gate passes.",
+        "retryable": false,
+        "details": {
+          "reason": "managed-admission-disabled",
+          "problems": [
+            "gateway-hook-unverified:gateway-build-not-allowlisted"
+          ]
+        }
+      }
+    }
+  }
+}

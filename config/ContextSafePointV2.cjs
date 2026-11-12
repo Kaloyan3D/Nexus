@@ -1,4 +1,5 @@
 'use strict';
+const messageSource = require('./Nexus-MessageSource.cjs');
 /**
  * ContextSafePointV2.cjs - CCV2-A06 SafePointDetector production authority.
  *
@@ -243,8 +244,7 @@ function isRuntimeContextMessage(event) {
   const data = event.data && typeof event.data === 'object' ? event.data : {};
   const message = data && typeof data === 'object' && data.role !== undefined ? data : null;
   const source = message && typeof message.source === 'object' && message.source !== null ? message.source : null;
-  if (!source || source.kind !== 'plugin') return false;
-  return source.plugin === '@deepseek-ai/dsh-system-prompt';
+  return messageSource.isRuntimeContextSource(source);
 }
 
 // ---- closed-world input validation (runs BEFORE any decision logic) ----

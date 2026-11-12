@@ -7,7 +7,7 @@ function userMessage(text) {
   return { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] }
 }
 function pluginMessage(text, form) {
-  return { role: 'user', source: { kind: 'plugin', plugin: 'aih-controller', form }, content: [{ type: 'text', text }] }
+  return { role: 'user', source: { kind: 'aih-controller', plugin: 'aih-controller', form }, content: [{ type: 'text', text }] }
 }
 
 async function main() {
@@ -89,10 +89,11 @@ async function main() {
   assert.throws(() => controller.assertEngineBinding({ engine: 'muse' }, 'aih-engineering'), (error) => error.code === 'engine-binding-violation')
   assert.throws(() => controller.assertEngineBinding({ engine: 'dual' }, 'aih-muse'), (error) => error.code === 'engine-binding-violation')
 
-  // 5. Controller messages are plugin-owned user-role messages (visible, no model source)
+  // 5. Controller messages are producer-owned user-role messages (visible, no
+  // model source). DSH 0.2 format v4 refuses the retired `plugin` kind on read.
   const message = controller.createControllerMessage('Controller: task bound', 'controller-binding')
   assert.equal(message.role, 'user')
-  assert.equal(message.source.kind, 'plugin')
+  assert.equal(message.source.kind, 'aih-controller')
   assert.equal(message.source.plugin, 'aih-controller')
   assert.equal(message.source.form, 'controller-binding')
   assert.equal(message.content[0].type, 'text')

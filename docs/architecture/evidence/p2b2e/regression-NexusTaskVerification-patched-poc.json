@@ -1,0 +1,105 @@
+{
+  "mode": "patched",
+  "platform": "darwin",
+  "arch": "arm64",
+  "runs": {
+    "legacyVerify": {
+      "notices": [
+        "9:controller-binding",
+        "10:controller-attempt",
+        "25:controller-complete",
+        "26:controller-verify-result"
+      ],
+      "checks": [
+        "fixture-check:PASS",
+        "architecture:rules:PASS"
+      ],
+      "attempts": [
+        "started",
+        "verifying",
+        "passed"
+      ]
+    },
+    "muse-pass": {
+      "taskId": "nt_ef2c486498eff2a5555f2d4b080ca7ee",
+      "status": "completed",
+      "statusReason": null,
+      "verification": {
+        "state": "passed",
+        "attempt": "1",
+        "startedAt": "2026-11-11T08:19:21.603Z",
+        "finishedAt": "2026-11-11T08:19:28.279Z",
+        "checks": {
+          "total": 2,
+          "passed": 2,
+          "failed": 0,
+          "skipped": 0
+        },
+        "completion": {
+          "complete": true
+        },
+        "evidencePath": ".ai-harness/runs/TASK-0002/evidence.json"
+      },
+      "ledgerStatus": "complete",
+      "attempts": [
+        "started",
+        "verifying",
+        "passed"
+      ],
+      "cliExit": 0
+    },
+    "dual-pass": {
+      "taskId": "nt_8e359426fd67ee0311a11aa4725b323d",
+      "status": "completed",
+      "statusReason": null,
+      "verification": {
+        "state": "passed",
+        "attempt": "1",
+        "startedAt": "2026-11-11T08:19:36.890Z",
+        "finishedAt": "2026-11-11T08:19:44.017Z",
+        "checks": {
+          "total": 2,
+          "passed": 2,
+          "failed": 0,
+          "skipped": 0
+        },
+        "completion": {
+          "complete": true
+        },
+        "evidencePath": ".ai-harness/runs/TASK-0001/evidence.json"
+      },
+      "ledgerStatus": "complete",
+      "attempts": [
+        "started",
+        "verifying",
+        "passed"
+      ],
+      "cliExit": 0
+    },
+    "failed": {
+      "status": "failed",
+      "statusReason": "verification-failed",
+      "failingChecks": [
+        "fixture-check"
+      ],
+      "cliExit": 5
+    },
+    "concurrency": {
+      "outcomes": [
+        "accepted",
+        "duplicate"
+      ],
+      "statusAfterRestart": "completed",
+      "verifyingRecords": 1
+    },
+    "interrupted": {
+      "statusAfterRestart": "interrupted",
+      "actions": [
+        "recovery"
+      ],
+      "finalStatus": "cancelled",
+      "attemptOpenBefore": false,
+      "attemptClosed": false
+    }
+  }
+}

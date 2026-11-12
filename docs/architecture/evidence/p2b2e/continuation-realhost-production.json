@@ -1,0 +1,15 @@
+{
+  "mode": "production",
+  "platform": "darwin",
+  "arch": "arm64",
+  "runs": {
+    "ordinaryGui": {
+      "turnEnds": [
+        "completed",
+        "completed"
+      ],
+      "llmCalls": 3,
+      "readable": true
+    }
+  }
+}

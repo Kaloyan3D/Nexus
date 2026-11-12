@@ -67,8 +67,29 @@ function protect(webCtx, handler) {
       res.end(JSON.stringify({ ok: false, error: verdict.rejection === 503 ? 'connection-service-unavailable' : 'not-admitted' }))
       return undefined
     }
+    // P2-B2B: every mutating Nexus route asks the host Controller first
+    // (managed sessions are operated only through the task API; host registry
+    // mutations are refused while a managed task is live or pending).
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const route = routeVerdict(webCtx, new URL(req.url || '/', 'http://nexus.invalid').pathname, {})
+      if (!route.allowed) { refuseRoute(res, route.reason); return undefined }
+    }
     return handler(req, res)
   }
+}
+
+/** Controller verdict for one Nexus route; no Controller service => legacy behavior. */
+function routeVerdict(webCtx, route, input) {
+  let controller
+  try { controller = webCtx.get('nexusController') } catch { controller = undefined }
+  if (!controller) return { allowed: true, reason: null }
+  if (typeof controller.routeVerdict !== 'function') return { allowed: false, reason: 'nexus-controller-incompatible' }
+  try { return controller.routeVerdict(route, input) } catch { return { allowed: false, reason: 'nexus-route-guard-failed' } }
+}
+
+function refuseRoute(res, reason) {
+  res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+  res.end(JSON.stringify({ ok: false, error: reason }))
 }
 
 function apply(ctx) {
@@ -529,6 +550,8 @@ function apply(ctx) {
         respond(400, { ok: false, error: 'missing-identifier' })
         return
       }
+      const managedRoute = routeVerdict(webCtx, '/nexus/gate-action.json', { sessionId })
+      if (!managedRoute.allowed) { refuseRoute(res, managedRoute.reason); return }
       const binding = bindingOf(sessionId)
       try {
         const outcome = await withGateMutex(() => {
@@ -679,6 +702,14 @@ function apply(ctx) {
       }
     }
 
+    // Announce this plugin's route guard to the host Controller (a managed
+    // activation gate) for as long as both are live.
+    if (typeof webCtx.inject === 'function') webCtx.inject(['nexusController'], (guardCtx) => {
+      guardCtx.effect(() => {
+        const controller = guardCtx.get('nexusController')
+        return controller && typeof controller.attachRouteGuard === 'function' ? controller.attachRouteGuard('nexus-ui') : () => {}
+      }, 'nexus-ui: route guard')
+    })
     webCtx.effect(
       () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/controller.json', handler: protect(webCtx, handler) }),
       'nexus-controller: read-only state route',

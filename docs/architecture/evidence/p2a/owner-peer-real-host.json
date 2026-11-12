@@ -1,0 +1,28 @@
+{
+  "dsh": "0.2.2-rc.1",
+  "node": "v24.18.1",
+  "platform": "darwin-arm64",
+  "results": {
+    "managedPrompt": {
+      "status": 200,
+      "ok": null
+    },
+    "managed": {
+      "turnEnded": true,
+      "refusedSteps": 1,
+      "llmCalls": 0,
+      "controllerCli": 0
+    },
+    "legacy": {
+      "controllerCli": [
+        "NexusWorkspace.ps1:resolve"
+      ],
+      "managed": false
+    },
+    "reachableOwnerMutations": {
+      "rename": "200:{\"type\":\"server-response\",\"rpcId\":\"fea905cd-72b0-49e4-8c80-4d2945595bad\",\"result\":{\"ok\":true,\"value\":{\"title\":\"renamed by owner peer\",\"seq\":8}}}",
+      "cancel": "200:{\"type\":\"server-response\",\"rpcId\":\"344dde28-bdb0-4f8b-b033-59bd5c1448f5\",\"result\":{\"ok\":true,\"value\":{\"accepted\":true}}}",
+      "updateQueue": "200:{\"type\":\"server-response\",\"rpcId\":\"0fe7f3a1-7b5b-4f66-a3cc-7408806509f7\",\"result\":{\"ok\":false,\"error\":{\"code\":\"gateway/input-invalid\",\"message\":\"typert gateway:"
+    }
+  }
+}

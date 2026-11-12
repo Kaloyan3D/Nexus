@@ -147,7 +147,7 @@ pass('missing checkpoint is invalid');
 // ── continuity tail: controller notices are skipped, user text preferred ────
 const historySession = {
   events: [
-    { seq: 0, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: 'Controller: task bound' }], source: { kind: 'plugin', plugin: 'aih-controller' } } },
+    { seq: 0, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: 'Controller: task bound' }], source: { kind: 'aih-controller', plugin: 'aih-controller' } } },
     { seq: 1, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: 'implement the widget' }], source: { kind: 'user' } } },
     { seq: 2, type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text: 'widget shipped' }] } } },
   ],
@@ -245,7 +245,7 @@ assert.equal(compaction.splitRangeAroundOwned(orphanSession, [0, 1, 2], [1]), nu
 pass('split that would orphan a tool pair refuses (KEEP)');
 // ── F2/F5: replacement addressed by operationId ───────────────────────────
 function checkpointReplacement(seq, operationId) {
-  return { seq, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: 'cp' }], source: { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId } } };
+  return { seq, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: 'cp' }], source: { kind: 'aih-controller', plugin: 'aih-controller', form: 'context-checkpoint', operationId } } };
 }
 const opSession = {
   events: [
@@ -260,7 +260,7 @@ pass('landed replacement resolves by operationId');
 assert.equal(compaction.findReplacementByOperation(opSession, 'ccop_other'), null);
 pass('unknown operationId resolves to nothing (no false reconcile)');
 const foreignForm = {
-  events: [{ seq: 0, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: 'x' }], source: { kind: 'plugin', plugin: 'aih-controller', form: 'controller-binding', operationId: 'ccop_deadbeef' } } }],
+  events: [{ seq: 0, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: 'x' }], source: { kind: 'aih-controller', plugin: 'aih-controller', form: 'controller-binding', operationId: 'ccop_deadbeef' } } }],
 };
 assert.equal(compaction.findReplacementByOperation(foreignForm, 'ccop_deadbeef'), null);
 pass('non-checkpoint forms never reconcile as replacements');

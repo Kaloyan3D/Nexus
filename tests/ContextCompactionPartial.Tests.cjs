@@ -90,7 +90,7 @@ async function main() {
     const landedOne = session.append('user/message', {
       id: harness.newMessageId(), role: 'user',
       content: [{ type: 'text', text: '<nexus-context-checkpoint task="T"/>' }],
-      source: { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId: op.operationId },
+      source: { kind: 'aih-controller', plugin: 'aih-controller', form: 'context-checkpoint', operationId: op.operationId },
     }, { surfaceOp: { op: 'replace', startSeq: first.start, endSeq: first.end }, sourceEventSeqs: first.sourceEventSeqs });
     check(landedOne && typeof landedOne.seq === 'number', 'partial setup: first segment landed');
     const countAfterFirst = eventsOf(session).length;

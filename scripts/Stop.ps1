@@ -46,5 +46,10 @@ $state['Status'] = 'STOPPED'
 $state['StoppedAtUtc'] = [DateTime]::UtcNow.ToString('o')
 $state['UpdatedAtUtc'] = [DateTime]::UtcNow.ToString('o')
 $state['StopReason'] = 'Stopped by aih-stop.'
+# P2-B1: the kernel releases installation ownership when the host exits.
+# Report it; never delete lock files or take ownership from here.
+$ownershipAfterStop = Get-AihHostOwnership -Layout $layout
+$state['OwnershipAfterStop'] = $ownershipAfterStop.State
 Write-AihState -Path $layout.State -State $state
+if ($ownershipAfterStop.State -eq 'owned') { Write-Warning "Another Nexus host still owns this installation (PID $($ownershipAfterStop.Holder.pid))." }
 Write-Host "AI Harness status: STOPPED (PID $($process.Id))"

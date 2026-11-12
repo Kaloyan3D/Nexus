@@ -1,0 +1,338 @@
+diff --git a/packages/api/gateway/src/index.ts b/packages/api/gateway/src/index.ts
+index 4fe26526..ca415bee 100644
+--- a/packages/api/gateway/src/index.ts
++++ b/packages/api/gateway/src/index.ts
+@@ -513,6 +513,18 @@ export class TypertGatewayService extends Service implements TypertGateway {
+             'Remote event result belongs to another Peer',
+           )
+         }
++        // Answering a forwarded event (approval, question) mutates the waiting
++        // Agent. Scoped waterfall events carry no resource readers, so the
++        // waiting Agent's identity is presented explicitly; an unknown event id
++        // presents a null agent.
++        const pending = this.pendingRemoteEvents.get(result.eventId)
++        await this.authorizeOperation({
++          principal: peer.principal,
++          action: endpoint,
++          resources: [{ kind: 'global' }],
++          args: { event: pending?.frame.event ?? null, agentId: pending?.frame.agentId ?? null, outcome: result.outcome.kind },
++          transport: 'unary',
++        })
+         this.receiveRemoteEventResult(client, result)
+         return { ok: true, value: undefined }
+       } catch (error) {
+@@ -536,6 +548,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
+       releaseUplink(uplink)
+       assertPeerLive(peer, endpoint)
+       requireInteractions(peer, endpoint)
++      await this.authorizeOperation({ principal: peer.principal, action: endpoint, resources: [{ kind: 'global' }], args: {}, transport: 'stream' })
+       return this.openRemoteEvents(payload, signal, peer)
+     }
+     return this.openStream({ ...remoteRequest(endpoint, payload, signal, peer), uplink, uplinkWindow }, control)
+@@ -789,6 +802,32 @@ export class TypertGatewayService extends Service implements TypertGateway {
+     }
+   }
+ 
++  /**
++   * Run the `gateway/authorize` listeners for one operation. Listeners return
++   * `undefined` to abstain or `{ kind: 'deny', reason }` to refuse; the first
++   * refusal wins whatever the registration order. Any other return value or a
++   * throwing listener refuses (fail closed). With no listener every operation
++   * keeps today's behavior. Listeners receive a frozen copy of the request.
++   */
++  private async authorizeOperation(request: GatewayAuthorizeRequest): Promise<void> {
++    let verdict: unknown
++    try {
++      verdict = await this.ctx.serial('gateway/authorize', deepFreeze(structuredClone(request)))
++    } catch {
++      throw new RemoteError('remote-access/denied', `remote access: ${request.action}: authorization failed`, {
++        action: request.action,
++        reason: 'authorization-failed',
++      })
++    }
++    if (verdict === undefined) return
++    const denial: Record<string, unknown> | undefined = isObject(verdict) ? verdict as Record<string, unknown> : undefined
++    const reason = denial?.kind === 'deny' && typeof denial.reason === 'string' ? denial.reason : 'authorization-invalid'
++    throw new RemoteError('remote-access/denied', `remote access: ${request.action}: access denied (${reason})`, {
++      action: request.action,
++      reason,
++    })
++  }
++
+   /** `control` fails the logical stream when an uplink item is rejected; unary calls hand over an inert one. */
+   private async prepareInvocation(
+     request: InvokeRemoteRequest,
+@@ -800,15 +839,15 @@ export class TypertGatewayService extends Service implements TypertGateway {
+     assertExactArguments(request.args, descriptor, endpoint)
+     const validated = validateArguments(descriptor, request.args, endpoint)
+     // Access precedes lookup resolution, so a refused call activates nothing.
++    const resources = callResources(
++      this.ctx.typert,
++      this.resourceReaders(descriptor),
++      descriptor,
++      validated,
++      request.signal ?? NEVER_ABORTED_SIGNAL,
++    )
+     // oxlint-disable-next-line typescript/no-unnecessary-condition -- other packages merge non-owner kinds into PrincipalMap.
+     if (request.peer.principal.kind !== 'owner') {
+-      const resources = callResources(
+-        this.ctx.typert,
+-        this.resourceReaders(descriptor),
+-        descriptor,
+-        validated,
+-        request.signal ?? NEVER_ABORTED_SIGNAL,
+-      )
+       const decision: RemoteAccessDecision = resources === undefined
+         ? { kind: 'deny', reason: 'resource-invalid' }
+         : this.ctx.remoteAccess.decide({
+@@ -824,6 +863,16 @@ export class TypertGatewayService extends Service implements TypertGateway {
+         })
+       }
+     }
++    // Per-operation authorization for EVERY principal, owner included. It runs
++    // after the legacy decision (which it can never relax) and before receiver
++    // resolution, so a refusal activates nothing and has no side effect.
++    await this.authorizeOperation({
++      principal: request.peer.principal,
++      action: endpoint,
++      resources,
++      args: validated,
++      transport: 'uplink' in request ? 'stream' : 'unary',
++    })
+     const receiverContext = await this.resolveReceiverContext(descriptor, validated, endpoint)
+     const receiver: unknown = receiverContext.get(descriptor.service)
+     if (!isObject(receiver)) {
+@@ -1747,3 +1796,31 @@ function isObject(value: unknown): value is object {
+ }
+ 
+ export default TypertGatewayService
++
++/** One operation presented to `gateway/authorize` listeners (frozen copy). */
++export interface GatewayAuthorizeRequest {
++  readonly principal: Principal
++  /** `<namespace>/<method>`, `$events` or `$events/result`. */
++  readonly action: string
++  /** Attributed resources; `undefined` when the arguments could not be attributed. */
++  readonly resources: readonly RemoteAccessResource[] | undefined
++  readonly args: unknown
++  readonly transport: 'unary' | 'stream'
++}
++
++/** A listener's refusal; abstain by returning `undefined`. */
++export interface GatewayAuthorizeDenial { readonly kind: 'deny'; readonly reason: string }
++
++declare module '@deepseek-ai/cordis' {
++  interface Events {
++    'gateway/authorize'(request: GatewayAuthorizeRequest): GatewayAuthorizeDenial | undefined | Promise<GatewayAuthorizeDenial | undefined>
++  }
++}
++
++function deepFreeze<T>(value: T): T {
++  if (isObject(value) && !Object.isFrozen(value)) {
++    Object.freeze(value)
++    for (const key of Reflect.ownKeys(value)) deepFreeze((value as Record<PropertyKey, unknown>)[key])
++  }
++  return value
++}
+diff --git a/packages/api/gateway/tests/gateway-authorize.host.spec.ts b/packages/api/gateway/tests/gateway-authorize.host.spec.ts
+new file mode 100644
+index 00000000..0e18d54d
+--- /dev/null
++++ b/packages/api/gateway/tests/gateway-authorize.host.spec.ts
+@@ -0,0 +1,196 @@
++import { describe, expect, it, vi, afterEach } from 'vitest'
++import { Context, symbols } from '@deepseek-ai/cordis'
++import { apply as applyConnection, inject as connectionInject } from '@deepseek-ai/dsh-client-connection'
++import RemoteAccessService, { type RemoteAccessBinding, type RemoteAccessResource } from '@deepseek-ai/dsh-api-remote-access'
++import { Remote, TypertRemoteService, type PeerScope, type Principal, type PrincipalMap, type TypertResource } from '@deepseek-ai/dsh-typert-protocol'
++import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
++import TypertGatewayService, { type GatewayAuthorizeRequest } from '@deepseek-ai/dsh-api-gateway'
++import { provideBrowserCredentials } from './browser-credentials.ts'
++import { ownerPeer, peerFor } from './peer.ts'
++
++declare module '@deepseek-ai/dsh-typert-protocol' {
++  interface PrincipalMap {
++    'authz-guest': { readonly kind: 'authz-guest' }
++  }
++  interface TypertResourceMap {
++    'authz-shelf': TypertResource<string>
++  }
++}
++
++const GUEST: PrincipalMap['authz-guest'] = { kind: 'authz-guest' }
++const OWNER: Principal = { kind: 'owner' }
++
++class AuthzFixture extends TypertRemoteService {
++  readonly calls: string[] = []
++  constructor(ctx: Context) { super(ctx, 'authzFixture') }
++
++  @Remote
++  mutate(request: { readonly shelfId: string; readonly note?: string }): string {
++    this.calls.push('mutate:' + request.shelfId + ':' + (request.note ?? ''))
++    return 'mutated'
++  }
++
++  @Remote({ mode: 'stream' })
++  async *watch(request: { readonly shelfId: string }, signal: AbortSignal): AsyncIterable<string> {
++    this.calls.push('watch:' + request.shelfId)
++    yield 'tick'
++    await new Promise<void>((resolve) => { if (signal.aborted) resolve(); else signal.addEventListener('abort', () => { resolve() }, { once: true }) })
++  }
++}
++
++const roots: Context[] = []
++afterEach(async () => {
++  vi.restoreAllMocks()
++  await Promise.all(roots.splice(0).map(ctx => ctx.fiber.dispose()))
++})
++
++async function setup(): Promise<{ ctx: Context, fixture: AuthzFixture, allowGuest: () => void }> {
++  const ctx = new Context()
++  roots.push(ctx)
++  await ctx.plugin(TypertRegistry)
++  await ctx.plugin(RemoteAccessService)
++  await ctx.plugin(TypertGatewayService)
++  provideBrowserCredentials(ctx)
++  await ctx.plugin({ inject: [...connectionInject], apply: applyConnection })
++  ctx.typert.resources.register('authz-shelf', { field: 'shelfId' })
++  await ctx.plugin(AuthzFixture)
++  let held: readonly RemoteAccessBinding[] = []
++  ctx.remoteAccess.registerPolicy('authz-guest', { bindings: () => held })
++  const receiver = ctx.get('authzFixture') as AuthzFixture & { [symbols.original]?: AuthzFixture }
++  const allowGuest = (): void => {
++    const resource: RemoteAccessResource = { kind: 'authz-shelf', id: 's1' }
++    held = [{ role: { name: 'authz:shelf', resource: 'authz-shelf', actions: ['authzFixture/mutate', 'authzFixture/watch'] }, resource }]
++  }
++  return { ctx, fixture: receiver[symbols.original] ?? receiver, allowGuest }
++}
++
++function mutate(ctx: Context, peer: PeerScope, shelfId = 's1', note?: string): Promise<unknown> {
++  return ctx.typertGateway.invoke({ peer, namespace: 'authzFixture', method: 'mutate', args: { request: note === undefined ? { shelfId } : { shelfId, note } } })
++}
++
++async function overHttp(ctx: Context, peer: PeerScope, method: string, args: Record<string, unknown>): Promise<{ ok: boolean, error?: { code: string, details?: { reason?: string } } }> {
++  const response = await ctx.connection.createSharedFetchHandler('/api').fetch(new Request(`http://host/api/${method}`, {
++    method: 'POST',
++    headers: { 'content-type': 'application/json' },
++    body: JSON.stringify({ type: 'client-request', rpcId: 'rpc-' + Math.random(), method, payload: { args } }),
++  }), peer)
++  return (await response.json() as { result: { ok: boolean, error?: { code: string, details?: { reason?: string } } } }).result
++}
++
++describe('gateway/authorize', () => {
++  it('keeps today\'s behavior when no listener exists (owner allowed, non-owner policy unchanged)', async () => {
++    const { ctx, fixture, allowGuest } = await setup()
++    await expect(mutate(ctx, ownerPeer(ctx))).resolves.toBe('mutated')
++    await expect(mutate(ctx, peerFor(ctx, GUEST))).rejects.toMatchObject({ code: 'remote-access/denied', details: { reason: 'no-allow' } })
++    allowGuest()
++    await expect(mutate(ctx, peerFor(ctx, GUEST))).resolves.toBe('mutated')
++    expect(fixture.calls).toEqual(['mutate:s1:', 'mutate:s1:'])
++  })
++
++  it('presents owner calls with the endpoint, resolved resources, validated args and transport, exactly once', async () => {
++    const { ctx } = await setup()
++    const seen: GatewayAuthorizeRequest[] = []
++    ctx.on('gateway/authorize', (request) => { seen.push(request); return undefined })
++    await mutate(ctx, ownerPeer(ctx), 's7', 'n')
++    expect(seen).toEqual([{ principal: OWNER, action: 'authzFixture/mutate', resources: [{ kind: 'authz-shelf', id: 's7' }], args: { request: { shelfId: 's7', note: 'n' } }, transport: 'unary' }])
++    expect(Object.isFrozen(seen[0]) && Object.isFrozen(seen[0]!.args)).toBe(true)
++  })
++
++  it('refuses an owner call before the method runs when a listener denies', async () => {
++    const { ctx, fixture } = await setup()
++    ctx.on('gateway/authorize', (request) => request.action === 'authzFixture/mutate' ? { kind: 'deny', reason: 'managed-session' } : undefined)
++    await expect(mutate(ctx, ownerPeer(ctx))).rejects.toMatchObject({ code: 'remote-access/denied', details: { action: 'authzFixture/mutate', reason: 'managed-session' } })
++    expect(fixture.calls).toEqual([])
++  })
++
++  it('applies the legacy non-owner decision first; a listener can never relax it', async () => {
++    const { ctx, fixture } = await setup()
++    const listener = vi.fn(() => undefined)
++    ctx.on('gateway/authorize', listener)
++    await expect(mutate(ctx, peerFor(ctx, GUEST))).rejects.toMatchObject({ details: { reason: 'no-allow' } })
++    expect(listener).not.toHaveBeenCalled()
++    expect(fixture.calls).toEqual([])
++  })
++
++  it('lets a listener refuse a non-owner call the legacy policy allowed', async () => {
++    const { ctx, fixture, allowGuest } = await setup()
++    allowGuest()
++    ctx.on('gateway/authorize', () => ({ kind: 'deny', reason: 'nexus' }))
++    await expect(mutate(ctx, peerFor(ctx, GUEST))).rejects.toMatchObject({ details: { reason: 'nexus' } })
++    expect(fixture.calls).toEqual([])
++  })
++
++  it('fails closed when a listener throws or returns anything but undefined or a denial', async () => {
++    const { ctx, fixture } = await setup()
++    const dispose = ctx.on('gateway/authorize', () => { throw new Error('bug') })
++    await expect(mutate(ctx, ownerPeer(ctx))).rejects.toMatchObject({ details: { reason: 'authorization-failed' } })
++    dispose()
++    ctx.on('gateway/authorize', () => ({ kind: 'allow' }) as never)
++    await expect(mutate(ctx, ownerPeer(ctx))).rejects.toMatchObject({ details: { reason: 'authorization-invalid' } })
++    expect(fixture.calls).toEqual([])
++  })
++
++  it('makes the first refusal win regardless of listener order', async () => {
++    for (const denyFirst of [true, false]) {
++      const { ctx, fixture } = await setup()
++      const abstain = vi.fn(() => undefined)
++      const deny = (): { kind: 'deny', reason: string } => ({ kind: 'deny', reason: 'order' })
++      if (denyFirst) { ctx.on('gateway/authorize', deny); ctx.on('gateway/authorize', abstain) } else { ctx.on('gateway/authorize', abstain); ctx.on('gateway/authorize', deny, { prepend: false }) }
++      await expect(mutate(ctx, ownerPeer(ctx))).rejects.toMatchObject({ details: { reason: 'order' } })
++      expect(fixture.calls).toEqual([])
++    }
++  })
++
++  it('does not let a listener alter the invocation arguments', async () => {
++    const { ctx, fixture } = await setup()
++    ctx.on('gateway/authorize', (request) => {
++      try { (request.args as { request: { shelfId: string } }).request.shelfId = 'hijacked' } catch { /* frozen */ }
++      return undefined
++    })
++    await expect(mutate(ctx, ownerPeer(ctx), 's1')).resolves.toBe('mutated')
++    expect(fixture.calls).toEqual(['mutate:s1:'])
++  })
++
++  it('covers the HTTP unary carrier', async () => {
++    const { ctx, fixture } = await setup()
++    ctx.on('gateway/authorize', () => ({ kind: 'deny', reason: 'http' }))
++    const result = await overHttp(ctx, ownerPeer(ctx), 'authzFixture/mutate', { request: { shelfId: 's1' } })
++    expect(result).toMatchObject({ ok: false, error: { code: 'remote-access/denied', details: { reason: 'http' } } })
++    expect(fixture.calls).toEqual([])
++  })
++
++  it('covers stream-mode methods on the WebSocket carrier and presents transport "stream"', async () => {
++    const { ctx, fixture } = await setup()
++    const seen: string[] = []
++    ctx.on('gateway/authorize', (request) => { seen.push(request.transport); return request.action === 'authzFixture/watch' ? { kind: 'deny', reason: 'stream' } : undefined })
++    await expect(ctx.typertGateway.wireStream.open('authzFixture/watch', { args: { request: { shelfId: 's1' } } }, (async function* () {})(), ownerPeer(ctx), new AbortController().signal))
++      .rejects.toMatchObject({ code: 'remote-access/denied', details: { reason: 'stream' } })
++    expect(seen).toEqual(['stream'])
++    expect(fixture.calls).toEqual([])
++  })
++
++  it('authorizes forwarded-event answers ($events/result) and the $events stream for every principal', async () => {
++    const { ctx } = await setup()
++    const seen: GatewayAuthorizeRequest[] = []
++    ctx.on('gateway/authorize', (request) => { seen.push(request); return request.action === '$events/result' ? { kind: 'deny', reason: 'answers' } : undefined })
++    ctx.effect(() => ctx.typertGateway.registerRemoteEvents(async function* (signal) {
++      await new Promise<void>((resolve) => { signal.addEventListener('abort', () => { resolve() }, { once: true }) })
++    }, { home: '/fixture' }))
++    const peer = ownerPeer(ctx)
++    const events = await ctx.typertGateway.wireStream.open('$events', { args: {} }, (async function* () {})(), peer, new AbortController().signal)
++    const ready = (await events[Symbol.asyncIterator]().next()).value as { clientId: string }
++    const result = await overHttp(ctx, peer, '$events/result', { clientId: ready.clientId, eventId: '00000000-0000-4000-8000-000000000000', outcome: { kind: 'next' } })
++    expect(result).toMatchObject({ ok: false, error: { code: 'remote-access/denied', details: { reason: 'answers' } } })
++    expect(seen.map(r => [r.action, r.transport])).toEqual([['$events', 'stream'], ['$events/result', 'unary']])
++    expect(seen[1]!.args).toEqual({ event: null, agentId: null, outcome: 'next' })
++  })
++
++  it('presents unattributable owner calls with undefined resources', async () => {
++    const { ctx } = await setup()
++    ctx.typert.resources.register('authz-shelf-bad' as never, { resolve: () => { throw new Error('ambiguous') } } as never)
++    const seen: unknown[] = []
++    ctx.on('gateway/authorize', (request) => { seen.push(request.resources); return undefined })
++    await mutate(ctx, ownerPeer(ctx))
++    expect(seen).toEqual([undefined])
++  })
++})

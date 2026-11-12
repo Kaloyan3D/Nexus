@@ -1,0 +1,123 @@
+{
+  "node": "v24.18.1",
+  "platform": "darwin-arm64",
+  "cpus": 8,
+  "startedAt": "2026-11-08T14:20:39.607Z",
+  "micro": {
+    "constructMs": 0.935,
+    "retainedHeapKiB": 62,
+    "gcExposed": true,
+    "resolveMs": {
+      "n": 20000,
+      "p50": 0,
+      "p95": 0.0001,
+      "max": 0.0143,
+      "mean": 0.0001
+    },
+    "decideMs": {
+      "n": 20000,
+      "p50": 0.0002,
+      "p95": 0.0004,
+      "max": 0.7173,
+      "mean": 0.0004
+    },
+    "emptyTransitionMs": {
+      "n": 20000,
+      "p50": 0.0005,
+      "p95": 0.001,
+      "max": 0.3698,
+      "mean": 0.0007
+    },
+    "claimEventMs": {
+      "n": 20000,
+      "p50": 0.0004,
+      "p95": 0.0011,
+      "max": 0.0603,
+      "mean": 0.0005
+    }
+  },
+  "admission": [
+    {
+      "label": "pre-p1",
+      "engine": "muse",
+      "wallMs": {
+        "n": 20,
+        "p50": 137.7308,
+        "p95": 148.7301,
+        "max": 148.7301,
+        "mean": 138.1643
+      },
+      "controllerCliPerTurn": [
+        4
+      ]
+    },
+    {
+      "label": "p1",
+      "engine": "muse",
+      "wallMs": {
+        "n": 20,
+        "p50": 135.4668,
+        "p95": 140.182,
+        "max": 140.182,
+        "mean": 135.5574
+      },
+      "controllerCliPerTurn": [
+        4
+      ]
+    },
+    {
+      "label": "pre-p1",
+      "engine": "dual",
+      "wallMs": {
+        "n": 20,
+        "p50": 169.9125,
+        "p95": 185.1646,
+        "max": 185.1646,
+        "mean": 171.5333
+      },
+      "controllerCliPerTurn": [
+        5
+      ]
+    },
+    {
+      "label": "p1",
+      "engine": "dual",
+      "wallMs": {
+        "n": 20,
+        "p50": 167.9105,
+        "p95": 176.3193,
+        "max": 176.3193,
+        "mean": 168.9074
+      },
+      "controllerCliPerTurn": [
+        5
+      ]
+    }
+  ],
+  "deltas": [
+    {
+      "engine": "muse",
+      "p50DeltaMs": -2.264,
+      "p95DeltaMs": -8.548,
+      "p95DeltaPct": -5.75,
+      "cliPerTurnOld": [
+        4
+      ],
+      "cliPerTurnNew": [
+        4
+      ]
+    },
+    {
+      "engine": "dual",
+      "p50DeltaMs": -2.002,
+      "p95DeltaMs": -8.845,
+      "p95DeltaPct": -4.78,
+      "cliPerTurnOld": [
+        5
+      ],
+      "cliPerTurnNew": [
+        5
+      ]
+    }
+  ]
+}

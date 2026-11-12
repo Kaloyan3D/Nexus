@@ -1,0 +1,3 @@
+Controller: independent review is not available for the Muse engine (engine=muse, review.independent=false).
+The Muse plane never invokes Codex as reviewer, fallback, repair agent, or worker, and no Muse reviewer exists in V0.
+Route the task through a Dual profile (Normal Engineering + GLM/Codex or DeepSeek/Codex) for independent review. No files were modified.

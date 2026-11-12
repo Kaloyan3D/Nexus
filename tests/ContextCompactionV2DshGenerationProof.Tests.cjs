@@ -297,8 +297,8 @@ function applyGeneration(session, plan) {
   plan.segments.forEach((segment, index) => {
     const isPayload = segment.role === 'payload';
     const source = isPayload
-      ? { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId: plan.operationId, generation: plan.generation, taskInstanceId: plan.taskInstanceId }
-      : { kind: 'plugin', plugin: 'aih-controller', form: 'context-continuation', operationId: plan.operationId, generation: plan.generation };
+      ? { kind: 'aih-controller', plugin: 'aih-controller', form: 'context-checkpoint', operationId: plan.operationId, generation: plan.generation, taskInstanceId: plan.taskInstanceId }
+      : { kind: 'aih-controller', plugin: 'aih-controller', form: 'context-continuation', operationId: plan.operationId, generation: plan.generation };
     const node = session.append('user/message', userMessage(isPayload ? plan.payloadText : continuationAnchorText(plan, index), source), {
       surfaceOp: { op: 'replace', start: segment.start, end: segment.end },
       sourceEventSeqs: segment.sourceEventSeqs,
@@ -581,7 +581,7 @@ async function main() {
     const naiveSegs = compaction.splitRangeAroundOwned(scratch, naiveCut.shadowedSeqs, compaction.runtimeContextSeqsOf(scratch));
     check(naiveSegs !== null && naiveSegs.length >= 2, 'naive plan is also split (' + (naiveSegs ? naiveSegs.length : 0) + ' segments)');
     for (const segment of naiveSegs) {
-      scratch.append('user/message', userMessage('<nexus-context-checkpoint>NAIVE-PAYLOAD-MARKER</nexus-context-checkpoint>', { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId: 'ccop_naive' }), {
+      scratch.append('user/message', userMessage('<nexus-context-checkpoint>NAIVE-PAYLOAD-MARKER</nexus-context-checkpoint>', { kind: 'aih-controller', plugin: 'aih-controller', form: 'context-checkpoint', operationId: 'ccop_naive' }), {
         surfaceOp: { op: 'replace', start: segment.start, end: segment.end },
         sourceEventSeqs: segment.sourceEventSeqs,
       });
@@ -643,7 +643,7 @@ async function main() {
     // refused by the host itself: the frozen source nodes are no longer live.
     let blindRetry = null;
     try {
-      r3.session.append('user/message', userMessage('BLIND-RETRY-DUPLICATE-ATTEMPT', { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId: plan1.operationId }), {
+      r3.session.append('user/message', userMessage('BLIND-RETRY-DUPLICATE-ATTEMPT', { kind: 'aih-controller', plugin: 'aih-controller', form: 'context-checkpoint', operationId: plan1.operationId }), {
         surfaceOp: { op: 'replace', start: plan1.segments[0].start, end: plan1.segments[0].end },
         sourceEventSeqs: plan1.segments[0].sourceEventSeqs,
       });

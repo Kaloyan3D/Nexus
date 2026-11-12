@@ -1,0 +1,46 @@
+# P2-B2F final-tree source identity (captured before the final lane)
+capturedAtUtc: 2026-11-11T09:23:11Z
+branch: feature/nexus-plugin-first-p1
+head: 2070c617318f2c4990307d04100f4d3db08091a7
+trackedDiffSha256 (git diff HEAD, staged+unstaged, excluding docs/): d5ac9788eeae6f38281c3620dcffa1870c78fb52d1ea0abe779d67eb9bf8cdc8
+untrackedSourceSha256 (untracked non-docs files, sorted, name+content): fd738264509ed9215cdd31584cba90efe39c9c5aa9dd96a85576c99e91e26428
+untrackedSourceFiles:
+  - tests/NexusDurabilityRestart.RealHost.Tests.mjs
+  - tests/NexusTaskContinuation.RealHost.Tests.mjs
+  - tests/NexusTaskContinuation.Tests.cjs
+  - tests/NexusTaskGates.RealHost.Tests.mjs
+  - tests/NexusTaskGates.Tests.cjs
+  - tests/NexusTaskVerification.RealHost.Tests.mjs
+  - tests/NexusTaskVerification.Tests.cjs
+status:
+   M config/AihController.cjs
+   M config/nexus/controller.cjs
+   M config/nexus/intake-store.cjs
+   M config/nexus/ipc.cjs
+   M config/nexus/managed-tasks.cjs
+  A  config/nexus/session-health.cjs
+   M config/nexus/task-api.cjs
+   M scripts/NexusSessionAudit.cjs
+   M scripts/Test-Harness.ps1
+   M scripts/nexus-cli.cjs
+   M tests/NexusCli.Tests.cjs
+   M tests/NexusManagedIntake.Tests.cjs
+   M tests/NexusSessionColdRestore.RealHost.Tests.mjs
+   M tests/NexusSessionDurability.Tests.cjs
+   M tests/lib/NexusManagedHost.mjs
+   M ui/nexus-controller/lib/gate.cjs
+  ?? docs/architecture/NEXUS-PLUGIN-FIRST-P2B2C-IMPLEMENTATION-REPORT.md
+  ?? docs/architecture/NEXUS-PLUGIN-FIRST-P2B2D-IMPLEMENTATION-REPORT.md
+  ?? docs/architecture/NEXUS-PLUGIN-FIRST-P2B2E-IMPLEMENTATION-REPORT.md
+  ?? docs/architecture/NEXUS-PLUGIN-FIRST-P2B2F-IMPLEMENTATION-REPORT.md
+  ?? docs/architecture/evidence/p2b2c/
+  ?? docs/architecture/evidence/p2b2d/
+  ?? docs/architecture/evidence/p2b2e/
+  ?? docs/architecture/evidence/p2b2f/
+  ?? tests/NexusDurabilityRestart.RealHost.Tests.mjs
+  ?? tests/NexusTaskContinuation.RealHost.Tests.mjs
+  ?? tests/NexusTaskContinuation.Tests.cjs
+  ?? tests/NexusTaskGates.RealHost.Tests.mjs
+  ?? tests/NexusTaskGates.Tests.cjs
+  ?? tests/NexusTaskVerification.RealHost.Tests.mjs
+  ?? tests/NexusTaskVerification.Tests.cjs

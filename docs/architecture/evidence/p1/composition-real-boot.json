@@ -1,0 +1,102 @@
+{
+  "dshVersion": "0.2.2-rc.1",
+  "node": "v24.18.1",
+  "platform": "darwin",
+  "defaultPreset": "aih-engineering",
+  "roster": [
+    {
+      "id": "aih-engineering",
+      "broken": null,
+      "name": "Normal Engineering"
+    },
+    {
+      "id": "aih-deepseek",
+      "broken": null,
+      "name": "DeepSeek Only"
+    },
+    {
+      "id": "aih-muse",
+      "broken": null,
+      "name": "Muse Agent Plane"
+    }
+  ],
+  "planes": {
+    "aih-engineering": "mounted",
+    "aih-deepseek": "mounted",
+    "aih-muse": "mounted"
+  },
+  "stockPresetsPresent": [],
+  "compositions": [
+    {
+      "preset": "aih-muse",
+      "keys": [
+        "id",
+        "modules",
+        "leakedServices"
+      ],
+      "modules": 24,
+      "leakedServices": []
+    },
+    {
+      "preset": "aih-engineering",
+      "keys": [
+        "id",
+        "modules",
+        "leakedServices"
+      ],
+      "modules": 28,
+      "leakedServices": []
+    },
+    {
+      "preset": "aih-deepseek",
+      "keys": [
+        "id",
+        "modules",
+        "leakedServices"
+      ],
+      "modules": 28,
+      "leakedServices": []
+    }
+  ],
+  "expectedDefaultPreset": "aih-engineering",
+  "controller": {
+    "build": "nexus-controller-p1-1",
+    "contractMajor": 1,
+    "ready": true,
+    "problems": [],
+    "strategies": [
+      {
+        "id": "nexus.muse",
+        "contractMajor": 1,
+        "ready": true,
+        "reason": null
+      },
+      {
+        "id": "nexus.legacy-dual",
+        "contractMajor": 1,
+        "ready": true,
+        "reason": null
+      }
+    ],
+    "bridges": [
+      {
+        "mountId": "bridge-1",
+        "plane": "aih-engineering"
+      },
+      {
+        "mountId": "bridge-2",
+        "plane": "aih-deepseek"
+      },
+      {
+        "mountId": "bridge-3",
+        "plane": "aih-muse"
+      }
+    ],
+    "planesAttached": {
+      "aih-engineering": true,
+      "aih-deepseek": true,
+      "aih-muse": true
+    }
+  },
+  "ok": true
+}

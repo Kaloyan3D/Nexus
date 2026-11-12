@@ -28,6 +28,10 @@
 //     deterministic controller
 //   - agent-default-model and llm-pi-ai provider routes (from nexus-settings)
 //   - three presets: aih-engineering, aih-deepseek, aih-muse
+//   - one trusted host row, nexus-controller-host (P1): the `nexusController`
+//     service (strategy dispatch, single legacy CLI runner, transition lanes,
+//     session-event claims, readiness). The per-plane aih-controller rows are
+//     compatibility bridges that resolve it and fail closed without it.
 //
 // The output is deterministic; running it twice yields identical bytes.
 
@@ -63,6 +67,9 @@ const PLANES = Object.freeze({
   },
 })
 const STOCK_PRESET_ROWS = Object.freeze(['preset-standard', 'preset-ptc', 'preset-minimal', 'preset-cordis'])
+// P1 host Controller: one allowlisted host row, closure published by
+// Install-NexusPresets.ps1 (MusePresetDependencyClosure profile `host`).
+const HOST_CONTROLLER_ROW = Object.freeze({ id: 'nexus-controller-host', closure: '.nexus-host', entry: 'nexus/controller.cjs' })
 const BEGIN = '# ---- BEGIN NEXUS GENERATED (scripts/Build-NexusHomePatch.cjs; do not edit) ----'
 const END = '# ---- END NEXUS GENERATED ----'
 
@@ -196,6 +203,8 @@ function build(installRoot, options = {}) {
   rows.push('- id: agent-default-model', '  config:', indentBlock(yaml.dump(defaultModel, { lineWidth: -1, noRefs: true }).trimEnd(), 4))
   rows.push('- id: llm-pi-ai', '  config:', indentBlock(yaml.dump({ providers: piAi.providers }, { lineWidth: -1, noRefs: true }).trimEnd(), 4))
   rows.push('- insert:')
+  const closureRoot = path.join(root, 'data', '.agent-presets')
+  rows.push(`    - id: ${HOST_CONTROLLER_ROW.id}`, `      name: ${quote(pathToFileURL(path.join(closureRoot, HOST_CONTROLLER_ROW.closure, HOST_CONTROLLER_ROW.entry)).href)}`)
   for (const presetId of Object.keys(PLANES)) {
     rows.push(presetRow(presetId, PLANES[presetId], items, readMetadata(path.join(configDir, PLANES[presetId].metadata)), path.join(root, 'data', '.agent-presets'), configDir))
   }
@@ -214,7 +223,7 @@ function build(installRoot, options = {}) {
   return { output, planes: Object.keys(PLANES), defaultPreset, settingsPath }
 }
 
-module.exports = { build, standardPluginItems, PLANES, STOCK_PRESET_ROWS, BEGIN, END }
+module.exports = { build, standardPluginItems, PLANES, STOCK_PRESET_ROWS, HOST_CONTROLLER_ROW, BEGIN, END }
 
 if (require.main === module) {
   try {

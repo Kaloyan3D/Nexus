@@ -53,6 +53,7 @@
 const crypto = require('node:crypto');
 
 const compactionV2 = require('./ContextCompaction.cjs');
+const messageSource = require('./Nexus-MessageSource.cjs');
 const checkpointV2 = require('./ContextCheckpointV2.cjs');
 const snapshotV2 = require('./ContextSnapshotV2.cjs');
 const trustV2 = require('./ContextTrustV2.cjs');
@@ -633,8 +634,8 @@ function buildCompactedProjectionV2(input) {
     const form = isPayload ? 'context-checkpoint' : 'context-continuation';
     const seq = maxSeq + 1 + index;
     const source = isPayload
-      ? { kind: 'plugin', plugin: 'aih-controller', form, operationId, generation: n.generation, taskInstanceId: n.taskInstanceId }
-      : { kind: 'plugin', plugin: 'aih-controller', form, operationId, generation: n.generation };
+      ? messageSource.controllerSource({ form, operationId, generation: n.generation, taskInstanceId: n.taskInstanceId })
+      : messageSource.controllerSource({ form, operationId, generation: n.generation });
     return {
       seq,
       type: 'user/message',
@@ -831,8 +832,8 @@ function validateCompactedProjectionV2(artifact, expectations) {
     const form = isPayload ? 'context-checkpoint' : 'context-continuation';
     const seq = maxSourceSeq + 1 + index;
     const source = isPayload
-      ? { kind: 'plugin', plugin: 'aih-controller', form, operationId: artifact.operationId, generation: artifact.generation, taskInstanceId: artifact.taskInstanceId }
-      : { kind: 'plugin', plugin: 'aih-controller', form, operationId: artifact.operationId, generation: artifact.generation };
+      ? messageSource.controllerSource({ form, operationId: artifact.operationId, generation: artifact.generation, taskInstanceId: artifact.taskInstanceId })
+      : messageSource.controllerSource({ form, operationId: artifact.operationId, generation: artifact.generation });
     rebuiltReplacements.push({ id: shadowMessageId(text, form, seq), role: 'user', content: [{ type: 'text', text }], source });
     hypoBySeq[seq] = rebuiltReplacements[rebuiltReplacements.length - 1];
   }

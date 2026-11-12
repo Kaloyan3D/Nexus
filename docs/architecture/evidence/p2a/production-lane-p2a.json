@@ -1,0 +1,915 @@
+{
+ "result": "FAIL",
+ "startedAtUtc": "2026-11-08T08:12:38.2091040Z",
+ "finishedAtUtc": "2026-11-08T08:26:25.2150430Z",
+ "durationMs": 827006,
+ "totalPassed": 3307,
+ "totalFailed": 2,
+ "suiteCount": 113,
+ "suites": [
+  {
+   "name": "ContextRestrictedProductionV2",
+   "result": "FAIL",
+   "passed": 0,
+   "failed": 1,
+   "exitCode": 1,
+   "durationMs": 85
+  },
+  {
+   "name": "ContextRestrictedProjectionV2",
+   "result": "PASS",
+   "passed": 13,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 2301
+  },
+  {
+   "name": "ContextRestrictedDshCompaction",
+   "result": "PASS",
+   "passed": 7,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 191
+  },
+  {
+   "name": "SetupUpgrade",
+   "result": "PASS",
+   "passed": 31,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 632
+  },
+  {
+   "name": "CredentialsCompat",
+   "result": "PASS",
+   "passed": 6,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 5341
+  },
+  {
+   "name": "UpdateRootResolution",
+   "result": "PASS",
+   "passed": 43,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 1956
+  },
+  {
+   "name": "SourceCredentialGuard",
+   "result": "PASS",
+   "passed": 14,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 352
+  },
+  {
+   "name": "Harness",
+   "result": "FAIL",
+   "passed": 230,
+   "failed": 1,
+   "exitCode": 1,
+   "durationMs": 26292
+  },
+  {
+   "name": "TestHarness.Reporting",
+   "result": "PASS",
+   "passed": 9,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 342
+  },
+  {
+   "name": "JsonSerialization",
+   "result": "PASS",
+   "passed": 35,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 383
+  },
+  {
+   "name": "EpistemicPolicy",
+   "result": "PASS",
+   "passed": 85,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 4715
+  },
+  {
+   "name": "EngineeringTelemetry",
+   "result": "PASS",
+   "passed": 13,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 3218
+  },
+  {
+   "name": "ContextCompaction",
+   "result": "PASS",
+   "passed": 99,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 9297
+  },
+  {
+   "name": "ControllerRouting",
+   "result": "PASS",
+   "passed": 85,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 4662
+  },
+  {
+   "name": "TaskIdentity",
+   "result": "PASS",
+   "passed": 53,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 2899
+  },
+  {
+   "name": "EngineeringProfiles",
+   "result": "PASS",
+   "passed": 105,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 1933
+  },
+  {
+   "name": "EngineeringProfileEditor",
+   "result": "PASS",
+   "passed": 43,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 1084
+  },
+  {
+   "name": "NexusProfiles",
+   "result": "PASS",
+   "passed": 65,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 870
+  },
+  {
+   "name": "MuseProvider",
+   "result": "PASS",
+   "passed": 111,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 5704
+  },
+  {
+   "name": "MuseAgentPlane",
+   "result": "PASS",
+   "passed": 65,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 982
+  },
+  {
+   "name": "MuseInstall",
+   "result": "PASS",
+   "passed": 7,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 17709
+  },
+  {
+   "name": "SourceCompleteness",
+   "result": "PASS",
+   "passed": 0,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 292
+  },
+  {
+   "name": "MusePresetDependencyClosure",
+   "result": "PASS",
+   "passed": 0,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 680
+  },
+  {
+   "name": "MusePresetCleanInstall",
+   "result": "PASS",
+   "passed": 0,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 468
+  },
+  {
+   "name": "ControllerPresetCleanInstall",
+   "result": "PASS",
+   "passed": 0,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 1635
+  },
+  {
+   "name": "ControllerPresetInstalled",
+   "result": "PASS",
+   "passed": 0,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 2723
+  },
+  {
+   "name": "VisualReview",
+   "result": "PASS",
+   "passed": 94,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 14724
+  },
+  {
+   "name": "VisualLoop",
+   "result": "PASS",
+   "passed": 64,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 39252
+  },
+  {
+   "name": "NexusWorkspace",
+   "result": "PASS",
+   "passed": 16,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 4175
+  },
+  {
+   "name": "Intelligence.Concurrency",
+   "result": "PASS",
+   "passed": 15,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 34685
+  },
+  {
+   "name": "NexusSkills",
+   "result": "PASS",
+   "passed": 164,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 3541
+  },
+  {
+   "name": "Intelligence.Registry",
+   "result": "PASS",
+   "passed": 65,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 5308
+  },
+  {
+   "name": "Intelligence.Scanning",
+   "result": "PASS",
+   "passed": 53,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 1859
+  },
+  {
+   "name": "Intelligence.Snapshots",
+   "result": "PASS",
+   "passed": 38,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 5190
+  },
+  {
+   "name": "Intelligence.EndToEnd",
+   "result": "PASS",
+   "passed": 43,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 8008
+  },
+  {
+   "name": "Intelligence.IgnoreRegression",
+   "result": "PASS",
+   "passed": 20,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 989
+  },
+  {
+   "name": "Intelligence.SnapshotModules",
+   "result": "PASS",
+   "passed": 19,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 3236
+  },
+  {
+   "name": "Intelligence.CodeFoundation",
+   "result": "PASS",
+   "passed": 45,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 3127
+  },
+  {
+   "name": "Intelligence.CodeParsing",
+   "result": "PASS",
+   "passed": 47,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 480
+  },
+  {
+   "name": "Intelligence.CodeIntelligence",
+   "result": "PASS",
+   "passed": 58,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 19019
+  },
+  {
+   "name": "Intelligence.CodeScale",
+   "result": "PASS",
+   "passed": 13,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 50830
+  },
+  {
+   "name": "AihController",
+   "result": "PASS",
+   "passed": 1,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 5244
+  },
+  {
+   "name": "VisualControllerLifecycle",
+   "result": "PASS",
+   "passed": 1,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 21464
+  },
+  {
+   "name": "VisualReviewBridge",
+   "result": "PASS",
+   "passed": 1,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 108
+  },
+  {
+   "name": "VisualStructuredOutput",
+   "result": "PASS",
+   "passed": 1,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 130
+  },
+  {
+   "name": "NexusSkillsRuntime",
+   "result": "PASS",
+   "passed": 22,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 330
+  },
+  {
+   "name": "NexusProfilesRuntime",
+   "result": "PASS",
+   "passed": 37,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 114
+  },
+  {
+   "name": "MuseProviderRuntime",
+   "result": "PASS",
+   "passed": 35,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 891
+  },
+  {
+   "name": "MuseReasoningGovernor",
+   "result": "PASS",
+   "passed": 52,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 82
+  },
+  {
+   "name": "MuseReasoningRuntime",
+   "result": "PASS",
+   "passed": 30,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 139
+  },
+  {
+   "name": "MuseReasoningSignals",
+   "result": "PASS",
+   "passed": 34,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 144
+  },
+  {
+   "name": "MuseReasoningActivity",
+   "result": "PASS",
+   "passed": 33,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 174
+  },
+  {
+   "name": "MuseIsolation",
+   "result": "PASS",
+   "passed": 20,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 92
+  },
+  {
+   "name": "ControllerRouteSelection",
+   "result": "PASS",
+   "passed": 9,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 88
+  },
+  {
+   "name": "NexusRouteAdmission",
+   "result": "PASS",
+   "passed": 7,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 100
+  },
+  {
+   "name": "ContextCompactionBridge",
+   "result": "PASS",
+   "passed": 50,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 803
+  },
+  {
+   "name": "ContextCompactionAcceptance",
+   "result": "PASS",
+   "passed": 27,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 91
+  },
+  {
+   "name": "ContextCompactionCrash",
+   "result": "PASS",
+   "passed": 16,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 92
+  },
+  {
+   "name": "ContextCompactionF1Loop",
+   "result": "PASS",
+   "passed": 14,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 11174
+  },
+  {
+   "name": "ContextCompactionF2Prod",
+   "result": "PASS",
+   "passed": 69,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 202409
+  },
+  {
+   "name": "ContextCompactionF5Prod",
+   "result": "PASS",
+   "passed": 12,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 28892
+  },
+  {
+   "name": "ContextCompactionXProc",
+   "result": "PASS",
+   "passed": 7,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 16937
+  },
+  {
+   "name": "ContextCompactionF1Loop",
+   "result": "PASS",
+   "passed": 14,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 11168
+  },
+  {
+   "name": "ContextCompactionPartial",
+   "result": "PASS",
+   "passed": 8,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 11362
+  },
+  {
+   "name": "ContextCompactionF5Slow",
+   "result": "PASS",
+   "passed": 10,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 27674
+  },
+  {
+   "name": "MuseEgressCleanup",
+   "result": "PASS",
+   "passed": 0,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 78
+  },
+  {
+   "name": "NexusEngineContract",
+   "result": "PASS",
+   "passed": 26,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 87
+  },
+  {
+   "name": "EpistemicProductionHardening",
+   "result": "PASS",
+   "passed": 20,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 106
+  },
+  {
+   "name": "AihControllerIdentity",
+   "result": "PASS",
+   "passed": 7,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 28221
+  },
+  {
+   "name": "NexusControllerPanel",
+   "result": "PASS",
+   "passed": 1,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 2301
+  },
+  {
+   "name": "PlatformSupport",
+   "result": "PASS",
+   "passed": 163,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 4331
+  },
+  {
+   "name": "PlatformPortability",
+   "result": "PASS",
+   "passed": 24,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 883
+  },
+  {
+   "name": "StartupProviderIsolation",
+   "result": "PASS",
+   "passed": 19,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 7663
+  },
+  {
+   "name": "PowerShellPortability",
+   "result": "PASS",
+   "passed": 25,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 11317
+  },
+  {
+   "name": "RegistryInstalledRuntime",
+   "result": "PASS",
+   "passed": 3,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 1600
+  },
+  {
+   "name": "AihControllerHost",
+   "result": "PASS",
+   "passed": 161,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 88
+  },
+  {
+   "name": "NexusControllerCore",
+   "result": "PASS",
+   "passed": 15,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 221
+  },
+  {
+   "name": "NexusLegacyCli",
+   "result": "PASS",
+   "passed": 8,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 1405
+  },
+  {
+   "name": "NexusControllerBridge",
+   "result": "PASS",
+   "passed": 10,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 3837
+  },
+  {
+   "name": "NexusBindingAuthority",
+   "result": "PASS",
+   "passed": 6,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 804
+  },
+  {
+   "name": "NexusHostOwnership",
+   "result": "PASS",
+   "passed": 6,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 254
+  },
+  {
+   "name": "NexusTaskApi",
+   "result": "PASS",
+   "passed": 7,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 546
+  },
+  {
+   "name": "NexusOwnerPeerGuard",
+   "result": "PASS",
+   "passed": 3,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 3331
+  },
+  {
+   "name": "ComposedRoutingAuthority",
+   "result": "PASS",
+   "passed": 2,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 125
+  },
+  {
+   "name": "ComposedRoutingMatrix",
+   "result": "PASS",
+   "passed": 8,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 128
+  },
+  {
+   "name": "ContextCompactionF10ReaderBounds",
+   "result": "PASS",
+   "passed": 21,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 8513
+  },
+  {
+   "name": "ContextCompactionF4Privacy",
+   "result": "PASS",
+   "passed": 50,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 1853
+  },
+  {
+   "name": "ContextCompactionF6UsageRace",
+   "result": "PASS",
+   "passed": 56,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 15148
+  },
+  {
+   "name": "ContextCompactionF7Telemetry",
+   "result": "PASS",
+   "passed": 28,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 6563
+  },
+  {
+   "name": "ContextCompactionF8GitFacts",
+   "result": "PASS",
+   "passed": 24,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 3892
+  },
+  {
+   "name": "ContextCompactionF9TailBound",
+   "result": "PASS",
+   "passed": 21,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 98
+  },
+  {
+   "name": "ControllerSessionBootstrap",
+   "result": "PASS",
+   "passed": 32,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 46195
+  },
+  {
+   "name": "DeepSeekRequestBoundaryHost",
+   "result": "PASS",
+   "passed": 0,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 78
+  },
+  {
+   "name": "MixedPresetShellEnv",
+   "result": "PASS",
+   "passed": 8,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 120
+  },
+  {
+   "name": "DeepSeekIsolation",
+   "result": "PASS",
+   "passed": 4,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 89
+  },
+  {
+   "name": "EngineeringIsolation",
+   "result": "PASS",
+   "passed": 6,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 88
+  },
+  {
+   "name": "MuseOpenCodeGoRuntime",
+   "result": "PASS",
+   "passed": 19,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 528
+  },
+  {
+   "name": "MuseOpenCodeGo",
+   "result": "PASS",
+   "passed": 54,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 1820
+  },
+  {
+   "name": "MuseOpenCodeSession",
+   "result": "PASS",
+   "passed": 13,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 77
+  },
+  {
+   "name": "NexusControllerPanel",
+   "result": "PASS",
+   "passed": 1,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 2408
+  },
+  {
+   "name": "NexusModeContract",
+   "result": "PASS",
+   "passed": 1,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 102
+  },
+  {
+   "name": "NexusWorkspaceGuard",
+   "result": "PASS",
+   "passed": 7,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 81
+  },
+  {
+   "name": "NexusComposerSeat",
+   "result": "PASS",
+   "passed": 4,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 84
+  },
+  {
+   "name": "NexusSessionIdentity",
+   "result": "PASS",
+   "passed": 5,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 83
+  },
+  {
+   "name": "NexusModeDefaultRoute",
+   "result": "PASS",
+   "passed": 4,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 8208
+  },
+  {
+   "name": "HarnessLanes",
+   "result": "PASS",
+   "passed": 7,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 79
+  },
+  {
+   "name": "PlatformDetachedLifecycle",
+   "result": "PASS",
+   "passed": 3,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 857
+  },
+  {
+   "name": "PreferredRouteContract",
+   "result": "PASS",
+   "passed": 7,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 3844
+  },
+  {
+   "name": "RoutingIntegrity",
+   "result": "PASS",
+   "passed": 8,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 93
+  },
+  {
+   "name": "RuntimeRoutingTrace",
+   "result": "PASS",
+   "passed": 5,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 181
+  },
+  {
+   "name": "StartupLifecycle",
+   "result": "PASS",
+   "passed": 2,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 423
+  },
+  {
+   "name": "VisualCaptureTarget",
+   "result": "PASS",
+   "passed": 10,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 26888
+  },
+  {
+   "name": "VisualPacketIntegrity",
+   "result": "PASS",
+   "passed": 10,
+   "failed": 0,
+   "exitCode": 0,
+   "durationMs": 336
+  }
+ ]
+}

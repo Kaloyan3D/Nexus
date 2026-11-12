@@ -41,7 +41,7 @@
  */
 
 const sessionReader = require('./Dsh-SessionEvents.cjs')
-const { execFile, spawn } = require('node:child_process')
+const messageSource = require('./Nexus-MessageSource.cjs')
 const { promisify } = require('node:util')
 const { createRequire } = require('node:module')
 const presetShellEnvironment = require('./Preset-ShellEnvironment.cjs')
@@ -60,6 +60,15 @@ const compilerShadowHost = require('./ContextCompilerShadowHostV2.cjs')
 const memoryProducerHost = require('./ContextMemoryProducerHostV2.cjs')
 const compilerActiveHost = require('./ContextCompilerActiveHostV2.cjs')
 const opencodeActiveHost = require('./ContextCompilerActiveOpencodeHostV2.cjs')
+// P1 plugin-first foundation: the trusted host Nexus Controller (strategy
+// dispatch, transition lanes, session-event claims, readiness) and its single
+// legacy PowerShell runner. This file is the per-plane compatibility bridge.
+const nexusControllerHost = require('./nexus/controller.cjs')
+const nexusLegacyCli = require('./nexus/legacy-cli.cjs')
+// P2-A: the host Controller owns the single session-binding writer; the
+// durable reader and authority stamp are the same verbatim functions.
+const nexusBindingStore = require('./nexus/binding-store.cjs')
+const { loadBindings } = nexusBindingStore
 
 const REVIEW_COMMAND = /^\s*\/(?:codex-)?review\b/i
 const VERIFY_COMMAND = /^\s*\/verify\b/i
@@ -74,7 +83,6 @@ const VISUAL_REVIEW_COMMAND = /^\s*\/visual-review\b/i
 // must not impose a file count or a context-token ceiling on its own.
 const LEGACY_MAX_FILES = 8
 const LEGACY_MAX_CONTEXT_TOKENS = 30000
-const CLI_TIMEOUT_MS = 320000
 
 // ── review budget policy (TASK-0007) ────────────────────────────────────────
 //
@@ -252,88 +260,16 @@ function isReviewClass(executionClass) {
   return canonicalExecutionClass(executionClass) === 'reviewer'
 }
 
-/**
- * Recover a structured CLI result from a non-zero child exit.
- *
- * PowerShell CLIs in this controller emit JSON on stdout and exit non-zero
- * to report a STRUCTURED failure (hard budget rejection, packet-too-large).
- * Returns the stdout text when the exit code is the structured-failure
- * contract (3) and stdout is non-empty; returns null otherwise so the caller
- * rethrows the original error.
- */
-function structuredCliStdout(error) {
-  if (!error || typeof error !== 'object') return null
-  if (Number(error.code) !== 3) return null
-  const stdout = typeof error.stdout === 'string' ? error.stdout : ''
-  return stdout.trim() === '' ? null : stdout
-}
-
-/**
- * TASK-0004: verification CLIs (Verify-Project.ps1) report FAILED CHECKS by
- * exiting non-zero while still emitting the complete structured JSON on
- * stdout (`exit 1` after `$summary | ConvertTo-Json`). A non-zero exit with
- * parseable verification-shaped JSON is therefore a VALID result (checks
- * failed), NOT an infrastructure failure. Returns the stdout when it parses
- * as a verification document (an array or an object carrying a `Results`
- * array); returns null otherwise so the caller rethrows the original error
- * (launch failure, timeout/abort, malformed output — genuine infrastructure
- * failures).
- */
-function verificationCliStdout(error) {
-  if (!error || typeof error !== 'object') return null
-  const stdout = typeof error.stdout === 'string' ? error.stdout : ''
-  if (stdout.trim() === '') return null
-  try {
-    const parsed = parseCliJson(stdout)
-    if (Array.isArray(parsed) || (parsed && typeof parsed === 'object' && Array.isArray(parsed.Results))) return stdout
-  } catch {
-    /* not a structured verification result */
-  }
-  return null
-}
-
-function redactControllerDiagnostic(value) {
-  return String(value == null ? '' : value)
-    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1<redacted>')
-    .replace(/\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, '<redacted>')
-    .replace(/((?:MODEL_API_KEY|API[_-]?KEY|ACCESS[_-]?TOKEN|CLIENT[_-]?SECRET|PASSWORD|AUTHORIZATION)\s*[:=]\s*)([^\s,;]+)/gi, '$1<redacted>')
-    .replace(/("(?:apiKey|api_key|accessToken|access_token|clientSecret|client_secret|password|authorization)"\s*:\s*")[^"]*(")/gi, '$1<redacted>$2')
-}
-
-function boundedControllerDiagnostic(value) {
-  const redacted = redactControllerDiagnostic(value).trim()
-  return redacted.length <= 2000 ? redacted : redacted.slice(0, 2000) + '…<truncated>'
-}
-
-/** Safe, structured child-process diagnostics. Payload contents and secrets
- * never enter this object; only the script, non-payload args, process status,
- * bounded redacted streams, and structured failure discriminator are kept. */
-function controllerCliFailure(script, args, error) {
-  const stdout = boundedControllerDiagnostic(error && error.stdout)
-  const stderr = boundedControllerDiagnostic(error && error.stderr)
-  let structuredKind = null
-  let structuredCode = null
-  try {
-    const parsed = stdout === '' ? null : parseCliJson(stdout)
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      if (typeof parsed.kind === 'string') structuredKind = parsed.kind
-      if (typeof parsed.code === 'string') structuredCode = parsed.code
-    }
-  } catch {
-    /* ordinary diagnostic output */
-  }
-  return {
-    script: path.basename(String(script || 'unknown')),
-    args: Array.isArray(args) ? args.map((arg) => boundedControllerDiagnostic(arg)) : [],
-    exitCode: error && error.code !== undefined ? error.code : null,
-    signal: error && error.signal ? String(error.signal) : null,
-    killed: Boolean(error && error.killed),
-    stdout,
-    stderr,
-    structuredKind,
-    structuredCode,
-  }
-}
+// Structured CLI recovery, redaction and diagnostics moved verbatim to
+// nexus/legacy-cli.cjs (P1); re-bound here so existing exports are unchanged.
+const {
+  structuredCliStdout,
+  verificationCliStdout,
+  redactControllerDiagnostic,
+  boundedControllerDiagnostic,
+  controllerCliFailure,
+  parseCliJson,
+} = nexusLegacyCli
 
 function reviewQuestionOf(text) {
   if (typeof text !== 'string') return ''
@@ -469,12 +405,17 @@ function executionClassLabel(executionClass) {
   return EXECUTION_CLASS_LABELS[canonicalExecutionClass(executionClass)] || 'Engineer \u00b7 Normal'
 }
 
+// DSH 0.2 session format v4 refuses the retired catch-all `plugin` source kind
+// on durable read (cold restore, resume, persistence reads): every producer
+// owns its kind. Controller notices therefore use the producer kind
+// `aih-controller` (the `plugin` field is kept for existing readers); see
+// Nexus-MessageSource.cjs.
 function createControllerMessage(text, form) {
   return {
     id: crypto.randomUUID(),
     role: 'user',
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: 'aih-controller', form: form ?? 'notice' },
+    source: messageSource.controllerSource({ form: form ?? 'notice' }),
   }
 }
 
@@ -503,57 +444,7 @@ function reviewResultText(binding, summary, raw) {
   return lines.join('\n')
 }
 
-/**
- * Parse JSON produced by Windows PowerShell 5.1 CLIs.
- *
- * PowerShell 5.1's ConvertTo-Json escapes most control characters but NOT all
- * of them (observed: raw U+001A inside a string). The controller bridge must
- * therefore accept JSON documents whose string values contain raw control
- * characters and recover the exact original text. Only control characters
- * INSIDE double-quoted strings are escaped; structural whitespace outside
- * strings is left untouched (JSON.parse already accepts it).
- */
-function parseCliJson(text) {
-  const source = typeof text === 'string' ? text : String(text ?? '')
-  if (source.trim() === '') return null
-  let parsed = ''
-  let inString = false
-  let escaped = false
-  for (let index = 0; index < source.length; index += 1) {
-    const char = source[index]
-    if (inString) {
-      if (escaped) {
-        parsed += char
-        escaped = false
-        continue
-      }
-      if (char === '\\') {
-        parsed += char
-        escaped = true
-        continue
-      }
-      if (char === '"') {
-        parsed += char
-        inString = false
-        continue
-      }
-      const code = source.charCodeAt(index)
-      if (code < 0x20) {
-        parsed += '\\u' + code.toString(16).padStart(4, '0')
-        continue
-      }
-      parsed += char
-      continue
-    }
-    if (char === '"') {
-      parsed += char
-      inString = true
-      continue
-    }
-    parsed += char
-  }
-  return JSON.parse(parsed)
-}
+// parseCliJson: see nexus/legacy-cli.cjs (verbatim move).
 
 // ── TASK-0005: task identity / session binding validation ───────────────────
 //
@@ -851,104 +742,73 @@ function apply(ctx) {
   const bindingsPath = path.join(dataRoot, 'routing', 'session-bindings.json')
   const tmpRoot = path.join(dataRoot, 'tmp')
   const scriptsRoot = path.join(installRoot, 'scripts')
-  // Platform-aware PowerShell host resolution (mirror of scripts/Platform.ps1
-  // Get-AihPowerShellHost): Windows keeps powershell.exe; POSIX prefers the
-  // AIH_PWSH_HOST override, then the setup.sh-pinned runtime/pwsh/pwsh, then a
-  // system pwsh on PATH.
-  const resolvePowerShellHost = (root) => {
-    if (process.platform === 'win32') return 'powershell.exe'
-    const override = process.env.AIH_PWSH_HOST
-    if (override) return override
-    const pinned = path.join(root, 'runtime', 'pwsh', 'pwsh')
-    try { fs.accessSync(pinned, fs.constants.X_OK); return pinned } catch { /* fall through */ }
-    return 'pwsh'
+  // ── P1: trusted host Nexus Controller ────────────────────────────────────
+  // The PowerShell runner (host resolution, toolchain root, capture transport,
+  // payload files, timeout, structured-failure recovery) moved verbatim to
+  // nexus/legacy-cli.cjs and is owned by the host `nexusController` service,
+  // together with strategy dispatch, per-generation transition lanes and
+  // session-event claims. Inside a Cordis composition this bridge resolves the
+  // service at every authority point WITHOUT injecting it: a missing, closed
+  // or incompatible host Controller keeps this bridge mounted and makes it
+  // refuse (fail closed) instead of unloading the hooks and letting turns run
+  // without Controller policy. Bare unit harnesses embed an identical core.
+  const bridgePlane = path.basename(__dirname)
+  const controllerAccess = nexusControllerHost.resolveControllerAccess(ctx, {
+    installRoot,
+    dataRoot,
+    ownerRoot: path.resolve(__dirname, '..'),
+    log: (entry) => log(entry),
+  })
+  let attachedBridge = { core: null, detach: null, mountId: null }
+  function syncBridgeAttachment(core) {
+    if (attachedBridge.core === core) return
+    try { if (attachedBridge.detach) attachedBridge.detach() } catch { /* previous host already disposed */ }
+    attachedBridge = { core: null, detach: null, mountId: null }
+    try {
+      const detach = core.attachBridge({ plane: bridgePlane })
+      attachedBridge = { core, detach, mountId: detach.mountId || null }
+    } catch { /* closed host: refused below */ }
   }
-  // TASK-0026: the Nexus TOOLCHAIN root (owns runtime/) is formally distinct
-  // from the LOGICAL InstallRoot (owns config/data identity). Isolated test
-  // fixtures legitimately model config/data-only roots with no runtime, so
-  // the bridge resolves its pinned PowerShell through the toolchain chain
-  // (AIH_TOOLCHAIN_ROOT > the tree that owns this controller file > the
-  // logical root) and names that root for every spawned CLI child, so
-  // Nexus-owned nested children always resolve the real pinned runtime.
-  const resolveToolchainRoot = (logicalRoot) => {
-    const candidates = []
-    const fromEnv = process.env.AIH_TOOLCHAIN_ROOT
-    if (fromEnv && String(fromEnv).trim() !== '') candidates.push(path.resolve(String(fromEnv)))
-    candidates.push(path.resolve(__dirname, '..'))
-    if (logicalRoot) candidates.push(path.resolve(logicalRoot))
-    for (const candidate of candidates) {
-      try {
-        if (fs.statSync(path.join(candidate, 'runtime', 'node')).isDirectory()) return candidate
-      } catch (_) { /* candidate does not own a runtime */ }
+  function controllerCore(purpose) {
+    const resolved = controllerAccess.get()
+    if (resolved.core) {
+      syncBridgeAttachment(resolved.core)
+      return resolved.core
     }
-    return logicalRoot
+    const error = new Error('Nexus Controller unavailable (' + resolved.reason + '); ' + purpose + ' refused.')
+    error.code = 'nexus-controller-unavailable'
+    error.reason = resolved.reason
+    throw error
   }
-  const toolchainRoot = resolveToolchainRoot(installRoot)
-  const childCliEnv = Object.assign({}, process.env, { AIH_TOOLCHAIN_ROOT: toolchainRoot })
-  const pwshHost = resolvePowerShellHost(toolchainRoot)
-
-  const runCli = promisify(execFile)
-  // Capture transport (TASK-0017): sandboxed environments may deny
-  // anonymous-pipe and fd-redirected stdio capture from Node children
-  // (spawn EPERM) while stdio:'ignore'/'inherit' spawns remain allowed.
-  // On Windows, run each CLI through cmd.exe with cmd-side redirection
-  // into temporary files (no pipes anywhere) and return the same bytes,
-  // preserving the promisify(execFile) result and rejection shapes
-  // (.code/.stdout/.stderr/.killed/.signal). Non-Windows platforms keep
-  // the original pipe transport.
-  const quoteWindowsArg = (value) => {
-    const text = String(value)
-    if (text !== '' && !/[\s"]/.test(text)) return text
-    return '"' + text.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1') + '"'
+  /** Whether the session belongs to a Nexus-managed task (false when unknown). */
+  function turnControllerManaged(session) {
+    try { const resolved = controllerAccess.get(); return Boolean(resolved.core && resolved.core.admission && resolved.core.admission.isManaged(session)) } catch { return false }
   }
-  const readCliFile = (file) => { try { return fs.readFileSync(file, 'utf8') } catch { return '' } }
-  const spawnCaptured = (file, args, options) => {
-    if (process.platform !== 'win32') return runCli(file, args, options)
-    const token = process.pid + '-' + crypto.randomUUID()
-    const outPath = path.join(os.tmpdir(), 'aih-cli-out-' + token + '.txt')
-    const errPath = path.join(os.tmpdir(), 'aih-cli-err-' + token + '.txt')
-    const batchPath = path.join(os.tmpdir(), 'aih-cli-' + token + '.cmd')
-    const command = [file].concat(args).map(quoteWindowsArg).join(' ') + ' > "' + outPath + '" 2> "' + errPath + '"'
-    fs.writeFileSync(batchPath, '@echo off\r\n' + command + '\r\n', 'utf8')
-    return new Promise((resolve, reject) => {
-      let settled = false
-      const finish = (fn) => { if (!settled) { settled = true; fn() } }
-      const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/c', batchPath], {
-        stdio: 'ignore',
-        windowsHide: !!(options && options.windowsHide),
-        timeout: (options && options.timeout) || 0,
-        env: (options && options.env) || process.env,
-      })
-      child.on('error', (error) => finish(() => reject(error)))
-      child.on('close', (code, signal) => finish(() => {
-        const stdout = readCliFile(outPath)
-        const stderr = readCliFile(errPath)
-        try { fs.rmSync(outPath, { force: true }) } catch { /* best effort */ }
-        try { fs.rmSync(errPath, { force: true }) } catch { /* best effort */ }
-        try { fs.rmSync(batchPath, { force: true }) } catch { /* best effort */ }
-        if (code === 0 && signal === null) return resolve({ stdout, stderr })
-        const failure = new Error('Command failed: ' + file)
-        failure.code = code === null ? null : code
-        failure.killed = signal != null
-        failure.signal = signal
-        failure.stdout = stdout
-        failure.stderr = stderr
-        reject(failure)
-      }))
-    })
+  // Attach now when the host service is already live; otherwise the first
+  // authority point attaches. Detach exactly once when this bridge unloads.
+  // Attachment is registration, not authority: attach to the live host service
+  // even while it is still acquiring installation ownership. Every turn and
+  // binding write still requires an owning host (controllerCore below).
+  { const peeked = controllerAccess.peek(); if (peeked) syncBridgeAttachment(peeked) }
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => () => {
+      try { if (attachedBridge.detach) attachedBridge.detach() } catch { /* host disposed first */ }
+      attachedBridge = { core: null, detach: null, mountId: null }
+    }, 'aih-controller bridge attachment')
+  }
+  // Task generation lane for Controller-serialized transitions.
+  function laneOf(workspace, taskId, taskInstanceId) {
+    return taskInstanceId ? String(taskInstanceId) : normalizeWorkspaceIdentity(String(workspace || '')) + '|' + String(taskId || '')
+  }
+  function laneOfBinding(binding) {
+    return laneOf(binding && binding.workspace, binding && binding.taskId, binding && binding.taskInstanceId)
   }
   let bindings = {}
   let bindingsLoadFailure = null
   try { bindings = loadBindings(bindingsPath) } catch (error) { bindingsLoadFailure = error }
-  // Read-version metadata detects another standing mount's authority write.
-  // It cannot authorize a request; only current durable state can do that.
-  function authorityStamp(binding) {
-    const result = {}
-    for (const key of ['taskId', 'taskInstanceId', 'engine', 'preparationAuthority', 'bindingAuthority', 'registryPin', 'registryRefused']) {
-      if (Object.prototype.hasOwnProperty.call(binding, key)) result[key] = binding[key]
-    }
-    return JSON.stringify(result)
-  }
+  // Read-version metadata detects another writer's authority write (moved
+  // verbatim to nexus/binding-store.cjs). It cannot authorize a request.
+  const authorityStamp = nexusBindingStore.authorityStamp
   const observedBindingAuthority = new Map(Object.entries(bindings).map(([id, b]) => [id, authorityStamp(b)]))
   const resolveWorkspaceSingleFlight = createSingleFlight(normalizeWorkspaceIdentity)
 
@@ -963,163 +823,48 @@ function apply(ctx) {
     }
   }
 
+  // P2-A: this bridge no longer writes session-bindings.json itself. Its
+  // cache and observed authority stamps are committed through the host
+  // Controller's single binding writer (nexus/binding-store.cjs), which runs
+  // the pre-P2-A merge/refusal/atomic-replace algorithm verbatim. A missing,
+  // closed or remounted host refuses the write (strict callers throw, others
+  // log), exactly where the old writer would have failed.
   function persistBindings(strict = false, removedSessionId = null) {
     try {
-      // Standing preset mounts have separate caches. Preserve preparation
-      // records committed by another mount when persisting this one's turns.
-      const durable = loadBindings(bindingsPath)
-      for (const [id, binding] of Object.entries(durable)) {
-        if (id === removedSessionId) continue
-        const cached = bindings[id]
-        const observed = observedBindingAuthority.get(id)
-        if (cached && observed !== undefined && authorityStamp(binding) !== observed) {
-          if (registrySessionBinding.classifyRegistryState(cached).state !== 'legacy' &&
-              registrySessionBinding.classifyRegistryState(binding).state === 'legacy' && binding.bindingAuthority !== 'legacy-rollback') {
-            const error = new Error('Durable Registry authority disappeared without explicit rollback; refusing cache overwrite.')
-            error.code = 'registry-authority-unverifiable'
-            throw error
-          }
-          if (authorityStamp(cached) !== observed) {
-            const error = new Error('Concurrent durable binding authority changed; refusing to overwrite it.')
-            error.code = 'bindings-write-conflict'
-            throw error
-          }
-          for (const field of ['preparationAuthority', 'registryPin', 'registryRefused', 'bindingAuthority']) {
-            if (!Object.prototype.hasOwnProperty.call(binding, field)) delete cached[field]
-          }
-          Object.assign(cached, binding)
-        } else if (!cached) bindings[id] = binding
-        observedBindingAuthority.set(id, authorityStamp(binding))
+      const core = controllerCore('binding persistence')
+      if (!attachedBridge.mountId) {
+        const error = new Error('This plane bridge is not attached to the host Controller; the binding write was refused.')
+        error.code = 'binding-writer-detached'
+        throw error
       }
-      fs.mkdirSync(path.dirname(bindingsPath), { recursive: true })
-      // Persist ONLY the durable binding fields (whitelist): the live
-      // `_session` reference (assigned per turn for completion notices) and
-      // any other runtime-only property must never be serialized.
-      const serializable = {}
-      for (const [sessionId, binding] of Object.entries(bindings)) {
-        serializable[sessionId] = {
-          sessionId: binding.sessionId,
-          // TASK-0005 Part 7: the binding is an identity REFERENCE into
-          // TaskController state. taskInstanceId is the lifecycle identity it
-          // is bound to (immutable, never reused); taskId remains display.
-          taskInstanceId: binding.taskInstanceId ?? null,
-          taskId: binding.taskId,
-          workspace: binding.workspace,
-          workspaceId: binding.workspaceId ?? null,
-          repositoryId: binding.repositoryId ?? null,
-          checkoutId: binding.checkoutId ?? null,
-          checkoutRootPath: binding.checkoutRootPath ?? null,
-          executionRoot: binding.executionRoot ?? binding.workspace,
-          preset: binding.preset,
-          engine: binding.engine,
-          description: binding.description,
-          executionClass: binding.executionClass,
-          reviewRequired: binding.reviewRequired,
-          needsRouteCheck: binding.needsRouteCheck,
-          boundAtUtc: binding.boundAtUtc,
-          ...(binding.preparationAuthority ? { preparationAuthority: binding.preparationAuthority } : {}),
-          // R6.3: generation-scoped Registry pin (present only for flagged binds).
-          // Absent fields keep legacy persisted bindings byte-identical.
-          ...(binding.bindingAuthority ? { bindingAuthority: binding.bindingAuthority } : {}),
-          ...(binding.registryPin ? { registryPin: binding.registryPin } : {}),
-          // R6.3.1: refusal/pending markers persist so a rejected generation can
-          // never restart or recover as an ordinary legacy bind. Absent markers
-          // keep legacy persisted bindings byte-identical.
-          ...(binding.registryRefused ? { registryRefused: binding.registryRefused } : {}),
-        }
-      }
-      const temporary = bindingsPath + '.' + crypto.randomUUID() + '.tmp'
-      const fd = fs.openSync(temporary, 'w')
-      try {
-        fs.writeFileSync(fd, JSON.stringify({ schemaVersion: 1, bindings: serializable }, null, 2))
-        fs.fsyncSync(fd)
-      } finally { fs.closeSync(fd) }
-      fs.renameSync(temporary, bindingsPath)
-      observedBindingAuthority.clear()
-      for (const [id, binding] of Object.entries(serializable)) observedBindingAuthority.set(id, authorityStamp(binding))
-      if (process.platform !== 'win32') {
-        const directory = fs.openSync(path.dirname(bindingsPath), 'r')
-        try { fs.fsyncSync(directory) } finally { fs.closeSync(directory) }
-      }
+      core.bindings.commit(attachedBridge.mountId, { cache: bindings, observed: observedBindingAuthority }, { bindingsPath, removedSessionId })
     } catch (error) {
       log({ event: 'bindings-persist-failed', error: String(error) })
       if (strict) throw error
     }
   }
 
-  async function writePayloadFile(payload) {
-    fs.mkdirSync(path.join(dataRoot, 'tmp'), { recursive: true })
-    const payloadPath = path.join(dataRoot, 'tmp', 'aih-payload-' + crypto.randomUUID() + '.json')
-    fs.writeFileSync(payloadPath, JSON.stringify(payload))
-    return payloadPath
-  }
-
   /**
-   * Invoke one controller CLI. User-derived free text (descriptions, review
-   * questions) NEVER travels on the command line: Windows PowerShell decodes
-   * argv through the ANSI codepage (mangling non-ASCII text) and its
-   * ConvertTo-Json leaves some control characters raw, so a strict JSON.parse
-   * of the CLI stdout can fail even though the CLI itself succeeded. The
-   * bridge passes user text in a UTF-8 payload file named by -PayloadFile and
-   * parses the CLI's stdout leniently.
+   * Invoke one controller CLI through the host Controller's single legacy
+   * runner (nexus/legacy-cli.cjs). User-derived free text (descriptions,
+   * review questions) NEVER travels on the command line: it goes in a UTF-8
+   * payload file named by -PayloadFile, and stdout is parsed leniently.
    */
   async function invokePowerShell(script, args, options) {
-    const diagnosticArgs = Array.isArray(args) ? [...args] : []
     const payload = options && options.payload
-    let payloadPath = null
-    if (payload && typeof payload === 'object') {
-      payloadPath = await writePayloadFile(payload)
-      args = [...args, '-PayloadFile', payloadPath]
-    }
-    try {
-      // The existing resolver honors DSH_AIH_PROFILE. Scope that input to
-      // this child only, deriving it from committed controller authority;
-      // global preferences and ordinary callers retain their old behavior.
-      const taskBinding = payload && payload.taskInstanceId
-        ? Object.values(bindings).find((item) => item.taskInstanceId === payload.taskInstanceId)
-        : null
-      const selectedProfile = taskBinding && taskBinding.preparationAuthority && taskBinding.preparationAuthority.profile
-      const invocationEnv = selectedProfile ? { ...childCliEnv, DSH_AIH_PROFILE: selectedProfile } : childCliEnv
-      const result = await spawnCaptured(
-        pwshHost,
-        ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, script), ...args],
-        { timeout: CLI_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true, env: invocationEnv },
-      ).catch((error) => {
-        // PowerShell CLIs report STRUCTURED failures (hard budget rejection,
-        // e.g. packet-too-large) by emitting JSON on stdout and exiting 3.
-        // execFile rejects on any non-zero exit; recover the stdout so the
-        // structured reason reaches the GUI instead of a bare "Command failed".
-        const recovered = structuredCliStdout(error)
-        if (recovered !== null) return { stdout: recovered, stderr: (error && error.stderr) || '' }
-        // TASK-0004: verification CLIs exit non-zero when checks FAIL while
-        // still emitting the full structured JSON on stdout. Recover that
-        // stdout so the caller consumes the real result (failed checks)
-        // instead of treating a VALID failed verification as an
-        // infrastructure exception.
-        if (options && options.tolerateNonZeroJson && verificationCliStdout(error) !== null) {
-          const stdout = typeof error.stdout === 'string' ? error.stdout : ''
-          return { stdout, stderr: (error && error.stderr) || '' }
-        }
-        const failure = controllerCliFailure(script, diagnosticArgs, error)
-        const detail = failure.structuredKind || failure.structuredCode || failure.stderr || failure.stdout || boundedControllerDiagnostic(error && error.message)
-        const wrapped = new Error(`aih-controller: ${failure.script} failed (exit ${failure.exitCode == null ? 'unknown' : failure.exitCode})${detail ? ': ' + detail : ''}`)
-        wrapped.code = 'aih-controller-cli-failed'
-        wrapped.cause = error
-        wrapped.cliFailure = failure
-        throw wrapped
-      })
-      const text = (result.stdout || '').trim()
-      if (!text) return null
-      try {
-        return parseCliJson(text)
-      } catch (error) {
-        throw new Error('aih-controller: ' + script + ' returned non-JSON output: ' + text.slice(0, 400) + ' (' + String(error && error.message) + ')')
-      }
-    } finally {
-      if (payloadPath) {
-        try { fs.unlinkSync(payloadPath) } catch { /* best effort */ }
-      }
-    }
+    // The existing resolver honors DSH_AIH_PROFILE. Scope that input to
+    // this child only, deriving it from committed controller authority;
+    // global preferences and ordinary callers retain their old behavior.
+    const taskBinding = payload && payload.taskInstanceId
+      ? Object.values(bindings).find((item) => item.taskInstanceId === payload.taskInstanceId)
+      : null
+    const selectedProfile = taskBinding && taskBinding.preparationAuthority && taskBinding.preparationAuthority.profile
+    const core = controllerCore('controller CLI ' + script)
+    return core.legacy.invoke(script, args, {
+      payload,
+      tolerateNonZeroJson: Boolean(options && options.tolerateNonZeroJson),
+      envOverlay: selectedProfile ? { DSH_AIH_PROFILE: selectedProfile } : undefined,
+    })
   }
 
   async function createTask(workspace, description, reviewRequested, engine, preparation) {
@@ -1299,9 +1044,9 @@ function apply(ctx) {
   async function markReviewRequested(workspace, taskId, taskInstanceId) {
     const args = ['-Action', 'set-review-requested', '-TaskId', taskId]
     if (taskInstanceId) args.push('-TaskInstanceId', taskInstanceId)
-    await invokePowerShell('Task.ps1', args, {
+    await controllerCore('task transition').transition(laneOf(workspace, taskId, taskInstanceId), 'set-review-requested', () => invokePowerShell('Task.ps1', args, {
       payload: { workspace },
-    })
+    }))
   }
 
   /**
@@ -1500,7 +1245,7 @@ function apply(ctx) {
   }
 
   async function beginAttempt(binding, turn, executionClass) {
-    return invokePowerShell('Task.ps1', ['-Action', 'begin-attempt', '-TaskId', binding.taskId, '-ExecutionClass', executionClass || binding.executionClass || 'engineer_normal'], {
+    return controllerCore('attempt transition').transition(laneOfBinding(binding), 'begin-attempt', () => invokePowerShell('Task.ps1', ['-Action', 'begin-attempt', '-TaskId', binding.taskId, '-ExecutionClass', executionClass || binding.executionClass || 'engineer_normal'], {
       payload: {
         workspace: binding.workspace,
         sessionId: binding.sessionId,
@@ -1508,7 +1253,7 @@ function apply(ctx) {
         requireNoOpenAttempt: true,
         ...instancePayloadOf(binding),
       },
-    })
+    }))
   }
 
   async function attemptEvent(binding, status, extra) {
@@ -1516,7 +1261,7 @@ function apply(ctx) {
     if (extra && extra.reason) payload.reason = extra.reason
     if (extra && extra.failureSignature) payload.failureSignature = extra.failureSignature
     if (extra && extra.evidence) payload.evidence = extra.evidence
-    return invokePowerShell('Task.ps1', ['-Action', 'attempt-event', '-TaskId', binding.taskId], { payload })
+    return controllerCore('attempt transition').transition(laneOfBinding(binding), 'attempt-event:' + status, () => invokePowerShell('Task.ps1', ['-Action', 'attempt-event', '-TaskId', binding.taskId], { payload }))
   }
 
   // Phase 3.2.5: normalize a raw failure text through the deterministic
@@ -1544,21 +1289,21 @@ function apply(ctx) {
     let failureSignature = signature
     const classified = await classifyFailureSignature(binding, evidence)
     if (classified && classified.signature) failureSignature = classified.signature
-    return invokePowerShell('Task.ps1', ['-Action', 'failure', '-TaskId', binding.taskId], {
+    return controllerCore('attempt transition').transition(laneOfBinding(binding), 'failure', () => invokePowerShell('Task.ps1', ['-Action', 'failure', '-TaskId', binding.taskId], {
       payload: { workspace: binding.workspace, failureSignature, evidence: evidence || '', ...instancePayloadOf(binding) },
-    })
+    }))
   }
 
   async function writeEvidence(binding, evidenceDoc) {
-    return invokePowerShell('Task.ps1', ['-Action', 'evidence', '-TaskId', binding.taskId], {
+    return controllerCore('task transition').transition(laneOfBinding(binding), 'evidence', () => invokePowerShell('Task.ps1', ['-Action', 'evidence', '-TaskId', binding.taskId], {
       payload: { workspace: binding.workspace, evidenceDoc, ...instancePayloadOf(binding) },
-    })
+    }))
   }
 
   async function completionCheck(binding, codexReviewPassed) {
     const args = ['-Action', 'complete', '-TaskId', binding.taskId]
     if (codexReviewPassed) args.push('-CodexReviewPassed')
-    return invokePowerShell('Task.ps1', args, { payload: { workspace: binding.workspace, ...instancePayloadOf(binding) } })
+    return controllerCore('task transition').transition(laneOfBinding(binding), 'complete', () => invokePowerShell('Task.ps1', args, { payload: { workspace: binding.workspace, ...instancePayloadOf(binding) } }))
   }
 
   // Phase 3.2.5 production integration: initialize the task-local Engineering
@@ -1576,6 +1321,7 @@ function apply(ctx) {
   }
 
   async function planEngineeringVerification(binding) {
+    const pwshHost = controllerCore('verification plan').legacy.pwshHost
     await initializeEngineeringLifecycle(binding)
     const requirements = await invokePowerShell('Engineering.ps1', ['-Action', 'requirements-snapshot', '-TaskId', binding.taskId], {
       payload: { workspace: binding.workspace, ...instancePayloadOf(binding) },
@@ -2307,8 +2053,11 @@ function apply(ctx) {
   }
 
   /** Completion decision after a passed verification (review disposition aware). */
-  async function runCompletionTail(binding, session) {
-    const review = readReviewResult(binding.workspace, binding.taskId)
+  // `options.reviewUsable === false` (P2-B2F, managed Task API only): the
+  // review on disk does not belong to the current candidate (an older turn),
+  // so it is treated as absent — it can neither pass review nor open a gate.
+  async function runCompletionTail(binding, session, options) {
+    const review = options && options.reviewUsable === false ? null : readReviewResult(binding.workspace, binding.taskId)
     const reviewPass = Boolean(review && String(review.verdict) === 'pass')
     // V2: automatic visual loop at the completion boundary. Failures of the
     // loop infrastructure must never block non-visual completion accounting.
@@ -2386,10 +2135,15 @@ function apply(ctx) {
   }
 
   /** Controller-owned deterministic verification (explicit /verify command). */
-  async function executeVerifyTurn(agent, binding) {
+  // `report` (optional, P2-B2D): the shared Task API's verification action
+  // passes an object that receives the structured outcome. The /verify chat
+  // command passes none; its behavior is unchanged.
+  async function executeVerifyTurn(agent, binding, report) {
     const session = agent.session
     const latest = latestAttemptOf(binding.workspace, binding.taskId)
+    if (report) Object.assign(report, { attempt: latest ? latest.sequence : null })
     if (!latest || !attemptIsOpen(latest)) {
+      if (report) Object.assign(report, { verification: 'rejected', reason: 'no-open-attempt' })
       appendMessage(
         session,
         createControllerMessage(
@@ -2454,11 +2208,13 @@ function apply(ctx) {
       )
       await completeEngineeringEpistemicAction(binding, epistemicAction && epistemicAction.actionId, failed > 0 ? 'failed' : 'succeeded', passed + ' passed, ' + failed + ' failed, ' + skipped + ' skipped')
       await writeEvidence(binding, evidence)
+      if (report) Object.assign(report, { verification: failed > 0 ? 'failed' : 'passed', checks: { total: normalized.length, passed, failed, skipped }, failingChecks: normalized.filter((c) => c.status === 'FAIL').map((c) => c.name), evidencePath: '.ai-harness/runs/' + binding.taskId + '/evidence.json' })
       if (failed > 0) {
         await recordFailure(binding, 'verification-failed', failed + ' of ' + normalized.length + ' check(s) failed during verification of attempt ' + latest.sequence)
       } else {
         await attemptEvent(binding, 'passed')
-        await runCompletionTail(binding, session).catch((error) => log({ event: 'verify-completion-failed', error: String(error) }))
+        const completion = await runCompletionTail(binding, session, report && report.reviewUsable === false ? { reviewUsable: false } : undefined).catch((error) => { log({ event: 'verify-completion-failed', error: String(error) }); return { complete: false, error: String(error && error.message ? error.message : error) } })
+        if (report) report.completion = completionSummary(completion)
       }
       appendMessage(
         session,
@@ -2483,6 +2239,7 @@ function apply(ctx) {
       if (latestAfter && latestAfter.status === 'verifying') {
         await attemptEvent(binding, 'interrupted', { reason: 'verification-incomplete' }).catch(() => null)
       }
+      if (report) Object.assign(report, { verification: 'incomplete', reason: String(error && error.message ? error.message : error).slice(0, 300) })
       appendMessage(
         session,
         createControllerMessage(
@@ -2495,6 +2252,24 @@ function apply(ctx) {
     }
   }
 
+  // Bounded projection of a completion-check result (no raw payloads).
+  function completionSummary(completion) {
+    if (!completion || typeof completion !== 'object') return { complete: false, reason: 'completion-result-missing' }
+    const reasons = []
+    for (const key of ['reason', 'blockedReason', 'error']) if (typeof completion[key] === 'string' && completion[key]) reasons.push(completion[key])
+    // TaskController `complete` returns its denial reasons as `reasons`.
+    if (Array.isArray(completion.reasons)) for (const item of completion.reasons.slice(0, 10)) reasons.push(String(item).slice(0, 300))
+    if (Array.isArray(completion.blockers)) for (const blocker of completion.blockers.slice(0, 10)) reasons.push(typeof blocker === 'string' ? blocker : JSON.stringify(blocker).slice(0, 200))
+    if (Array.isArray(completion.missing)) for (const item of completion.missing.slice(0, 10)) reasons.push('missing: ' + (typeof item === 'string' ? item : JSON.stringify(item).slice(0, 200)))
+    if (completion.visualBlocked) reasons.push('visual-status:' + String(completion.visualStatus || 'unknown'))
+    return {
+      complete: completion.complete === true,
+      ...(reasons.length ? { reason: reasons.join('; ').slice(0, 900) } : {}),
+      ...(typeof completion.codexRequired === 'boolean' ? { reviewRequired: completion.codexRequired } : {}),
+      ...(completion.visualBlocked ? { visualBlocked: true, visualStatus: String(completion.visualStatus || 'unknown') } : {}),
+    }
+  }
+
   async function automaticallyVerifyVisualTask(session, binding) {
     if (!session || !binding || binding.visualAutoGateRunning) return null
     const latest = latestAttemptOf(binding.workspace, binding.taskId)
@@ -2504,6 +2279,14 @@ function apply(ctx) {
       const detection = await detectVisualLoop(binding)
       const required = Boolean(detection && (detection.required === true || (detection.state && detection.state.required === true)))
       if (!required) return detection
+      // P2-B2F: a Nexus-managed task verifies only through its explicit
+      // operator action (shared Task API), after its last turn: the
+      // requirement is recorded now and enforced by that verification's
+      // completion tail; no automatic verification between managed turns.
+      if (turnControllerManaged(session)) {
+        log({ event: 'managed-visual-required-deferred', taskId: binding.taskId, sessionId: session.id })
+        return detection
+      }
       appendMessage(
         session,
         createControllerMessage(
@@ -2591,9 +2374,86 @@ function apply(ctx) {
     }
   }
 
+  // ── P2-B2C: format-v4-safe Controller notice publication ─────────────────
+  // DSH 0.2 format v4 requires the protected `system/message` head to be the
+  // FIRST surface event of a session. DSH appends that head inside the first
+  // step, AFTER agent/pre-step returns, so a notice appended directly during
+  // the first pre-step (binding, attempt, refusal ...) would precede it and
+  // make the durable log unreadable on cold restore. Until the head exists, a
+  // notice is therefore published through DSH's own pre-step contract: the
+  // `enter` decision's messages, which DSH appends right after the head and
+  // before the claimed prompt (same visible notice, same model-visible order
+  // relative to the prompt). A notice raised while no step will enter (a
+  // rejected first turn, an observer after it) waits in a durable per-session
+  // queue and is published at the session's next entered step. Once the head
+  // exists every notice is appended directly, exactly as before.
+  // Only real DSH 0.2 sessions (snapshotEvents, no legacy `events` array) carry
+  // the v4 invariant; legacy/test sessions keep direct append.
+  const noticeBuffers = new WeakMap() // session -> notices raised during its current pre-step
+  const pendingNoticeDir = path.join(dataRoot, 'routing', 'pending-notices')
+  const requiresSurfaceHead = (session) => Boolean(session && typeof session.snapshotEvents === 'function' && session.events === undefined)
+  function pendingNoticeFile(sessionId) { return path.join(pendingNoticeDir, encodeURIComponent(String(sessionId)) + '.json') }
+  function readPendingNotices(sessionId) {
+    try {
+      const document = JSON.parse(fs.readFileSync(pendingNoticeFile(sessionId), 'utf8'))
+      return document && document.schemaVersion === 1 && document.sessionId === sessionId && Array.isArray(document.notices) ? document.notices : []
+    } catch { return [] }
+  }
+  function writePendingNotices(sessionId, notices) {
+    const file = pendingNoticeFile(sessionId)
+    if (notices.length === 0) { try { fs.rmSync(file, { force: true }) } catch { /* already gone */ } return }
+    fs.mkdirSync(pendingNoticeDir, { recursive: true, mode: 0o700 })
+    const temporary = file + '.' + crypto.randomUUID() + '.tmp'
+    const fd = fs.openSync(temporary, 'w', 0o600)
+    try { fs.writeFileSync(fd, JSON.stringify({ schemaVersion: 1, sessionId, notices })); fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+    fs.renameSync(temporary, file)
+  }
+  function queuePendingNotices(session, notices) {
+    if (!notices.length) return
+    try {
+      writePendingNotices(session.id, [...readPendingNotices(session.id), ...notices])
+      log({ event: 'controller-notice-deferred', sessionId: session.id, forms: notices.map((m) => m.source && m.source.form), reason: 'no-protected-surface-head' })
+    } catch (error) {
+      log({ event: 'controller-notice-defer-failed', sessionId: session.id, forms: notices.map((m) => m.source && m.source.form), error: String(error && error.message ? error.message : error) })
+    }
+  }
   function appendMessage(session, message) {
     if (!session || typeof session.append !== 'function') return
-    session.append('user/message', message, { surfaceOp: 'append' })
+    if (!requiresSurfaceHead(session) || messageSource.hasProtectedSurfaceHead(sessionReader.sessionEvents(session))) {
+      session.append('user/message', message, { surfaceOp: 'append' })
+      return
+    }
+    const buffer = noticeBuffers.get(session)
+    if (buffer) buffer.push(message)
+    else queuePendingNotices(session, [message])
+  }
+  /** Wrap one pre-step: publish pre-head notices through the `enter` decision. */
+  async function publishThroughPreStep(payload, next, inner) {
+    const session = payload && payload.agent && payload.agent.session
+    if (!requiresSurfaceHead(session)) return inner(payload, next)
+    const buffer = []
+    noticeBuffers.set(session, buffer)
+    let result
+    try { result = await inner(payload, next) } finally { if (noticeBuffers.get(session) === buffer) noticeBuffers.delete(session) }
+    if (result && result.kind === 'enter' && Array.isArray(result.messages)) {
+      const queued = readPendingNotices(session.id)
+      const publish = [...queued, ...buffer]
+      if (publish.length) {
+        log({ event: 'controller-notice-published-in-step', sessionId: session.id, forms: publish.map((m) => m.source && m.source.form), queued: queued.length })
+        return { ...result, messages: [...publish, ...result.messages] }
+      }
+      return result
+    }
+    queuePendingNotices(session, buffer)
+    return result
+  }
+  // A queued notice leaves the durable queue only once DSH appended it.
+  function settlePublishedNotice(session, event) {
+    if (!event || event.type !== 'user/message' || !event.data || !messageSource.isControllerSource(event.data.source)) return
+    const pending = readPendingNotices(session.id)
+    if (!pending.length) return
+    const remaining = pending.filter((notice) => notice.id !== event.data.id)
+    if (remaining.length !== pending.length) { try { writePendingNotices(session.id, remaining) } catch { /* retried on next publication */ } }
   }
 
   function noticeText(binding) {
@@ -2606,8 +2466,12 @@ function apply(ctx) {
     ].filter(Boolean).join('\n')
   }
 
+  // `options.report` (optional, P2-B2F): the shared Task API's review action
+  // passes an object that receives the structured outcome. The /review chat
+  // command and automatic escalation pass none; their behavior is unchanged.
   async function executeReviewTurn(agent, binding, question, options) {
     const session = agent.session
+    const report = options && options.report ? options.report : null
     const workspace = binding.workspace
     const taskId = binding.taskId
     const taskInstanceId = binding.taskInstanceId || null
@@ -2642,10 +2506,12 @@ function apply(ctx) {
           ),
         )
         log({ event: 'review-context-quality', taskId, contextMode, quality: contextQuality })
+        if (report) Object.assign(report, { review: 'rejected', reason: 'context-quality: ' + String(contextQuality.reason || 'no meaningful evidence selected').slice(0, 200) })
         return { kind: 'reject' }
       }
       const latest = latestAttemptOf(workspace, taskId)
       const reviewAttempt = latest && Number.isInteger(latest.sequence) ? latest.sequence : null
+      if (report) Object.assign(report, { attempt: reviewAttempt })
       const review = await runReview(workspace, taskId, question, fileSlices, contextMode, reviewAttempt, taskInstanceId)
       if (review && review.ok === false && review.kind === 'packet-too-large') {
         appendMessage(
@@ -2658,6 +2524,7 @@ function apply(ctx) {
           ),
         )
         log({ event: 'review-packet-too-large', taskId, contextMode, violations: review.violations })
+        if (report) Object.assign(report, { review: 'rejected', reason: 'packet-too-large' })
         return { kind: 'reject' }
       }
       if (!review || review.ok !== true) {
@@ -2681,6 +2548,17 @@ function apply(ctx) {
         supersedeGateFor(binding, 'review-passed')
       }
       log({ event: 'review-completed', taskId, contextMode, summary: reviewSummary(review) })
+      if (report) {
+        const findings = review.result && Array.isArray(review.result.findings) ? review.result.findings : []
+        Object.assign(report, {
+          review: verdict === 'pass' ? 'passed' : verdict === 'fail' ? 'failed' : 'uncertain',
+          verdict: verdict || null,
+          findings: findings.length,
+          blockingFindings: findings.filter((item) => item && (item.severity === 'blocker' || item.severity === 'high')).length,
+          completedAt: review.result && review.result.completedAtUtc ? String(review.result.completedAtUtc) : new Date().toISOString(),
+          gateOpened: verdict === 'fail' && Boolean(binding.reviewRequired),
+        })
+      }
       return { kind: 'reject' }
     } catch (error) {
       appendMessage(
@@ -2691,6 +2569,7 @@ function apply(ctx) {
         ),
       )
       log({ event: 'review-failed', taskId, error: String(error) })
+      if (report) Object.assign(report, { review: 'incomplete', reason: String(error && error.message ? error.message : error).slice(0, 300) })
       return { kind: 'reject' }
     }
   }
@@ -3052,6 +2931,102 @@ function apply(ctx) {
   // session.create semantics or host RPC schema is changed.
   ctx.on('nexus/session-prepare', (request) => prepareSession(request))
 
+  // ── P2-B2D host hooks for the shared Task API (managed tasks) ─────────────
+  // Same authorities as the GUI: the existing /verify pipeline
+  // (Verify-Project + Engineering verification plan + Task.ps1 evidence/
+  // failure/complete) and TaskController attempt events. The Controller has
+  // already authorized the operator action; these re-validate identity.
+  function managedBindingFor(request) {
+    const fail = (code, message) => { const error = new Error(message); error.code = code; throw error }
+    if (!request || typeof request.sessionId !== 'string' || typeof request.taskInstanceId !== 'string') fail('task-action-invalid', 'sessionId and taskInstanceId are required')
+    if (bindingsLoadFailure) throw bindingsLoadFailure
+    loadBindings(bindingsPath)
+    const binding = bindings[request.sessionId]
+    if (!binding || binding.taskInstanceId !== request.taskInstanceId) fail('task-identity-mismatch', 'the session is not bound to that task instance')
+    return binding
+  }
+  async function verifyForTaskApi(request) {
+    const binding = managedBindingFor(request)
+    const identity = await testTaskIdentity(binding.workspace, binding.taskId, binding.taskInstanceId)
+    if (classifyBindingIdentity(binding, identity).verdict !== 'valid') { const error = new Error('task identity is not valid'); error.code = 'task-identity-mismatch'; throw error }
+    const latest = latestAttemptOf(binding.workspace, binding.taskId)
+    if (!latest || (request.attempt !== undefined && String(latest.sequence) !== String(request.attempt))) { const error = new Error('the task attempt changed'); error.code = 'attempt-changed'; throw error }
+    let session
+    try { const store = typeof ctx.get === 'function' ? ctx.get('sessions') : ctx.sessions; session = store && store.get(request.sessionId) } catch { session = undefined }
+    const guard = guardRegistryCommandTurn(binding, session, 'verify')
+    if (guard) return { attempt: latest.sequence, verification: 'rejected', reason: 'registry-refused' }
+    const report = request.reviewUsable === false ? { reviewUsable: false } : {}
+    await executeVerifyTurn({ session }, binding, report)
+    delete report.reviewUsable
+    const after = latestAttemptOf(binding.workspace, binding.taskId)
+    return { ...report, attemptStatus: after ? after.status : null }
+  }
+  function liveSessionOf(sessionId) {
+    try { const store = typeof ctx.get === 'function' ? ctx.get('sessions') : ctx.sessions; return store && store.get(sessionId) } catch { return undefined }
+  }
+  // P2-B2F: the existing explicit review (EMv1 Dual only, by strategy) for
+  // the current candidate. The strategy decides; Muse refuses (typed).
+  async function reviewForTaskApi(request) {
+    const binding = managedBindingFor(request)
+    const identity = await testTaskIdentity(binding.workspace, binding.taskId, binding.taskInstanceId)
+    if (classifyBindingIdentity(binding, identity).verdict !== 'valid') { const error = new Error('task identity is not valid'); error.code = 'task-identity-mismatch'; throw error }
+    const latest = latestAttemptOf(binding.workspace, binding.taskId)
+    if (!latest || !attemptIsOpen(latest) || (request.attempt !== undefined && String(latest.sequence) !== String(request.attempt))) { const error = new Error('the task attempt changed'); error.code = 'attempt-changed'; throw error }
+    const session = liveSessionOf(request.sessionId)
+    const turnController = controllerCore('task review')
+    const decision = turnController.decide(binding.engine, { sessionId: request.sessionId, taskId: binding.taskId, preset: binding.preset }, { type: 'explicit-review' })
+    if (decision.kind !== 'runReview') return { attempt: latest.sequence, review: 'unavailable', reason: decision.code || decision.kind }
+    const guard = guardRegistryCommandTurn(binding, session, 'review')
+    if (guard) return { attempt: latest.sequence, review: 'rejected', reason: 'registry-refused' }
+    const report = {}
+    // The review question is the task's own user instructions (all managed
+    // turns, newest last): a managed binding is prepared before its first
+    // prompt, so its description is a generic placeholder.
+    let instructions = []
+    try {
+      const events = session ? sessionReader.sessionEvents(session) : null
+      instructions = (Array.isArray(events) ? events : []).filter((event) => event && event.type === 'user/message' && event.data && event.data.source && event.data.source.kind === 'user').map((event) => textOf(event.data).trim()).filter(Boolean)
+    } catch { instructions = [] }
+    const question = instructions.length ? instructions.slice(-4).join('\n').slice(0, 2000) : binding.description
+    await executeReviewTurn({ session }, binding, question, { explicit: true, report })
+    return { attempt: latest.sequence, ...report }
+  }
+  // P2-B2F: resolve the existing controller-owned review gate exactly as the
+  // Control Room does (validate current gate + action + requestId replay,
+  // append the journal record, and on approve run the ONE bounded transition:
+  // TaskController completion with the review passed). `complete-approved`
+  // re-runs that transition for an already approved gate (crash recovery).
+  async function gateForTaskApi(request) {
+    const binding = managedBindingFor(request)
+    if (!gateModule) { const error = new Error('gate module unavailable'); error.code = 'gate-unavailable'; throw error }
+    const instance = typeof binding.taskInstanceId === 'string' && binding.taskInstanceId !== '' ? binding.taskInstanceId : null
+    if (request.mode === 'complete-approved') {
+      const current = gateModule.currentGateFor(dataRoot, binding.sessionId, binding.workspace, binding.taskId, instance)
+      if (!current || String(current.gateId) !== String(request.gateId) || current.status !== 'approved') return { disposition: 'stale', reason: 'gate-not-approved' }
+      return { disposition: 'completion-rerun', gateStatus: 'approved', completion: completionSummary(await completionCheck(binding, true)) }
+    }
+    const validation = gateModule.validateGateAction(dataRoot, binding, { sessionId: binding.sessionId, gateId: request.gateId, actionId: request.choice, requestId: request.requestId })
+    if (!validation.ok) return validation.replay ? { disposition: 'duplicate' } : { disposition: 'stale', reason: validation.error }
+    const resolved = gateModule.resolveGate(dataRoot, binding, validation.gate, request.choice, request.requestId, 'operator-task-api')
+    let completion = null
+    if (request.choice === 'approve') completion = completionSummary(await completionCheck(binding, true))
+    return { disposition: 'resolved', gateStatus: resolved.status, gateRevision: resolved.revision, ...(completion ? { completion } : {}) }
+  }
+  async function closeForTaskApi(request) {
+    const binding = managedBindingFor(request)
+    const latest = latestAttemptOf(binding.workspace, binding.taskId)
+    let attemptClosed = false
+    if (latest && attemptIsOpen(latest)) {
+      await attemptEvent(binding, 'interrupted', { reason: 'operator-closed' })
+      attemptClosed = true
+    }
+    return { attempt: latest ? latest.sequence : null, attemptClosed }
+  }
+  ctx.on('nexus/task-verify', (request) => verifyForTaskApi(request))
+  ctx.on('nexus/task-close', (request) => closeForTaskApi(request))
+  ctx.on('nexus/task-review', (request) => reviewForTaskApi(request))
+  ctx.on('nexus/task-gate', (request) => gateForTaskApi(request))
+
   // Phase M3: the effective agent preset is resolved from the newest
   // agent-preset/selected event (the same authority the isolation layer uses),
   // falling back to the session header. A session recomposed onto another
@@ -3251,8 +3226,20 @@ function apply(ctx) {
 
   ctx.on('session/event', async (subject, event) => {
     if (!subject || !event) return
+    if (requiresSurfaceHead(subject)) settlePublishedNotice(subject, event)
     const binding = bindings[subject.id]
     if (!binding) return
+    // P1: the host Controller claims each (session, seq, type) once, so
+    // standing preset mounts that observe the same session never run the
+    // usage/failure/interrupt/reroute side effects twice.
+    let eventController
+    try {
+      eventController = controllerCore('session event')
+    } catch (error) {
+      log({ event: 'session-event-controller-unavailable', sessionId: subject.id, taskId: binding.taskId, type: event.type || null, reason: error && error.reason ? error.reason : String(error) })
+      return
+    }
+    if (!eventController.claimEvent(subject.id, event)) return
     if (engineeringUsageOfEvent(event) && binding.currentEngineeringStep) {
       recordEngineeringModelUsage(binding, event)
         .catch((error) => log({ event: 'engineering-usage-record-failed', sessionId: subject.id, taskId: binding.taskId, error: String(error) }))
@@ -3375,7 +3362,9 @@ function apply(ctx) {
   // projection then sees the fresh snapshot as retained and appends
   // nothing -- exactly ONE authoritative CURRENT copy reaches the request.
   // { prepend: true } is the supported cordis listener ordering primitive.
-  ctx.on('agent/pre-step', async (payload, next) => {
+  ctx.on('agent/pre-step', (payload, next) => publishThroughPreStep(payload, next, preStepCore), { prepend: true })
+
+  async function preStepCore(payload, next) {
     let promptText = ''
     let explicitReview = false
     try {
@@ -3386,6 +3375,28 @@ function apply(ctx) {
       if (bindingsLoadFailure) throw bindingsLoadFailure
       loadBindings(bindingsPath)
       if (!session) return next()
+      // P1: every session step requires the live host Controller. Missing,
+      // closed or incompatible => typed refusal below (no next(), no model).
+      const turnController = controllerCore('turn admission')
+      // P2-B2C: a history held by the host (invalid DSH 0.2 log from older
+      // writers) gets no binding, attempt, notice or model call here either.
+      const heldHistory = turnController.sessionHealth && typeof turnController.sessionHealth.checkLive === 'function' ? turnController.sessionHealth.checkLive(session.id) : null
+      if (heldHistory && heldHistory.state === 'held') {
+        log({ event: 'session-held-step-refused', sessionId: session.id, reason: heldHistory.reason, gate: 'bridge' })
+        return { kind: 'reject' }
+      }
+      // P2-A: Nexus-managed sessions (registered by the future shared task API)
+      // are refused while managed admission is disabled; ordinary sessions pass.
+      // P2-B2B: the same idempotent admission ticket as the host gate (either
+      // may run first); older Controllers expose only the synchronous check.
+      const managedVerdict = typeof turnController.admission.admit === 'function'
+        ? await turnController.admission.admit(session, payload)
+        : turnController.admission.check(session)
+      if (!managedVerdict.allowed) {
+        log({ event: 'managed-step-refused', sessionId: session.id, code: managedVerdict.code, gate: 'bridge' })
+        appendMessage(session, createControllerMessage('Controller: this session is managed by the Nexus task API, and managed admission is disabled in this version.\nNo model or tool execution was allowed and no task state was changed.', 'controller-managed-refused'))
+        return { kind: 'reject' }
+      }
       const existing = bindingFor(session)
       const marked = registrySessionBinding.classifyRegistryState(existing).state !== 'legacy'
       const promptMessages = userPromptMessages(payload.messages)
@@ -3463,7 +3474,9 @@ function apply(ctx) {
           // Registry state cannot authorize execution without proven identity,
           // including when flag OFF would otherwise permit explicit rollback.
           const unvalidated = bindingFor(session)
-          return agentPresetOf(session) === 'aih-muse' || registrySessionBinding.classifyRegistryState(unvalidated).state !== 'legacy' ? { kind: 'reject' } : next()
+          if (registrySessionBinding.classifyRegistryState(unvalidated).state !== 'legacy') return { kind: 'reject' }
+          const inconclusive = turnController.decide(engineForPreset(agentPresetOf(session)), { sessionId: session.id, preset: agentPresetOf(session) }, { type: 'binding-inconclusive' })
+          return inconclusive.kind === 'degradeLegacy' ? next() : { kind: 'reject' }
         }
         throw error
       }
@@ -3517,23 +3530,17 @@ function apply(ctx) {
       }
 
       if (explicitReview) {
-        // Phase M3: the Muse engine has NO independent reviewer (profile
-        // review.independent=false). The request fails closed truthfully:
-        // Codex is never invoked from Muse as reviewer, fallback, repair
-        // agent, or worker, and no Muse reviewer exists.
-        if (binding.engine === 'muse') {
-          appendMessage(
-            session,
-            createControllerMessage(
-              'Controller: independent review is not available for the Muse engine (engine=muse, review.independent=false).\n' +
-                'The Muse plane never invokes Codex as reviewer, fallback, repair agent, or worker, and no Muse reviewer exists in V0.\n' +
-                'Route the task through a Dual profile (Normal Engineering + GLM/Codex or DeepSeek/Codex) for independent review. No files were modified.',
-              'muse-review-unavailable',
-            ),
-          )
-          log({ event: 'muse-review-unavailable', sessionId: session.id, taskId: binding.taskId })
+        // Strategy boundary: the bound engine's strategy decides whether an
+        // explicit review may run. EMv2 Muse has NO independent reviewer
+        // (review.independent=false) and refuses with its historical notice;
+        // EMv1 Dual dispatches the existing legacy review path unchanged.
+        const reviewDecision = turnController.decide(binding.engine, { sessionId: session.id, taskId: binding.taskId, preset: binding.preset }, { type: 'explicit-review' })
+        if (reviewDecision.kind === 'refuse') {
+          if (reviewDecision.notice) appendMessage(session, createControllerMessage(reviewDecision.notice, reviewDecision.noticeForm || 'controller-error'))
+          log({ event: reviewDecision.code, sessionId: session.id, taskId: binding.taskId })
           return { kind: 'reject' }
         }
+        if (reviewDecision.kind !== 'runReview') return { kind: 'reject' }
         return executeReviewTurn(agent, binding, reviewQuestionOf(promptText), { explicit: true })
       }
 
@@ -3653,9 +3660,18 @@ function apply(ctx) {
         // (it selects engineer roles and step role targets) and never applies
         // to a muse session: stepRole stays null and the attempt runs on the
         // task-level execution class (muse_main) resolved by routing.
-        const museEngine = binding.engine === 'muse'
+        // Strategy boundary: EMv2 Muse runs exactly ONE main agent with NO Dual
+        // role semantics (stepRouting=false: the attempt runs on the
+        // task-level execution class muse_main); EMv1 Dual uses the epistemic
+        // step router (stepRouting=true). The strategy proposes; the
+        // Controller validates and owns the attempt transition.
+        const turnDecision = turnController.decide(binding.engine, { sessionId: session.id, taskId: binding.taskId, preset: binding.preset }, { type: 'engineering-turn' })
+        if (turnDecision.kind !== 'runRoot') {
+          log({ event: 'strategy-turn-refused', sessionId: session.id, taskId: binding.taskId, strategyId: turnDecision.strategyId, code: turnDecision.code || turnDecision.kind })
+          return { kind: 'reject' }
+        }
         try {
-          const stepDecision = museEngine ? null : await selectEngineeringEpistemicStep(binding, payload.turn, promptText)
+          const stepDecision = turnDecision.stepRouting ? await selectEngineeringEpistemicStep(binding, payload.turn, promptText) : null
           if (stepDecision) {
             stepRole = stepDecision.selectedRole
             // R6.3.1/R6.3.2: step targets validate against the generation pin
@@ -3724,7 +3740,7 @@ function apply(ctx) {
           appendMessage(
             session,
             createControllerMessage(
-              'Controller: attempt ' + nextSequence + ' started · task ' + binding.taskId + ' (execution ' + executionClassLabel(stepRole || binding.executionClass) + (museEngine ? ' · engine=muse' : ' · step-routed') + ').',
+              'Controller: attempt ' + nextSequence + ' started · task ' + binding.taskId + ' (execution ' + executionClassLabel(stepRole || binding.executionClass) + turnDecision.executionLabel + ').',
               'controller-attempt',
             ),
           )
@@ -3759,6 +3775,20 @@ function apply(ctx) {
         ...(error && error.cliFailure ? { cliFailure: error.cliFailure } : {}),
       })
       if (error && error.code === 'bindings-unverifiable') log({ event: 'registry-execution-refused', sessionId: session && session.id, code: error.code, purpose: 'binding-load' })
+      if (error && error.code === 'nexus-controller-unavailable') {
+        // Fail closed: no host Controller, no engineering step. The bridge
+        // stays mounted precisely so this refusal cannot be bypassed.
+        if (session) {
+          appendMessage(
+            session,
+            createControllerMessage(
+              'Controller blocked execution: the trusted Nexus Controller service is not available (' + String(error.reason || 'unavailable') + ').\nNo model or tool execution was allowed and no task state was changed. Restart Nexus; if this persists, reinstall the agent planes.',
+              'controller-unavailable',
+            ),
+          )
+        }
+        return { kind: 'reject' }
+      }
       if (error && error.code === 'engine-binding-violation') {
         if (session) {
           appendMessage(
@@ -3801,51 +3831,39 @@ function apply(ctx) {
       // A Muse request without controller state must stop here. Continuing to
       // agent/request only replaces the useful controller failure with the
       // secondary Muse-Isolation error `missing-session-binding`.
-      const musePlane = session && agentPresetOf(session) === 'aih-muse'
+      let routingFailureSuffix = ''
+      if (session) {
+        try {
+          const failureDecision = controllerCore('routing failure').decide(engineForPreset(agentPresetOf(session)), { sessionId: session.id, preset: agentPresetOf(session) }, { type: 'routing-failure' })
+          routingFailureSuffix = typeof failureDecision.noticeSuffix === 'string' ? failureDecision.noticeSuffix : ''
+        } catch { /* the notice below still fails closed */ }
+      }
       if (session && promptText) {
         appendMessage(
           session,
           createControllerMessage(
               'Controller routing failed for this session.\n' + boundedControllerDiagnostic(message) +
               '\nNo authoritative execution target was produced. Inference was not started.' +
-              (musePlane ? '\nNo Muse fallback was attempted.' : ''),
+              routingFailureSuffix,
             'controller-error',
           ),
         )
       }
       return { kind: 'reject' }
     }
-  }, { prepend: true })
+  }
 
   ctx.on('agent/disposed', (agent) => {
     const session = agent && agent.session
+    if (session) {
+      const resolved = controllerAccess.get()
+      if (resolved.core) resolved.core.forgetSession(session.id)
+    }
     if (session && bindings[session.id]) {
       delete bindings[session.id]
       persistBindings(false, session.id)
     }
   })
-}
-
-function loadBindings(bindingsPath) {
-  try {
-    const document = JSON.parse(fs.readFileSync(bindingsPath, 'utf8'))
-    if (document && document.schemaVersion === 1 && document.bindings && typeof document.bindings === 'object' && !Array.isArray(document.bindings)) {
-      for (const binding of Object.values(document.bindings)) {
-        if (!binding || typeof binding !== 'object' || Array.isArray(binding)) throw new Error('Invalid session binding entry')
-        for (const field of ['registryPin', 'registryRefused']) {
-          if (Object.prototype.hasOwnProperty.call(binding, field) && (!binding[field] || typeof binding[field] !== 'object' || Array.isArray(binding[field]))) throw new Error('Invalid Registry authority entry')
-        }
-        if (binding.bindingAuthority === 'registry' && !binding.registryPin) throw new Error('Registry authority requires its pin')
-      }
-      return document.bindings
-    }
-    throw new Error('Unsupported session binding schema')
-  } catch (cause) {
-    if (cause && cause.code === 'ENOENT') return {}
-    const error = new Error('Session bindings are unreadable; execution is quarantined until the durable document is repaired.')
-    error.code = 'bindings-unverifiable'
-    throw error
-  }
 }
 
 /**

@@ -1,0 +1,306 @@
+{
+  "mode": "patched",
+  "platform": "darwin",
+  "arch": "arm64",
+  "runs": {
+    "ordinaryGui": {
+      "turnEnds": [
+        "completed",
+        "completed"
+      ],
+      "llmCalls": 3,
+      "readable": true
+    },
+    "muse-3": {
+      "taskId": "nt_7a5347bbfad90e870baa218b3b5e1d0c",
+      "sessionId": "session-0a3c2cd2-1575-4bcd-9099-f44dfc6f3334",
+      "trace": [
+        {
+          "turn": 1,
+          "status": "blocked",
+          "reason": "turn-completed-awaiting-verification",
+          "reply": "Synthetic reply. Seen: [turn-1]",
+          "revision": "1"
+        },
+        {
+          "turn": 2,
+          "turnId": "nturn_186aec1ce63c369e5ad8c254",
+          "status": "blocked",
+          "reason": "turn-completed-awaiting-verification",
+          "reply": "Synthetic reply. Seen: [turn-1],[turn-2]",
+          "revision": "3"
+        },
+        {
+          "turn": 3,
+          "turnId": "nturn_5567371477bfcd8eafdc6d49",
+          "status": "blocked",
+          "reason": "turn-completed-awaiting-verification",
+          "reply": "Synthetic reply. Seen: [turn-1],[turn-2],[turn-3]",
+          "revision": "5"
+        }
+      ],
+      "receipts": [
+        {
+          "taskId": "nt_7a5347bbfad90e870baa218b3b5e1d0c",
+          "sessionId": "session-0a3c2cd2-1575-4bcd-9099-f44dfc6f3334",
+          "turnId": "nturn_186aec1ce63c369e5ad8c254",
+          "turnSeq": 2,
+          "status": "accepted",
+          "mode": "engineering-v2",
+          "idempotencyKey": "muse-3-followup-001",
+          "replay": false,
+          "revision": "2",
+          "taskStatus": "running"
+        },
+        {
+          "taskId": "nt_7a5347bbfad90e870baa218b3b5e1d0c",
+          "sessionId": "session-0a3c2cd2-1575-4bcd-9099-f44dfc6f3334",
+          "turnId": "nturn_5567371477bfcd8eafdc6d49",
+          "turnSeq": 3,
+          "status": "accepted",
+          "mode": "engineering-v2",
+          "idempotencyKey": "muse-3-followup-002",
+          "replay": false,
+          "revision": "4",
+          "taskStatus": "running"
+        }
+      ],
+      "userPrompts": [
+        "[turn-1] muse-3: implement JWT authentication.",
+        "[turn-2] Add refresh token support.",
+        "[turn-3] Now add integration tests."
+      ],
+      "turnEnds": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "llmCalls": 4,
+      "toolPairs": 1,
+      "attemptsBeforeVerify": [
+        "started"
+      ],
+      "attemptsFinal": [
+        "started",
+        "verifying",
+        "passed"
+      ],
+      "verification": {
+        "state": "passed",
+        "attempt": "1",
+        "startedAt": "2026-11-11T08:20:54.242Z",
+        "finishedAt": "2026-11-11T08:21:00.681Z",
+        "checks": {
+          "total": 2,
+          "passed": 2,
+          "failed": 0,
+          "skipped": 0
+        },
+        "completion": {
+          "complete": true
+        },
+        "evidencePath": ".ai-harness/runs/TASK-0002/evidence.json"
+      },
+      "finalStatus": "completed",
+      "ledger": "complete",
+      "ledgerBefore": "implementing",
+      "afterTerminal": {
+        "code": "TASK_NOT_CONTINUABLE",
+        "message": "The task is completed; start a new task.",
+        "retryable": false,
+        "details": {
+          "reason": "task-terminal",
+          "status": "completed"
+        }
+      }
+    },
+    "dual-3": {
+      "taskId": "nt_7b301de10989a222059d559a7567f0e2",
+      "sessionId": "session-a48b5830-39ab-40af-a6ad-933d75a1d775",
+      "trace": [
+        {
+          "turn": 1,
+          "status": "blocked",
+          "reason": "turn-completed-awaiting-verification",
+          "reply": "Synthetic reply. Seen: [turn-1]",
+          "revision": "1"
+        },
+        {
+          "turn": 2,
+          "turnId": "nturn_2af6ab719918ad9e861046e6",
+          "status": "blocked",
+          "reason": "turn-completed-awaiting-verification",
+          "reply": "Synthetic reply. Seen: [turn-1],[turn-2]",
+          "revision": "3"
+        },
+        {
+          "turn": 3,
+          "turnId": "nturn_ce87d91a372c606f75f75755",
+          "status": "blocked",
+          "reason": "turn-completed-awaiting-verification",
+          "reply": "Synthetic reply. Seen: [turn-1],[turn-2],[turn-3]",
+          "revision": "5"
+        }
+      ],
+      "receipts": [
+        {
+          "taskId": "nt_7b301de10989a222059d559a7567f0e2",
+          "sessionId": "session-a48b5830-39ab-40af-a6ad-933d75a1d775",
+          "turnId": "nturn_2af6ab719918ad9e861046e6",
+          "turnSeq": 2,
+          "status": "accepted",
+          "mode": "engineering-v1",
+          "idempotencyKey": "dual-3-followup-001",
+          "replay": false,
+          "revision": "2",
+          "taskStatus": "running"
+        },
+        {
+          "taskId": "nt_7b301de10989a222059d559a7567f0e2",
+          "sessionId": "session-a48b5830-39ab-40af-a6ad-933d75a1d775",
+          "turnId": "nturn_ce87d91a372c606f75f75755",
+          "turnSeq": 3,
+          "status": "accepted",
+          "mode": "engineering-v1",
+          "idempotencyKey": "dual-3-followup-002",
+          "replay": false,
+          "revision": "4",
+          "taskStatus": "running"
+        }
+      ],
+      "userPrompts": [
+        "[turn-1] dual-3: implement JWT authentication.",
+        "[turn-2] Add refresh token support.",
+        "[turn-3] Now add integration tests."
+      ],
+      "turnEnds": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "llmCalls": 4,
+      "toolPairs": 1,
+      "attemptsBeforeVerify": [
+        "started"
+      ],
+      "attemptsFinal": [
+        "started",
+        "verifying",
+        "passed"
+      ],
+      "verification": {
+        "state": "passed",
+        "attempt": "1",
+        "startedAt": "2026-11-11T08:21:15.724Z",
+        "finishedAt": "2026-11-11T08:21:22.965Z",
+        "checks": {
+          "total": 2,
+          "passed": 2,
+          "failed": 0,
+          "skipped": 0
+        },
+        "completion": {
+          "complete": true
+        },
+        "evidencePath": ".ai-harness/runs/TASK-0001/evidence.json"
+      },
+      "finalStatus": "completed",
+      "ledger": "complete",
+      "ledgerBefore": "implementing",
+      "afterTerminal": {
+        "code": "TASK_NOT_CONTINUABLE",
+        "message": "The task is completed; start a new task.",
+        "retryable": false,
+        "details": {
+          "reason": "task-terminal",
+          "status": "completed"
+        }
+      }
+    },
+    "restartBetweenTurns": {
+      "taskId": "nt_8e7a9ea07af5ca478686e9e9a7befca7",
+      "reply": "Synthetic reply. Seen: [turn-1],[turn-2]",
+      "userPrompts": [
+        "[turn-1] restart: implement JWT authentication.",
+        "[turn-2] Continue after the host restart."
+      ],
+      "turnEnds": [
+        "completed",
+        "completed"
+      ]
+    },
+    "crashTurnDelivering": {
+      "crashExit": 8,
+      "retry": {
+        "taskId": "nt_be8b7f5f7173659f54f3d9983e18277d",
+        "sessionId": "session-9e69ab60-3d06-4128-8a0f-84727ee3e887",
+        "turnId": "nturn_35b1385d86d0bf27ff8789e8",
+        "turnSeq": 2,
+        "status": "accepted",
+        "mode": "engineering-v2",
+        "idempotencyKey": "crash-d-2",
+        "replay": true,
+        "revision": "1",
+        "taskStatus": "blocked"
+      },
+      "userPrompts": [
+        "[turn-1] crash-delivering: implement JWT authentication.",
+        "[turn-2] after crash"
+      ],
+      "turnEnds": [
+        "completed",
+        "completed"
+      ]
+    },
+    "crashTurnAccepted": {
+      "status": "blocked",
+      "reason": "restored-input-not-resumed",
+      "actions": [
+        "recovery"
+      ],
+      "llmCallsTurn1": 2,
+      "llmCallsAfterRestart": 0,
+      "further": {
+        "code": "TASK_NOT_CONTINUABLE",
+        "message": "The task cannot accept another turn now (restored-input-not-resumed).",
+        "retryable": false,
+        "details": {
+          "reason": "restored-input-not-resumed"
+        }
+      }
+    },
+    "interruptedContinuation": {
+      "status": "interrupted",
+      "actions": [
+        "recovery"
+      ],
+      "duringLive": {
+        "code": "TASK_NOT_CONTINUABLE",
+        "message": "The task cannot accept another turn now (turn-live).",
+        "retryable": false,
+        "details": {
+          "reason": "turn-live"
+        }
+      },
+      "afterCrash": {
+        "code": "TASK_NOT_CONTINUABLE",
+        "message": "The task cannot accept another turn now (interrupted).",
+        "retryable": false,
+        "details": {
+          "reason": "interrupted"
+        }
+      }
+    },
+    "concurrency": {
+      "duplicateTurnIds": [
+        "nturn_648d9de4e78c159cec916354",
+        "nturn_648d9de4e78c159cec916354"
+      ],
+      "raceWinner": "verify",
+      "userPrompts": [
+        "[turn-1] concurrent: implement JWT authentication.",
+        "[turn-2] concurrent duplicate"
+      ]
+    }
+  }
+}

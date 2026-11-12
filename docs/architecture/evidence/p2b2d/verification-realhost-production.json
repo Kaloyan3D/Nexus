@@ -1,0 +1,24 @@
+{
+  "mode": "production",
+  "platform": "darwin",
+  "arch": "arm64",
+  "runs": {
+    "legacyVerify": {
+      "notices": [
+        "9:controller-binding",
+        "10:controller-attempt",
+        "25:controller-complete",
+        "26:controller-verify-result"
+      ],
+      "checks": [
+        "fixture-check:PASS",
+        "architecture:rules:PASS"
+      ],
+      "attempts": [
+        "started",
+        "verifying",
+        "passed"
+      ]
+    }
+  }
+}

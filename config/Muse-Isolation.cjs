@@ -46,6 +46,7 @@ const path = require('node:path')
 const profiles = require('./Engineering-Profiles.cjs')
 const reasoningRuntime = require('./Muse-ReasoningRuntime.cjs')
 const requestBoundary = require('./Controller-RequestBoundary.cjs')
+const nexusProfiles = require('./Nexus-Profiles.cjs')
 
 const MUSE_ENGINE = 'muse'
 const MUSE_AGENT_PRESET = 'aih-muse'
@@ -183,6 +184,25 @@ function apply(ctx) {
       if (!binding && requestedEngine !== 'muse') return null
       if (binding && binding.engine !== MUSE_ENGINE) return null
       return { ...controllerTargetFor(installRoot, binding), installRoot, binding }
+    },
+    // A brand-new Muse session has no task binding at message claim (the
+    // bridge creates it in pre-step), yet DSH fixes the first step's model
+    // selection right after the claim. Arm-only provisional target: the active
+    // Muse profile's provider/model and the initial adaptive effort of a new
+    // task (pure computation). Never used for request authorization: the
+    // request guard still resolves and verifies the real, binding-derived target.
+    provisionalTargetFor(payload) {
+      const session = payload && payload.agent && payload.agent.session
+      if (!session || sessionPreset(session) !== MUSE_AGENT_PRESET) return null
+      const installRoot = profiles.installRootOf()
+      if (bindingFor(installRoot, session.id)) return null
+      const active = nexusProfiles.resolveActiveNexusProfile(installRoot, MUSE_AGENT_PRESET)
+      if (!active || active.engine !== MUSE_ENGINE || active.runnable === false) return null
+      const model = nexusProfiles.resolveMuseProfileModel(installRoot, active.id)
+      if (!model || !model.provider || !model.model) return null
+      const effort = reasoningRuntime.initialMuseRequestEffort({ installRoot, target: model })
+      if (typeof effort !== 'string' || effort === '') return null
+      return { provider: model.provider, model: model.model, reasoning: effort }
     },
     // Phase 2: per-call adaptive effort from task-local reasoning state.
     // Resolved BEFORE the downstream pipeline runs, so a capability refusal

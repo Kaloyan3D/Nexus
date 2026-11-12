@@ -34,13 +34,20 @@ function read(rel) {
 }
 
 // ── controller bridge host resolution ──────────────────────────────────────
+// P1: the runner moved verbatim from the per-plane bridge (AihController.cjs)
+// to the host Controller's single legacy runner (config/nexus/legacy-cli.cjs).
+// The same platform properties are asserted where the code now lives, and the
+// bridge must delegate to it instead of spawning PowerShell itself.
 const controllerSource = read('config/AihController.cjs')
-ok(controllerSource.includes('const resolvePowerShellHost = (root) => {'), 'controller bridge contains the platform host resolver')
-ok(controllerSource.includes("if (process.platform === 'win32') return 'powershell.exe'"), 'controller bridge keeps powershell.exe on Windows')
-ok(controllerSource.includes("path.join(root, 'runtime', 'pwsh', 'pwsh')"), 'controller bridge prefers the setup.sh-pinned runtime/pwsh/pwsh on POSIX')
-ok(!controllerSource.includes("spawnCaptured(\n        'powershell.exe'"), 'invokePowerShell spawns through the resolved host, not a hardcoded powershell.exe')
+const runnerSource = read('config/nexus/legacy-cli.cjs')
+ok(runnerSource.includes('const resolvePowerShellHost = (root) => {'), 'controller runner contains the platform host resolver')
+ok(runnerSource.includes("if (process.platform === 'win32') return 'powershell.exe'"), 'controller runner keeps powershell.exe on Windows')
+ok(runnerSource.includes("path.join(root, 'runtime', 'pwsh', 'pwsh')"), 'controller runner prefers the setup.sh-pinned runtime/pwsh/pwsh on POSIX')
+ok(!runnerSource.includes("spawnCaptured(\n        'powershell.exe'"), 'invoke spawns through the resolved host, not a hardcoded powershell.exe')
 ok(controllerSource.includes('executable: pwshHost'), 'verification plan executable uses the resolved host')
-ok(controllerSource.includes("if (process.platform !== 'win32') return runCli(file, args, options)"), 'spawnCaptured keeps the direct POSIX transport (TASK-0017 symmetry)')
+ok(runnerSource.includes("if (process.platform !== 'win32') return runCli(file, args, options)"), 'spawnCaptured keeps the direct POSIX transport (TASK-0017 symmetry)')
+ok(controllerSource.includes('core.legacy.invoke(script, args, {'), 'controller bridge delegates every CLI call to the host Controller runner')
+ok(!controllerSource.includes("require('node:child_process')"), 'controller bridge no longer spawns child processes itself')
 
 // ── Nexus UI controller host resolution ────────────────────────────────────
 const uiSource = read('ui/nexus-controller/lib/index.js')

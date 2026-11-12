@@ -219,6 +219,12 @@ async function main() {
         const { SessionStore } = await import(${JSON.stringify(pathToFileURL(path.join(modules, 'dsh-session/lib/index.js')).href)});
         const ctx = new Context(); new SessionStore(ctx); ctx.provide('shellEnv', { list() { return [] }, register() {} });
         const session = ctx.get('sessions').create(${JSON.stringify(killedSessionId)}, { meta: { cwd: ${JSON.stringify(workspace)}, agentPreset: 'aih-muse' } });
+        // P1 composition: the trusted host Nexus Controller row precedes the plane bridge.
+        await ctx.plugin(require(${JSON.stringify(path.join(repo, 'config/nexus/controller.cjs'))}));
+        // P2-B1: the host is an authority only once it owns the installation.
+        const host = ctx.get('nexusController');
+        for (let i = 0; i < 400 && host.ownership.state === 'not-acquired'; i += 1) await new Promise((r) => setTimeout(r, 10));
+        if (host.ownership.state !== 'held') { console.error('ownership ' + host.ownership.state + ' ' + host.ownership.reason); process.exit(3) }
         require(${JSON.stringify(path.join(repo, 'config/AihController.cjs'))}).apply(ctx);
         const rename = fs.renameSync;
         fs.renameSync = (from, to) => { if (to === ${JSON.stringify(bindingsFile)}) process.exit(77); return rename(from, to) };

@@ -1,0 +1,163 @@
+{
+  "mode": "patched",
+  "platform": "darwin",
+  "arch": "arm64",
+  "runs": {
+    "ordinaryReview": {
+      "notices": [
+        "9:controller-binding",
+        "10:controller-epistemic-action",
+        "11:controller-attempt",
+        "26:review-result"
+      ],
+      "verdict": "pass",
+      "reviewerRequests": 1
+    },
+    "dualPass": {
+      "taskId": "nt_bee703989abaa2c1eccb7d84b4ed1e02",
+      "review": {
+        "policy": "independent-review",
+        "required": true,
+        "disposition": "reviewer-pass",
+        "state": "passed",
+        "verdict": "pass",
+        "attempt": "1",
+        "current": true,
+        "findings": 0,
+        "blockingFindings": 0,
+        "startedAt": "2026-11-11T09:24:58.418Z",
+        "finishedAt": "2026-11-11T09:25:02.443Z"
+      },
+      "final": "completed",
+      "reviewerRequests": 1,
+      "ledger": "complete"
+    },
+    "musePolicy": {
+      "policy": "unavailable-for-engine",
+      "actions": [
+        "verification",
+        "recovery"
+      ],
+      "forged": "STALE_ACTION"
+    },
+    "dualGateProvenance": {
+      "reviewVerdict": "fail",
+      "disposition": "operator-override-of-reviewer-fail",
+      "completionProvenance": {
+        "authority": "task-controller",
+        "ledgerStatus": "complete",
+        "verification": {
+          "state": "passed",
+          "checks": {
+            "total": 2,
+            "passed": 2,
+            "failed": 0,
+            "skipped": 0
+          },
+          "attempt": "1"
+        },
+        "reviewBasis": "operator-override-of-reviewer-fail",
+        "gate": {
+          "gateId": "gate-8157ecb0-6bc9-46da-91be-7313321e97f0",
+          "revision": 2,
+          "resolvedBy": "operator-task-api",
+          "resolvedAt": "2026-11-11T09:25:35.418Z",
+          "reviewVerdict": "fail"
+        }
+      },
+      "cliLine": [
+        "  review basis: operator OVERRIDE of an independent reviewer FAIL (gate approved; the reviewer did not pass)",
+        "  completed by: the TaskController (ledger complete) · gate gate-8157ecb0-6bc9-46da-91be-7313321e97f0 r2 approved by operator-task-api"
+      ]
+    },
+    "dualGate": {
+      "taskId": "nt_425da23e67f833c9a79f9f63aa6a31cd",
+      "outcomes": [
+        "STALE_ACTION",
+        "resolved"
+      ],
+      "journal": [
+        {
+          "status": "waiting",
+          "revision": 1,
+          "resolvedBy": null,
+          "reviewVerdict": "fail"
+        },
+        {
+          "status": "approved",
+          "revision": 2,
+          "resolvedBy": "operator-task-api",
+          "reviewVerdict": "fail"
+        }
+      ],
+      "final": "completed"
+    },
+    "multiTurnStale": {
+      "status": "blocked",
+      "reason": "review-required",
+      "completion": {
+        "complete": false,
+        "reason": "This task requires a passing independent review or deterministic evidence that its findings were resolved (critical policy, explicit review request, or execution-class override).",
+        "reviewRequired": true
+      },
+      "ledger": "verifying"
+    },
+    "visual": {
+      "deferredEvents": 1,
+      "autoVisualEvents": 0,
+      "visualBeforeVerify": {
+        "required": true,
+        "requirement": "required",
+        "status": "pending",
+        "iteration": 0,
+        "maxIterations": 3,
+        "reasons": [
+          "Project visual policy forces requirement required for this project."
+        ],
+        "updatedAt": "2026-11-11T09:26:06.7170340Z"
+      },
+      "reason": "visual-unavailable",
+      "visual": {
+        "required": true,
+        "requirement": "required",
+        "status": "unavailable",
+        "iteration": 0,
+        "maxIterations": 3,
+        "reasons": [
+          "Project visual policy forces requirement required for this project.",
+          "reviewer not invoked: runtime capture failed (adb was not found and the Android runtime target has no deviceId.)"
+        ],
+        "updatedAt": "2026-11-11T09:26:14.4282330Z"
+      },
+      "completion": {
+        "complete": false,
+        "reason": "visual-status:unavailable",
+        "visualBlocked": true,
+        "visualStatus": "unavailable"
+      },
+      "ledger": "verifying",
+      "actions": [
+        "recovery"
+      ]
+    },
+    "restartDuringReview": {
+      "review": {
+        "policy": "independent-review",
+        "required": true,
+        "disposition": "missing",
+        "state": "interrupted",
+        "verdict": null,
+        "attempt": "1",
+        "current": true,
+        "findings": null,
+        "blockingFindings": null,
+        "startedAt": "2026-11-11T09:26:22.648Z",
+        "finishedAt": "2026-11-11T09:26:29.687Z",
+        "reason": "host-restart-during-review"
+      },
+      "reviewerRequests": 1,
+      "status": "blocked",
+      "reason": "review-required"
+    }
+  }
+}

@@ -1,0 +1,229 @@
+{
+  "dsh": "0.2.2-rc.1",
+  "rows": [
+    {
+      "label": "session/prompt (queue)",
+      "endpoint": "session/prompt",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "session/prompt (steer)",
+      "endpoint": "session/prompt",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "session/updateQueue",
+      "endpoint": "session/updateQueue",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "session/cancel",
+      "endpoint": "session/cancel",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "session/rename",
+      "endpoint": "session/rename",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "session/selectModel",
+      "endpoint": "session/selectModel",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "session/fork",
+      "endpoint": "session/fork",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "session/create (reuse managed id)",
+      "endpoint": "session/create",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "workspace/archiveSession",
+      "endpoint": "workspace/archiveSession",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "workspace/pinSession",
+      "endpoint": "workspace/pinSession",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "workspace/insertSessionBefore",
+      "endpoint": "workspace/insertSessionBefore",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "workspace/delete (contains managed)",
+      "endpoint": "workspace/delete",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-workspace",
+      "stateUnchanged": true
+    },
+    {
+      "label": "workspace/rename (contains managed)",
+      "endpoint": "workspace/rename",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-workspace",
+      "stateUnchanged": true
+    },
+    {
+      "label": "agentPresets/select",
+      "endpoint": "agentPresets/select",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "commands/execute",
+      "endpoint": "commands/execute",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "goals/create",
+      "endpoint": "goals/create",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "userQuestions/answer",
+      "endpoint": "userQuestions/answer",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "subagents/interruptByParent",
+      "endpoint": "subagents/interruptByParent",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "terminal/create (managed agent)",
+      "endpoint": "terminal/create",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "terminal/create (unmanaged agent, same cwd)",
+      "endpoint": "terminal/create",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-workspace",
+      "stateUnchanged": true
+    },
+    {
+      "label": "fileUploads/upload",
+      "endpoint": "fileUploads/upload",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    },
+    {
+      "label": "dynamicCordisRunner/invoke (host code)",
+      "endpoint": "dynamicCordisRunner/invoke",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-host-protected-while-managed",
+      "stateUnchanged": true
+    },
+    {
+      "label": "pluginManager/setPluginEnabled (disable Nexus)",
+      "endpoint": "pluginManager/setPluginEnabled",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-host-protected-while-managed",
+      "stateUnchanged": true
+    },
+    {
+      "label": "settings/update",
+      "endpoint": "settings/update",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-host-protected-while-managed",
+      "stateUnchanged": true
+    },
+    {
+      "label": "credentials/set",
+      "endpoint": "credentials/set",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-host-protected-while-managed",
+      "stateUnchanged": true
+    },
+    {
+      "label": "schedule/create",
+      "endpoint": "schedule/create",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-host-protected-while-managed",
+      "stateUnchanged": true
+    },
+    {
+      "label": "schedule/run",
+      "endpoint": "schedule/run",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-host-protected-while-managed",
+      "stateUnchanged": true
+    },
+    {
+      "label": "job/kill",
+      "endpoint": "job/kill",
+      "disposition": "denied-by-hook",
+      "reason": "nexus-managed-session",
+      "stateUnchanged": true
+    }
+  ],
+  "scenarios": {
+    "missingListener": {
+      "renameOk": true
+    },
+    "fetchUpload": 403,
+    "streamAndEvents": {
+      "terminalAttach": "denied",
+      "eventResult": "remote-access/denied"
+    },
+    "unmanaged": {
+      "renameOtherWorkspace": true,
+      "renameSameWorkspace": true,
+      "terminalOtherWorkspace": "ok"
+    },
+    "staleIdentity": "session/not-found",
+    "approvalCancelRace": {
+      "outcome": "rejected",
+      "cancel": "remote-access/denied"
+    },
+    "restart": {
+      "managedAfterRestart": false,
+      "eventsBefore": 8,
+      "replayedEvents": null
+    }
+  },
+  "unprovenRows": [],
+  "decisions": 79,
+  "llmCalls": 0
+}

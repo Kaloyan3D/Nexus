@@ -1,0 +1,133 @@
+--- a/packages/api/gateway/src/index.ts
++++ b/packages/api/gateway/src/index.ts
+@@ -513,6 +513,17 @@
+             'Remote event result belongs to another Peer',
+           )
+         }
++        // Answering a forwarded event (approval, question) is a mutation of the
++        // waiting Agent: attribute it to that Agent's session and authorize it
++        // like any operation. An unknown event id is authorized as unattributed.
++        const pending = this.pendingRemoteEvents.get(result.eventId)
++        await this.authorizeOperation({
++          principal: peer.principal,
++          action: endpoint,
++          resources: pending === undefined ? undefined : [{ kind: 'session', id: pending.frame.agentId }],
++          args: { event: pending?.frame.event ?? null, outcome: result.outcome.kind },
++          transport: 'unary',
++        })
+         this.receiveRemoteEventResult(client, result)
+         return { ok: true, value: undefined }
+       } catch (error) {
+@@ -536,6 +547,7 @@
+       releaseUplink(uplink)
+       assertPeerLive(peer, endpoint)
+       requireInteractions(peer, endpoint)
++      await this.authorizeOperation({ principal: peer.principal, action: endpoint, resources: [{ kind: 'global' }], args: {}, transport: 'stream' })
+       return this.openRemoteEvents(payload, signal, peer)
+     }
+     return this.openStream({ ...remoteRequest(endpoint, payload, signal, peer), uplink, uplinkWindow }, control)
+@@ -786,7 +798,32 @@
+       return encodeRpcResult(value, prepared.descriptor.result)
+     } catch (error) {
+       return rpcFailure(error)
++    }
++  }
++
++  /**
++   * Run the `gateway/authorize` listeners for one operation. Listeners return
++   * `undefined` to abstain or `{ kind: 'deny', reason }` to refuse; the first
++   * refusal wins whatever the registration order. Any other return value or a
++   * throwing listener refuses (fail closed). With no listener every operation
++   * keeps today's behavior. Listeners receive a frozen copy of the request.
++   */
++  private async authorizeOperation(request: GatewayAuthorizeRequest): Promise<void> {
++    let verdict: unknown
++    try {
++      verdict = await this.ctx.serial('gateway/authorize', deepFreeze(structuredClone(request)))
++    } catch {
++      throw new RemoteError('remote-access/denied', `remote access: ${request.action}: authorization failed`, {
++        action: request.action,
++        reason: 'authorization-failed',
++      })
+     }
++    if (verdict === undefined) return
++    const reason = isObject(verdict) && verdict.kind === 'deny' && typeof verdict.reason === 'string' ? verdict.reason : 'authorization-invalid'
++    throw new RemoteError('remote-access/denied', `remote access: ${request.action}: access denied (${reason})`, {
++      action: request.action,
++      reason,
++    })
+   }
+ 
+   /** `control` fails the logical stream when an uplink item is rejected; unary calls hand over an inert one. */
+@@ -800,15 +837,15 @@
+     assertExactArguments(request.args, descriptor, endpoint)
+     const validated = validateArguments(descriptor, request.args, endpoint)
+     // Access precedes lookup resolution, so a refused call activates nothing.
++    const resources = callResources(
++      this.ctx.typert,
++      this.resourceReaders(descriptor),
++      descriptor,
++      validated,
++      request.signal ?? NEVER_ABORTED_SIGNAL,
++    )
+     // oxlint-disable-next-line typescript/no-unnecessary-condition -- other packages merge non-owner kinds into PrincipalMap.
+     if (request.peer.principal.kind !== 'owner') {
+-      const resources = callResources(
+-        this.ctx.typert,
+-        this.resourceReaders(descriptor),
+-        descriptor,
+-        validated,
+-        request.signal ?? NEVER_ABORTED_SIGNAL,
+-      )
+       const decision: RemoteAccessDecision = resources === undefined
+         ? { kind: 'deny', reason: 'resource-invalid' }
+         : this.ctx.remoteAccess.decide({
+@@ -824,6 +861,16 @@
+         })
+       }
+     }
++    // Per-operation authorization for EVERY principal, owner included. It runs
++    // after the legacy decision (which it can never relax) and before receiver
++    // resolution, so a refusal activates nothing and has no side effect.
++    await this.authorizeOperation({
++      principal: request.peer.principal,
++      action: endpoint,
++      resources,
++      args: validated,
++      transport: 'uplink' in request ? 'stream' : 'unary',
++    })
+     const receiverContext = await this.resolveReceiverContext(descriptor, validated, endpoint)
+     const receiver: unknown = receiverContext.get(descriptor.service)
+     if (!isObject(receiver)) {
+@@ -1747,3 +1794,31 @@
+ }
+ 
+ export default TypertGatewayService
++
++/** One operation presented to `gateway/authorize` listeners (frozen copy). */
++export interface GatewayAuthorizeRequest {
++  readonly principal: Principal
++  /** `<namespace>/<method>`, `$events` or `$events/result`. */
++  readonly action: string
++  /** Attributed resources; `undefined` when the arguments could not be attributed. */
++  readonly resources: readonly RemoteAccessResource[] | undefined
++  readonly args: unknown
++  readonly transport: 'unary' | 'stream'
++}
++
++/** A listener's refusal; abstain by returning `undefined`. */
++export interface GatewayAuthorizeDenial { readonly kind: 'deny'; readonly reason: string }
++
++declare module '@deepseek-ai/cordis' {
++  interface Events {
++    'gateway/authorize'(request: GatewayAuthorizeRequest): GatewayAuthorizeDenial | undefined | Promise<GatewayAuthorizeDenial | undefined>
++  }
++}
++
++function deepFreeze<T>(value: T): T {
++  if (isObject(value) && !Object.isFrozen(value)) {
++    Object.freeze(value)
++    for (const key of Reflect.ownKeys(value)) deepFreeze((value as Record<PropertyKey, unknown>)[key])
++  }
++  return value
++}

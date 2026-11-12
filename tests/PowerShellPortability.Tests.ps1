@@ -116,6 +116,7 @@ Assert-Aih ($platformDeps.Count -eq 0) ("Platform.ps1 invokes no function define
 $jsAllow = @(
     @{ File = 'tests/lib/AihTestTransport.cjs'; Reason = 'the ONE shared test transport: its Windows branch implements the production host strategy and the TASK-0017 cmd.exe no-pipes transport' },
     @{ File = 'config/AihController.cjs'; Reason = 'production controller bridge: platform-aware spawnCaptured/runCli resolvers (guards verified in-file)' },
+    @{ File = 'config/nexus/legacy-cli.cjs'; Reason = 'P1: the same production runner moved verbatim from config/AihController.cjs (platform-aware host resolver and TASK-0017 Windows transport, guards verified in-file)' },
     @{ File = 'ui/nexus-controller/lib/index.js'; Reason = 'production UI controller: platform-aware pwsh host resolver (guards verified in-file)' },
     @{ File = 'tests/AihControllerHost.Tests.cjs'; Reason = 'this suite ASSERTS the platform launcher/host contracts; its literals are test data that must match production source, never spawns' },
     @{ File = 'tests/lib/AihLauncherLayout.cjs'; Reason = 'launcher-layout abstraction twin (TASK-0025 Class C): its .cmd literals are layout-plane DETECTION data (endsWith filter) and contract documentation, never spawns' }
@@ -236,8 +237,11 @@ Assert-Aih ($osAssumptions.Count -eq 0) ("no OS-assumption class findings (found
 #     system Node, and nothing is persisted.
 $platformText = [System.IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts/Platform.ps1'))
 Assert-Aih ($platformText.Contains('function Get-AihNexusToolchainRoot') -and $platformText.Contains('Get-AihNexusToolchainRoot -InstallRoot $InstallRoot') -and $platformText.Contains('function Get-AihNodeExecutable')) 'pinned-runtime resolution routes through the shared toolchain-root contract'
+# P1: the runner moved verbatim from the bridge to the host Controller's
+# single legacy runner; the bridge passes its owner tree as a candidate.
 $controllerText = [System.IO.File]::ReadAllText((Join-Path $InstallRoot 'config/AihController.cjs'))
-Assert-Aih ($controllerText.Contains('AIH_TOOLCHAIN_ROOT') -and $controllerText.Contains('resolveToolchainRoot')) 'the controller bridge names the toolchain root for the children it spawns'
+$runnerText = [System.IO.File]::ReadAllText((Join-Path $InstallRoot 'config/nexus/legacy-cli.cjs'))
+Assert-Aih ($runnerText.Contains('AIH_TOOLCHAIN_ROOT') -and $runnerText.Contains('resolveToolchainRoot') -and $controllerText.Contains("ownerRoot: path.resolve(__dirname, '..')")) 'the controller runner names the toolchain root for the children it spawns'
 $testHarnessText = [System.IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts/Test-Harness.ps1'))
 Assert-Aih ($testHarnessText.Contains('$env:AIH_TOOLCHAIN_ROOT = $InstallRoot')) 'the harness driver anchors suite children to the toolchain root'
 

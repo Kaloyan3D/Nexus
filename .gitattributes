@@ -13,3 +13,6 @@
 *.sh text eol=lf
 setup.sh text eol=lf
 bin/linux/* text eol=lf
+# Byte-literal evidence compared verbatim by tests (e.g. the pre-P1 Muse
+# review notice): LF on every checkout, including Windows.
+docs/architecture/evidence/**/*.txt text eol=lf

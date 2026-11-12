@@ -1,0 +1,258 @@
+{
+  "mode": "patched",
+  "platform": "darwin",
+  "arch": "arm64",
+  "dsh": "0.2.2-rc.1",
+  "gatewayDigest": "12e5577b6ae0c19d2d826790f409e086513a41a33014fc45ae57d257a57a14c8",
+  "scenarios": {
+    "activation": {
+      "activation": {
+        "active": true,
+        "problems": []
+      },
+      "gates": {
+        "hook": {
+          "ok": true,
+          "reason": "verified",
+          "digest": "12e5577b6ae0c19d2d826790f409e086513a41a33014fc45ae57d257a57a14c8",
+          "build": "dsh-v0.2.2-rc.1+nexus-gateway-authorize-1",
+          "detail": null
+        },
+        "policyInstalled": true,
+        "fetchGuardInstalled": true,
+        "brokerInstalled": true,
+        "routeGuards": 1,
+        "workspaceGuardInstalled": true,
+        "dshServicesReady": true
+      }
+    },
+    "concurrentSubmit": {
+      "taskId": "nt_51f194d18cd089f5ed4bb6820927e63b",
+      "durable": {
+        "inserted": 1,
+        "claimed": 1,
+        "userMessages": 1,
+        "turnEnds": [
+          "completed"
+        ],
+        "events": 21,
+        "dshReadable": true,
+        "dshReadError": null
+      },
+      "llm": {
+        "conversation": {
+          "session-b945259e-6e2f-40e8-b4ed-e2bf1f210232": 1
+        },
+        "auxiliary": 1
+      }
+    },
+    "statusAfterTurn": {
+      "taskId": "nt_51f194d18cd089f5ed4bb6820927e63b",
+      "sessionId": "session-b945259e-6e2f-40e8-b4ed-e2bf1f210232",
+      "workspaceId": "f5fe05f1-05a8-4d56-ad92-290e597663ea",
+      "mode": "engineering-v2",
+      "strategyId": "nexus.muse",
+      "status": "blocked",
+      "statusReason": "turn-completed-awaiting-verification",
+      "attemptId": "1",
+      "displayId": "TASK-0001",
+      "verification": {
+        "state": "pending",
+        "required": true,
+        "snapshotDigest": null,
+        "checks": 0
+      },
+      "review": {
+        "state": "not_required",
+        "required": false,
+        "policyReason": "muse-engine-has-no-independent-reviewer"
+      },
+      "operatorActions": [
+        {
+          "id": "act_verify_51f194d18cd0_a1",
+          "kind": "verification",
+          "label": "Run Nexus verification for attempt 1 (existing /verify pipeline; the TaskController decides completion)",
+          "choices": [
+            {
+              "id": "run",
+              "label": "Run verification"
+            }
+          ],
+          "attempt": "1",
+          "derived": true,
+          "revision": "1"
+        },
+        {
+          "id": "act_close_51f194d18cd0_r7",
+          "kind": "recovery",
+          "label": "Close this task (turn-completed-awaiting-verification): nothing resumes; identity and history are kept",
+          "choices": [
+            {
+              "id": "close",
+              "label": "Close task"
+            }
+          ],
+          "derived": true,
+          "revision": "1"
+        }
+      ],
+      "intake": {
+        "state": "accepted",
+        "acceptedAt": "2026-11-11T07:09:44.512Z",
+        "hold": null
+      },
+      "guidance": "The engineering turn finished. Run verification (operator action run-verification) or close the task.",
+      "sessionHealth": {
+        "state": "healthy",
+        "reason": null,
+        "repair": null
+      },
+      "turn": {
+        "endedAt": "2026-11-11T07:09:47.066Z",
+        "reason": "completed"
+      },
+      "cohort": "managed",
+      "revision": "1",
+      "updatedAt": "2026-11-11T07:09:47.256Z",
+      "reply": {
+        "text": "Synthetic reply.",
+        "at": "2026-11-11T07:09:47.064Z",
+        "seq": 17
+      }
+    },
+    "dual": {
+      "durable": {
+        "inserted": 1,
+        "claimed": 1,
+        "userMessages": 1,
+        "turnEnds": [
+          "completed"
+        ],
+        "events": 22,
+        "dshReadable": true,
+        "dshReadError": null
+      },
+      "llm": 1
+    },
+    "ownerPeer": {
+      "refusals": {
+        "session/prompt": "nexus-managed-session",
+        "session/rename": "nexus-managed-session",
+        "session/cancel": "nexus-managed-session",
+        "session/selectModel": "nexus-managed-session",
+        "session/fork": "nexus-managed-session",
+        "workspace/archiveSession": "nexus-managed-session"
+      },
+      "upload": 403,
+      "gateAction": 403
+    },
+    "broker": {
+      "action": {
+        "id": "act_739cde77e2b4ebe781ef0cc0",
+        "kind": "approval",
+        "label": "bash: synthetic approval fbd0e188-de2f-4d13-85db-591e02295db9",
+        "revision": "1",
+        "deadline": "2026-11-11T07:19:58.313Z",
+        "choices": [
+          {
+            "id": "allow-once",
+            "label": "Allow once"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ]
+      },
+      "winner": "gui:reject",
+      "outcome": "rejected",
+      "forged": "NOT_FOUND",
+      "stale": "STALE_ACTION"
+    },
+    "cancel": {
+      "status": "cancelled",
+      "turnEnds": [
+        "aborted"
+      ],
+      "approvals": [
+        {
+          "id": "fbd0e188-de2f-4d13-85db-591e02295db9",
+          "sessionId": "session-38270830-4f27-44a8-ad0e-f525ab4cb02d",
+          "outcome": "rejected"
+        },
+        {
+          "id": "99db73fb-7e16-45cf-9c40-a8015614d54c",
+          "sessionId": "session-38270830-4f27-44a8-ad0e-f525ab4cb02d",
+          "outcome": "rejected"
+        }
+      ],
+      "modelRequests": 0
+    },
+    "workspaceExclusivity": {
+      "ordinaryLlm": 0,
+      "terminal": "nexus-managed-workspace",
+      "plugin": "nexus-host-protected-while-active",
+      "settings": "nexus-host-protected-while-active",
+      "registryRoute": 403
+    },
+    "crashBeforePersistence": {
+      "taskId": "nt_8c680de11a2a3367dea1b8af0ebc5914",
+      "durable": {
+        "inserted": 1,
+        "claimed": 1,
+        "userMessages": 1,
+        "turnEnds": [
+          "completed"
+        ],
+        "events": 22,
+        "dshReadable": true,
+        "dshReadError": null
+      }
+    },
+    "crashAfterPersistence": {
+      "taskId": "nt_69b6774d241f65003f293a3f418a9b3f",
+      "hold": "restored-input-not-resumed",
+      "status": "blocked",
+      "durable": {
+        "inserted": 1,
+        "claimed": 0,
+        "userMessages": 0,
+        "turnEnds": [],
+        "events": 7,
+        "dshReadable": true,
+        "dshReadError": null
+      }
+    },
+    "final": {
+      "llm": {
+        "conversation": {},
+        "auxiliary": 0
+      },
+      "metrics": {
+        "managedTasks": {
+          "submitted": 1,
+          "replays": 1,
+          "conflicts": 0,
+          "accepted": 1,
+          "parked": 1,
+          "failed": 0,
+          "stepsAdmitted": 0,
+          "stepsRefused": 0,
+          "cancels": 0,
+          "reconciled": 1,
+          "activeTurns": 0,
+          "inFlight": 0
+        },
+        "broker": {
+          "offered": 0,
+          "granted": 0,
+          "refused": 0,
+          "expired": 0,
+          "aborted": 0,
+          "stale": 0,
+          "duplicates": 0
+        }
+      }
+    }
+  }
+}

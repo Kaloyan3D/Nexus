@@ -284,6 +284,7 @@ fi
 "$AIH_NODE_DIR/bin/node" "$AIH_INSTALL_ROOT/scripts/MusePresetDependencyClosure.cjs" prepare "$AIH_SOURCE_ROOT" "$AIH_INSTALL_ROOT" >/dev/null
 "$AIH_NODE_DIR/bin/node" "$AIH_INSTALL_ROOT/scripts/MusePresetDependencyClosure.cjs" prepare "$AIH_SOURCE_ROOT" "$AIH_INSTALL_ROOT" engineering >/dev/null
 "$AIH_NODE_DIR/bin/node" "$AIH_INSTALL_ROOT/scripts/MusePresetDependencyClosure.cjs" prepare "$AIH_SOURCE_ROOT" "$AIH_INSTALL_ROOT" deepseek >/dev/null
+"$AIH_NODE_DIR/bin/node" "$AIH_INSTALL_ROOT/scripts/MusePresetDependencyClosure.cjs" prepare "$AIH_SOURCE_ROOT" "$AIH_INSTALL_ROOT" host >/dev/null
 if [ "$AIH_RESET_MANAGED_SETTINGS" -eq 1 ]; then
   "$AIH_PWSH_DIR/pwsh" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$AIH_INSTALL_ROOT/scripts/Complete-Install.ps1" -InstallRoot "$AIH_INSTALL_ROOT" -ResetManagedSettings
 else

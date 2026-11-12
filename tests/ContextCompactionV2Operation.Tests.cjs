@@ -458,7 +458,7 @@ async function main() {
   {
     const f = await reconcCase('foreign');
     compaction.applyCompactionOperationV2(f.session, f.frozen.durable, f.payloadText, f.frozen.durable);
-    f.session.append('user/message', { id: newMessageId(), role: 'user', content: [{ type: 'text', text: 'FOREIGN-CHECKPOINT-SHAPED-JUNK' }], source: { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId: f.frozen.durable.operationId, generation: 1 } }, { surfaceOp: 'append' });
+    f.session.append('user/message', { id: newMessageId(), role: 'user', content: [{ type: 'text', text: 'FOREIGN-CHECKPOINT-SHAPED-JUNK' }], source: { kind: 'aih-controller', plugin: 'aih-controller', form: 'context-checkpoint', operationId: f.frozen.durable.operationId, generation: 1 } }, { surfaceOp: 'append' });
     const r = compaction.reconcileCompactionOperationV2(f.frozen.durable, f.session, { payloadText: f.payloadText, durable: true });
     check(r.decision === 'block', 'foreign replacement → BLOCK (do not improvise)', r.reason);
   }
@@ -468,7 +468,7 @@ async function main() {
     // way a real foreign writer would produce it: an extra citation).
     const f = await reconcCase('corrupt');
     compaction.applyCompactionOperationV2(f.session, f.frozen.durable, f.payloadText, f.frozen.durable);
-    f.session.append('user/message', { id: newMessageId(), role: 'user', content: [{ type: 'text', text: f.payloadText }], source: { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId: f.frozen.durable.operationId, generation: 1 } }, { surfaceOp: 'append' });
+    f.session.append('user/message', { id: newMessageId(), role: 'user', content: [{ type: 'text', text: f.payloadText }], source: { kind: 'aih-controller', plugin: 'aih-controller', form: 'context-checkpoint', operationId: f.frozen.durable.operationId, generation: 1 } }, { surfaceOp: 'append' });
     const r = compaction.reconcileCompactionOperationV2(f.frozen.durable, f.session, { payloadText: f.payloadText, durable: true });
     check(r.decision === 'block', 'corrupt (duplicate payload citation) → BLOCK', r.reason);
   }

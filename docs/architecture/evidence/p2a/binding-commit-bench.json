@@ -1,0 +1,1 @@
+[{"label":"pre-P2A inline writer","n":200,"p50":11.918,"p95":17.68},{"label":"P2-A host store","n":200,"p50":12.113,"p95":15.305},{"label":"pre-P2A inline writer (repeat)","n":200,"p50":11.991,"p95":15.738},{"label":"P2-A host store (repeat)","n":200,"p50":12.071,"p95":15.944}]

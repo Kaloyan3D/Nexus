@@ -1,0 +1,215 @@
+{
+  "mode": "patched",
+  "platform": "darwin",
+  "arch": "arm64",
+  "dsh": "0.2.2-rc.1",
+  "gatewayDigest": "12e5577b6ae0c19d2d826790f409e086513a41a33014fc45ae57d257a57a14c8",
+  "scenarios": {
+    "activation": {
+      "activation": {
+        "active": true,
+        "problems": []
+      },
+      "gates": {
+        "hook": {
+          "ok": true,
+          "reason": "verified",
+          "digest": "12e5577b6ae0c19d2d826790f409e086513a41a33014fc45ae57d257a57a14c8",
+          "build": "dsh-v0.2.2-rc.1+nexus-gateway-authorize-1",
+          "detail": null
+        },
+        "policyInstalled": true,
+        "fetchGuardInstalled": true,
+        "brokerInstalled": true,
+        "routeGuards": 1,
+        "workspaceGuardInstalled": true,
+        "dshServicesReady": true
+      }
+    },
+    "concurrentSubmit": {
+      "taskId": "nt_ae39f11ffc69cc84a2260a1c74139126",
+      "durable": {
+        "inserted": 1,
+        "claimed": 1,
+        "userMessages": 1,
+        "turnEnds": [
+          "completed"
+        ],
+        "events": 21,
+        "dshReadable": false,
+        "dshReadError": "session \"session-9dda2172-3222-4f0a-b829-35c9825d0a3f\": stored log is corrupt: SessionFormatError: system/message requires a protected first surface head (raw log: /private/tmp/claude-501/-Users-kaloy"
+      },
+      "llm": {
+        "conversation": {
+          "session-9dda2172-3222-4f0a-b829-35c9825d0a3f": 1
+        },
+        "auxiliary": 1
+      }
+    },
+    "statusAfterTurn": {
+      "taskId": "nt_ae39f11ffc69cc84a2260a1c74139126",
+      "sessionId": "session-9dda2172-3222-4f0a-b829-35c9825d0a3f",
+      "workspaceId": "124f9d5f-792f-48d9-b6d1-416d3fc12985",
+      "mode": "engineering-v2",
+      "strategyId": "nexus.muse",
+      "status": "blocked",
+      "statusReason": "turn-ended-without-ledger-completion",
+      "attemptId": "1",
+      "displayId": "TASK-0001",
+      "verification": {
+        "state": "pending",
+        "required": true,
+        "snapshotDigest": null,
+        "checks": 0
+      },
+      "review": {
+        "state": "not_required",
+        "required": false,
+        "policyReason": "muse-engine-has-no-independent-reviewer"
+      },
+      "operatorActions": [],
+      "intake": {
+        "state": "accepted",
+        "acceptedAt": "2026-11-09T07:07:33.568Z",
+        "hold": null
+      },
+      "cohort": "managed",
+      "revision": "1",
+      "updatedAt": "2026-11-09T07:07:36.847Z"
+    },
+    "dual": {
+      "durable": {
+        "inserted": 1,
+        "claimed": 1,
+        "userMessages": 1,
+        "turnEnds": [
+          "completed"
+        ],
+        "events": 22,
+        "dshReadable": false,
+        "dshReadError": "session \"session-1a8cfde9-4298-4c0f-b014-22bb96362093\": stored log is corrupt: SessionFormatError: system/message requires a protected first surface head (raw log: /private/tmp/claude-501/-Users-kaloy"
+      },
+      "llm": 1
+    },
+    "ownerPeer": {
+      "refusals": {
+        "session/prompt": "nexus-managed-session",
+        "session/rename": "nexus-managed-session",
+        "session/cancel": "nexus-managed-session",
+        "session/selectModel": "nexus-managed-session",
+        "session/fork": "nexus-managed-session",
+        "workspace/archiveSession": "nexus-managed-session"
+      },
+      "upload": 403,
+      "gateAction": 403
+    },
+    "broker": {
+      "action": {
+        "id": "act_904afb160009786816099901",
+        "kind": "approval",
+        "label": "bash: synthetic approval d39d7515-f071-4ffe-bf9d-46e5b29b7ba7",
+        "revision": "1",
+        "deadline": "2026-11-09T07:17:49.819Z",
+        "choices": [
+          {
+            "id": "allow-once",
+            "label": "Allow once"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ]
+      },
+      "winner": "gui:reject",
+      "outcome": "rejected",
+      "forged": "NOT_FOUND",
+      "stale": "STALE_ACTION"
+    },
+    "cancel": {
+      "status": "cancelled",
+      "turnEnds": [
+        "aborted"
+      ],
+      "approvals": [
+        {
+          "id": "d39d7515-f071-4ffe-bf9d-46e5b29b7ba7",
+          "sessionId": "session-125b723f-3f1c-42da-aa8a-141e7b466559",
+          "outcome": "rejected"
+        },
+        {
+          "id": "580e6b06-812c-4266-a7e2-671c54471c4b",
+          "sessionId": "session-125b723f-3f1c-42da-aa8a-141e7b466559",
+          "outcome": "rejected"
+        }
+      ],
+      "modelRequests": 0
+    },
+    "workspaceExclusivity": {
+      "ordinaryLlm": 0,
+      "terminal": "nexus-managed-workspace",
+      "plugin": "nexus-host-protected-while-active",
+      "settings": "nexus-host-protected-while-active",
+      "registryRoute": 403
+    },
+    "crashBeforePersistence": {
+      "taskId": "nt_450603b2992b972997f6fe30f3c7ce90",
+      "durable": {
+        "inserted": 1,
+        "claimed": 1,
+        "userMessages": 1,
+        "turnEnds": [
+          "completed"
+        ],
+        "events": 22,
+        "dshReadable": false,
+        "dshReadError": "session \"session-e2eff56f-054e-48f3-8d32-b504b5d78929\": stored log is corrupt: SessionFormatError: system/message requires a protected first surface head (raw log: /private/tmp/claude-501/-Users-kaloy"
+      }
+    },
+    "crashAfterPersistence": {
+      "taskId": "nt_5819ebb9b5855e61085e710ad946aced",
+      "hold": "restored-input-not-resumed",
+      "status": "blocked",
+      "durable": {
+        "inserted": 1,
+        "claimed": 0,
+        "userMessages": 0,
+        "turnEnds": [],
+        "events": 7,
+        "dshReadable": true,
+        "dshReadError": null
+      }
+    },
+    "final": {
+      "llm": {
+        "conversation": {},
+        "auxiliary": 0
+      },
+      "metrics": {
+        "managedTasks": {
+          "submitted": 1,
+          "replays": 1,
+          "conflicts": 0,
+          "accepted": 1,
+          "parked": 1,
+          "failed": 0,
+          "stepsAdmitted": 0,
+          "stepsRefused": 0,
+          "cancels": 0,
+          "reconciled": 1,
+          "activeTurns": 0,
+          "inFlight": 0
+        },
+        "broker": {
+          "offered": 0,
+          "granted": 0,
+          "refused": 0,
+          "expired": 0,
+          "aborted": 0,
+          "stale": 0,
+          "duplicates": 0
+        }
+      }
+    }
+  }
+}
