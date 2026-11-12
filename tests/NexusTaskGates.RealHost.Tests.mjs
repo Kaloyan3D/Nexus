@@ -5,7 +5,7 @@
 // Synthetic engineering model transport; the independent reviewer is a local
 // synthetic HTTP endpoint (AIH_OAUTH_BASE_URL on 127.0.0.1) that returns a
 // configured verdict and counts requests; blocked egress; no credential.
-import { IPC_SUPPORTED, taskOp, assertManagedRefused, declareWindowsIpcGap } from './lib/NexusRealHostPlatform.mjs'
+import { IPC_SUPPORTED, taskOp, assertTaskOk, assertManagedRefused, declareWindowsIpcGap } from './lib/NexusRealHostPlatform.mjs'
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import crypto from 'node:crypto'
@@ -163,7 +163,7 @@ try {
     owner = await ownerClient(ready)
   }
   const repoA = makeRepo('gates', 0)
-  assert.equal((await addWorkspace(repoA)).code, 0)
+  assertTaskOk(assert, await addWorkspace(repoA), 'workspace add')
 
   // ── Ordinary GUI explicit /review on a Dual session (both modes) ─────────
   {
@@ -257,7 +257,7 @@ try {
     {
       reviewer.verdict = 'fail'
       const repoG = makeRepo('gate', 0)
-      assert.equal((await addWorkspace(repoG)).code, 0)
+      assertTaskOk(assert, await addWorkspace(repoG), 'workspace add')
       const t = await submitted('dual-gate', repoG, 'engineering-v1', 'deepseek-codex')
       let view = await statusOf(t.taskId)
       await respond(t.taskId, actionOf(view, 'review'), 'run')
@@ -297,7 +297,7 @@ try {
     // 4. Multi-turn: a turn-1 review never certifies turn 2.
     {
       const repoM = makeRepo('multi', 0)
-      assert.equal((await addWorkspace(repoM)).code, 0)
+      assertTaskOk(assert, await addWorkspace(repoM), 'workspace add')
       const t = await submitted('dual-multi', repoM, 'engineering-v1', 'deepseek-codex')
       let view = await statusOf(t.taskId)
       await respond(t.taskId, actionOf(view, 'review'), 'run')
@@ -322,7 +322,7 @@ try {
     //    unavailable in this environment -> blocked, never a fabricated PASS.
     {
       const repoV = makeRepo('visual', 0, { requirement: 'required' })
-      assert.equal((await addWorkspace(repoV)).code, 0)
+      assertTaskOk(assert, await addWorkspace(repoV), 'workspace add')
       const t = await submitted('dual-visual', repoV, 'engineering-v1', 'deepseek-codex')
       await new Promise((r) => setTimeout(r, 2000))
       let view = await statusOf(t.taskId)
@@ -347,7 +347,7 @@ try {
     // 6. Restart during review: never re-run automatically, never counted.
     {
       const repoR = makeRepo('restart', 0)
-      assert.equal((await addWorkspace(repoR)).code, 0)
+      assertTaskOk(assert, await addWorkspace(repoR), 'workspace add')
       const t = await submitted('dual-restart', repoR, 'engineering-v1', 'deepseek-codex')
       let view = await statusOf(t.taskId)
       reviewer.hold = true

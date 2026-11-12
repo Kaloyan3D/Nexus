@@ -25,6 +25,16 @@ export async function taskOp({ nexus, owner, cliArgs, operation, input }) {
   return { via: 'gui', code: null, json, stdout: JSON.stringify(json), stderr: '' }
 }
 
+/**
+ * Success of one taskOp result on its own path: CLI exit 0 on POSIX, an ok
+ * Task API envelope through the GUI route on Windows (which has no exit code).
+ */
+export function assertTaskOk(assert, result, label = 'task operation') {
+  if (result.via === 'cli') assert.equal(result.code, 0, label + ' (cli): ' + result.stdout + result.stderr)
+  else assert.equal(result.json && result.json.ok, true, label + ' (gui): ' + JSON.stringify(result.json))
+  return result
+}
+
 /** Windows: the CLI has no transport and must say so with HOST_UNAVAILABLE (exit 3). */
 export async function assertWindowsCliRefused(nexus, assert) {
   if (IPC_SUPPORTED) return

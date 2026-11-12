@@ -10,7 +10,7 @@
 // verification to completion, failed verification, concurrent GUI+CLI
 // responses, duplicate requests, verification after a host restart, an
 // interrupted task closed safely, no additional inference.
-import { IPC_SUPPORTED, taskOp, assertManagedRefused, declareWindowsIpcGap } from './lib/NexusRealHostPlatform.mjs'
+import { IPC_SUPPORTED, taskOp, assertTaskOk, assertManagedRefused, declareWindowsIpcGap } from './lib/NexusRealHostPlatform.mjs'
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import crypto from 'node:crypto'
@@ -136,7 +136,7 @@ try {
   let owner = await ownerClient(ready)
   const addWorkspace = (ws) => taskOp({ nexus, owner, cliArgs: ['workspace', 'add', '--path', ws, '--json'], operation: 'registerWorkspace', input: { path: ws } })
   const passing = makeRepo('pass', 0)
-  for (const ws of [passing]) assert.equal((await addWorkspace(ws)).code, 0)
+  for (const ws of [passing]) assertTaskOk(assert, await addWorkspace(ws), 'workspace add')
 
   // ── Legacy GUI /verify parity (ordinary session, both modes) ──────────────
   {
@@ -163,7 +163,7 @@ try {
     assert.equal(ready.activation.active, true, JSON.stringify(ready.activation))
     const failing = makeRepo('fail', 1)
     const passingDual = makeRepo('pass-dual', 0)
-    for (const ws of [failing, passingDual]) assert.equal((await addWorkspace(ws)).code, 0)
+    for (const ws of [failing, passingDual]) assertTaskOk(assert, await addWorkspace(ws), 'workspace add')
     async function executed(label, ws, modeId, preference) {
       setPreference(preference)
       const text = `Managed ${label}: add a line to README.md.`

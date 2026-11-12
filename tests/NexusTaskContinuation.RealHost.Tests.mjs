@@ -11,7 +11,7 @@
 // three-turn tasks to verified completion, restart between turns, SIGKILL at
 // continuation delivery boundaries, interrupted continued turn, concurrent and
 // duplicate continuations, continuation vs verification.
-import { IPC_SUPPORTED, taskOp, assertManagedRefused, declareWindowsIpcGap } from './lib/NexusRealHostPlatform.mjs'
+import { IPC_SUPPORTED, taskOp, assertTaskOk, assertManagedRefused, declareWindowsIpcGap } from './lib/NexusRealHostPlatform.mjs'
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import crypto from 'node:crypto'
@@ -145,7 +145,7 @@ try {
     owner = await ownerClient(ready)
   }
   const repoA = makeRepo('muse', 0)
-  assert.equal((await addWorkspace(repoA)).code, 0)
+  assertTaskOk(assert, await addWorkspace(repoA), 'workspace add')
 
   // ── Ordinary GUI multi-turn session (both modes): unchanged behavior ──────
   {
@@ -186,7 +186,7 @@ try {
 
     // 1. Muse and Dual: three sequential turns -> verification -> completed.
     const repoB = makeRepo('dual', 0)
-    assert.equal((await addWorkspace(repoB)).code, 0)
+    assertTaskOk(assert, await addWorkspace(repoB), 'workspace add')
     for (const [label, ws, modeId, preference] of [['muse-3', repoA, 'engineering-v2', null], ['dual-3', repoB, 'engineering-v1', 'deepseek-codex']]) {
       const t = await submitTurn1(label, ws, modeId, preference)
       const trace = []
